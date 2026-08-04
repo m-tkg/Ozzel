@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem};
 use unicode_segmentation::UnicodeSegmentation;
@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::entry::EntryKind;
 use crate::pane::{Pane, VisibleItem};
 
+const MARK_COL_WIDTH: usize = 1;
 const SIZE_COL_WIDTH: usize = 9;
 const MTIME_COL_WIDTH: usize = 14;
 
@@ -52,12 +53,16 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool) {
         .skip(start)
         .take(viewport_height)
         .map(|(idx, item)| {
-            let text = format_row(item, inner.width as usize);
-            let style = if idx == cursor {
-                Style::default().add_modifier(Modifier::REVERSED)
+            let marked = matches!(item, VisibleItem::Entry(e) if pane.marks.contains(&e.path));
+            let text = format_row(item, inner.width as usize, marked);
+            let mut style = if marked {
+                Style::default().fg(Color::Yellow)
             } else {
                 Style::default()
             };
+            if idx == cursor {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
             ListItem::new(Line::styled(text, style))
         })
         .collect();
@@ -76,7 +81,7 @@ fn scroll_offset(cursor: usize, len: usize, viewport_height: usize) -> usize {
         .min(max_start)
 }
 
-fn format_row(item: &VisibleItem<'_>, width: usize) -> String {
+fn format_row(item: &VisibleItem<'_>, width: usize, marked: bool) -> String {
     let (name, size_text, mtime_text) = match item {
         VisibleItem::Parent => ("..".to_string(), String::new(), String::new()),
         VisibleItem::Entry(e) => {
@@ -90,14 +95,15 @@ fn format_row(item: &VisibleItem<'_>, width: usize) -> String {
         }
     };
 
-    let reserved = SIZE_COL_WIDTH + MTIME_COL_WIDTH + 2; // two single-space separators
+    let mark_col = if marked { "*" } else { " " };
+    let reserved = MARK_COL_WIDTH + SIZE_COL_WIDTH + MTIME_COL_WIDTH + 2; // two single-space separators
     let name_width = width.saturating_sub(reserved).max(3);
 
     let name_col = pad_right_display(&truncate_right(&name, name_width), name_width);
     let size_col = pad_left_display(&size_text, SIZE_COL_WIDTH);
     let mtime_col = pad_left_display(&mtime_text, MTIME_COL_WIDTH);
 
-    format!("{name_col} {size_col} {mtime_col}")
+    format!("{mark_col}{name_col} {size_col} {mtime_col}")
 }
 
 fn human_size(bytes: u64) -> String {
@@ -242,7 +248,13 @@ mod tests {
 
     #[test]
     fn format_row_parent_row_has_no_size_or_mtime() {
-        let row = format_row(&VisibleItem::Parent, 40);
-        assert!(row.starts_with(".."));
+        let row = format_row(&VisibleItem::Parent, 40, false);
+        assert!(row.trim_start().starts_with(".."));
+    }
+
+    #[test]
+    fn format_row_marks_prepend_asterisk() {
+        let row = format_row(&VisibleItem::Parent, 40, true);
+        assert!(row.starts_with('*'));
     }
 }

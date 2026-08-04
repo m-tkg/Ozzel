@@ -3,7 +3,7 @@
 //! land when returning to a directory from one of its children.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -55,6 +55,10 @@ pub struct Pane {
     /// climbs out of a directory, so pressing Backspace and then looking at
     /// the pane shows the cursor sitting back on the directory just left.
     pub cursor_memory: HashMap<PathBuf, String>,
+    /// Paths marked for a bulk copy/move/delete. Survives a plain
+    /// `reload()` of the same directory (re-sort, hidden toggle) but is
+    /// cleared whenever `cwd` actually changes.
+    pub marks: HashSet<PathBuf>,
 }
 
 impl Pane {
@@ -67,6 +71,7 @@ impl Pane {
             ascending: true,
             show_hidden: false,
             cursor_memory: HashMap::new(),
+            marks: HashSet::new(),
         };
         pane.reload()?;
         Ok(pane)
@@ -164,6 +169,7 @@ impl Pane {
         match self.reload() {
             Ok(()) => {
                 self.cursor = 0;
+                self.marks.clear();
                 Ok(())
             }
             Err(err) => {
@@ -187,6 +193,7 @@ impl Pane {
             .map(|n| n.to_string_lossy().into_owned());
 
         self.cwd = parent;
+        self.marks.clear();
         self.reload()?;
 
         match leaving_name {
@@ -209,6 +216,68 @@ impl Pane {
 
     pub fn cycle_sort(&mut self) {
         self.sort = self.sort.next();
+    }
+
+    /// The name of the entry under the cursor, or `None` if the cursor is
+    /// on `..` or the pane is empty.
+    pub fn selected_entry_name(&self) -> Option<String> {
+        match self.visible_entries().get(self.cursor) {
+            Some(VisibleItem::Entry(e)) => Some(e.name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Toggles the mark on whatever is under the cursor (a no-op on `..`
+    /// or an empty pane) and, per dyna-filer convention, advances the
+    /// cursor down one row when a toggle actually happened.
+    pub fn toggle_mark_cursor(&mut self) {
+        let path = match self.visible_entries().get(self.cursor) {
+            Some(VisibleItem::Entry(e)) => Some(e.path.clone()),
+            _ => None,
+        };
+        if let Some(path) = path {
+            self.flip_mark(path);
+            self.move_cursor(1);
+        }
+    }
+
+    /// Toggles the mark on every currently visible real entry (never
+    /// `..`).
+    pub fn toggle_mark_all(&mut self) {
+        let paths: Vec<PathBuf> = self
+            .visible_entries()
+            .into_iter()
+            .filter_map(|item| match item {
+                VisibleItem::Entry(e) => Some(e.path.clone()),
+                VisibleItem::Parent => None,
+            })
+            .collect();
+        for path in paths {
+            self.flip_mark(path);
+        }
+    }
+
+    fn flip_mark(&mut self, path: PathBuf) {
+        if !self.marks.remove(&path) {
+            self.marks.insert(path);
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marks.clear();
+    }
+
+    /// The paths an operation (copy/move/delete) should act on: the marks
+    /// if any exist, otherwise just whatever is under the cursor. Never
+    /// includes the synthetic `..` row.
+    pub fn marked_or_cursor(&self) -> Vec<PathBuf> {
+        if !self.marks.is_empty() {
+            return self.marks.iter().cloned().collect();
+        }
+        match self.visible_entries().get(self.cursor) {
+            Some(VisibleItem::Entry(e)) => vec![e.path.clone()],
+            _ => Vec::new(),
+        }
     }
 
     pub fn toggle_hidden(&mut self) {
@@ -419,5 +488,110 @@ mod tests {
             })
             .collect();
         assert!(names_hidden_on.contains(&".secret".to_string()));
+    }
+
+    fn pane_with_files(names: &[&str]) -> (tempfile::TempDir, Pane) {
+        let dir = tempfile::tempdir().unwrap();
+        for name in names {
+            fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        (dir, pane)
+    }
+
+    #[test]
+    fn marked_or_cursor_falls_back_to_cursor_when_no_marks() {
+        let (_dir, mut pane) = pane_with_files(&["a.txt"]);
+        let idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == "a.txt"))
+            .unwrap();
+        pane.cursor = idx;
+        let targets = pane.marked_or_cursor();
+        assert_eq!(targets, vec![pane.cwd.join("a.txt")]);
+    }
+
+    #[test]
+    fn marked_or_cursor_never_includes_parent_row() {
+        let (_dir, pane) = pane_with_files(&[]);
+        // Cursor sits on ".." (the only row) since the dir is empty.
+        assert!(pane.marked_or_cursor().is_empty());
+    }
+
+    #[test]
+    fn marked_or_cursor_prefers_marks_over_cursor() {
+        let (_dir, mut pane) = pane_with_files(&["a.txt", "b.txt"]);
+        pane.marks.insert(pane.cwd.join("b.txt"));
+        // Cursor is on "a.txt" (or ".."), but marks take priority.
+        assert_eq!(pane.marked_or_cursor(), vec![pane.cwd.join("b.txt")]);
+    }
+
+    #[test]
+    fn toggle_mark_cursor_marks_and_advances() {
+        let (_dir, mut pane) = pane_with_files(&["a.txt", "b.txt"]);
+        let a_idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == "a.txt"))
+            .unwrap();
+        pane.cursor = a_idx;
+
+        pane.toggle_mark_cursor();
+        assert!(pane.marks.contains(&pane.cwd.join("a.txt")));
+        assert_eq!(pane.cursor, a_idx + 1);
+
+        // Toggling again on the same path (moving back up) unmarks it.
+        pane.cursor = a_idx;
+        pane.toggle_mark_cursor();
+        assert!(!pane.marks.contains(&pane.cwd.join("a.txt")));
+    }
+
+    #[test]
+    fn toggle_mark_cursor_on_parent_row_is_a_no_op() {
+        let (_dir, mut pane) = pane_with_files(&["a.txt"]);
+        pane.cursor = 0; // ".." is always first when not at filesystem root
+        assert!(matches!(
+            pane.visible_entries().first(),
+            Some(VisibleItem::Parent)
+        ));
+        pane.toggle_mark_cursor();
+        assert!(pane.marks.is_empty());
+        assert_eq!(pane.cursor, 0);
+    }
+
+    #[test]
+    fn toggle_mark_all_marks_then_unmarks_every_real_entry() {
+        let (_dir, mut pane) = pane_with_files(&["a.txt", "b.txt"]);
+        pane.toggle_mark_all();
+        assert_eq!(pane.marks.len(), 2);
+        pane.toggle_mark_all();
+        assert!(pane.marks.is_empty());
+    }
+
+    #[test]
+    fn marks_survive_reload_but_clear_on_cwd_change() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        pane.marks.insert(dir.path().join("a.txt"));
+
+        pane.reload().unwrap();
+        assert_eq!(pane.marks.len(), 1, "plain reload must not clear marks");
+
+        let sub_idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == "sub"))
+            .unwrap();
+        pane.cursor = sub_idx;
+        pane.enter().unwrap();
+        assert!(pane.marks.is_empty(), "descending must clear marks");
+
+        pane.marks.insert(pane.cwd.join("nonexistent"));
+        pane.go_parent().unwrap();
+        assert!(pane.marks.is_empty(), "go_parent must clear marks");
     }
 }

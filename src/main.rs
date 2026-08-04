@@ -1,7 +1,11 @@
 mod action;
 mod app;
+mod config;
 mod entry;
 mod event;
+mod keymap;
+mod mode;
+mod ops;
 mod pane;
 mod ui;
 
@@ -88,10 +92,13 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let left = resolve_startup_dir(cli.left_dir)?;
     let right = resolve_startup_dir(cli.right_dir)?;
+    // Loaded (and, on a malformed file, rejected) before we ever touch the
+    // terminal so a config typo prints a normal, readable error message.
+    let config = config::load()?;
 
     install_panic_hook();
     let mut guard = TerminalGuard::new()?;
-    let mut app = App::new(left, right)?;
+    let mut app = App::new(left, right, config)?;
 
     run(&mut guard.terminal, &mut app)?;
 
