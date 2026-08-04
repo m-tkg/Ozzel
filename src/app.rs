@@ -3,19 +3,23 @@
 //! hub every Normal-mode key eventually funnels through.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::Context as _;
+use directories::BaseDirs;
 
 use crate::action::Action;
 use crate::config::Config;
+use crate::entry::EntryKind;
 use crate::event::{AppEvent, KeyCode, KeyModifiers, TaskEvent};
+use crate::external::{self, ExternalRequest};
 use crate::filter::FilterSpec;
 use crate::keymap::Keymap;
-use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, TransferKind};
+use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, SelectKind, TransferKind};
 use crate::ops;
 use crate::pane::{PAGE_SIZE, Pane};
+use crate::persist::{Bookmarks, History, Side};
 use crate::tasks::delete as delete_task;
 use crate::tasks::{TaskManager, archive, copy_move};
 
@@ -44,6 +48,18 @@ impl ActivePane {
     }
 }
 
+/// `persist::History` is keyed by a local `Side` type rather than
+/// `ActivePane` directly, so `persist.rs` doesn't have to depend upward on
+/// the app layer; this is the one place that bridges the two.
+impl From<ActivePane> for Side {
+    fn from(pane: ActivePane) -> Self {
+        match pane {
+            ActivePane::Left => Side::Left,
+            ActivePane::Right => Side::Right,
+        }
+    }
+}
+
 /// One line in the log area.
 #[derive(Debug, Clone)]
 pub struct LogLine {
@@ -64,6 +80,24 @@ pub struct App {
     /// (`tasks` holds the sender side). Drained once per main-loop
     /// iteration by `drain_tasks`, ahead of the next terminal poll.
     task_rx: mpsc::Receiver<TaskEvent>,
+    /// Per-pane visited-directory rings. Loaded/saved entirely by the
+    /// caller (`main.rs`) — `App` itself never touches disk, so
+    /// constructing an `App` in a test never has a side effect on the
+    /// real user's `~/.local/share/ozzel/`. Starts empty; `main.rs`
+    /// overwrites it with `persist::load_history()`'s result right after
+    /// `App::new` returns.
+    pub history: History,
+    /// Bookmarked directories; same load/save-is-the-caller's-job story as
+    /// `history`.
+    pub bookmarks: Bookmarks,
+    /// Set whenever `bookmarks` is mutated; `main.rs`'s loop checks this
+    /// once per iteration and saves (clearing the flag) when set, per the
+    /// plan's "save ... after bookmark changes".
+    pub bookmarks_dirty: bool,
+    /// Set by `:` (arbitrary command) and `e` (editor); `main.rs`'s loop
+    /// takes this after each event and, if present, suspends the TUI to
+    /// run it via `external::run_suspended`.
+    pub pending_external: Option<ExternalRequest>,
 }
 
 impl App {
@@ -84,6 +118,10 @@ impl App {
             log: VecDeque::new(),
             tasks: TaskManager::new(tx),
             task_rx,
+            history: History::default(),
+            bookmarks: Bookmarks::default(),
+            bookmarks_dirty: false,
+            pending_external: None,
         })
     }
 
@@ -108,6 +146,14 @@ impl App {
 
     pub fn log_error(&mut self, message: impl Into<String>) {
         self.log_push(message.into(), true);
+    }
+
+    /// Public entry point for `main.rs` to call after resuming from a
+    /// suspended external command (per the plan's loop sketch): the
+    /// child process may have created/deleted/renamed files under either
+    /// pane, so both get a full reload.
+    pub fn refresh_panes(&mut self) {
+        self.reload_both();
     }
 
     /// Reloads both panes, trying to keep each pane's cursor on the
@@ -172,6 +218,7 @@ impl App {
                     }
                 }
                 Mode::Filter { .. } => self.handle_filter_key(code, modifiers),
+                Mode::Select { .. } => self.handle_select_key(code),
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
             },
@@ -184,7 +231,7 @@ impl App {
     /// the outside (errors are logged instead of propagated) so the input
     /// loop never has to think about failure.
     pub fn dispatch(&mut self, action: Action) {
-        let result = match action {
+        let result: anyhow::Result<()> = match action {
             Action::CursorUp => {
                 self.active_pane_mut().move_cursor(-1);
                 Ok(())
@@ -213,8 +260,14 @@ impl App {
                 self.active = self.active.other();
                 Ok(())
             }
-            Action::Enter => self.active_pane_mut().enter(),
-            Action::Parent => self.active_pane_mut().go_parent(),
+            Action::Enter => {
+                self.handle_enter();
+                Ok(())
+            }
+            Action::Parent => {
+                self.navigate(|pane| pane.go_parent());
+                Ok(())
+            }
             Action::CycleSort => {
                 self.active_pane_mut().cycle_sort();
                 Ok(())
@@ -280,6 +333,37 @@ impl App {
                 self.begin_unzip();
                 Ok(())
             }
+            Action::HistoryJump => {
+                self.begin_history_jump();
+                Ok(())
+            }
+            Action::BookmarkJump => {
+                self.begin_bookmark_jump();
+                Ok(())
+            }
+            Action::BookmarkAdd => {
+                self.begin_bookmark_add();
+                Ok(())
+            }
+            Action::GoHome => {
+                self.begin_go_home();
+                Ok(())
+            }
+            Action::CommandLine => {
+                self.mode = Mode::Prompt {
+                    kind: PromptKind::Command,
+                    input: LineEditor::new(),
+                };
+                Ok(())
+            }
+            Action::OpenEditor => {
+                self.begin_open_editor();
+                Ok(())
+            }
+            Action::OpenDefault => {
+                self.begin_open_default();
+                Ok(())
+            }
             Action::Quit => {
                 self.begin_quit();
                 Ok(())
@@ -308,6 +392,230 @@ impl App {
             message,
             on_yes: PendingOp::Quit,
         };
+    }
+
+    /// Runs `f` against the active pane and, if its `cwd` actually
+    /// changed, records the new directory in `history`. The shared
+    /// entry point for every cwd-changing action (`Enter`, `Parent`,
+    /// history/bookmark/home jumps) so history recording lives in exactly
+    /// one place instead of being duplicated at each call site.
+    fn navigate(&mut self, f: impl FnOnce(&mut Pane) -> anyhow::Result<()>) {
+        let before = self.active_pane().cwd.clone();
+        let result = f(self.active_pane_mut());
+        self.record_history_if_changed(&before);
+        if let Err(err) = result {
+            self.log_error(err.to_string());
+        }
+    }
+
+    fn record_history_if_changed(&mut self, before: &Path) {
+        let after = self.active_pane().cwd.clone();
+        if after.as_path() != before {
+            self.history.record(self.active.into(), after);
+        }
+    }
+
+    fn jump_active_pane_to(&mut self, path: PathBuf) {
+        self.navigate(|pane| pane.jump_to(path));
+    }
+
+    /// `Enter`'s dyna-filer behavior: `..`/directories navigate (and get
+    /// recorded in history via `navigate`); anything else opens with the
+    /// OS default handler, same as `OpenDefault`.
+    fn handle_enter(&mut self) {
+        let pane = self.active_pane();
+        // `..`/directories navigate (via `Pane::enter`, which already
+        // handles both — and is a safe no-op on an empty pane); anything
+        // else with a real kind (file, symlink) opens instead.
+        let open_path = match pane.selected_entry_kind() {
+            Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
+            _ => None,
+        };
+        match open_path {
+            Some(path) => self.open_with_default(&path),
+            None => self.navigate(|pane| pane.enter()),
+        }
+    }
+
+    fn begin_history_jump(&mut self) {
+        let ring = self.history.ring(self.active.into());
+        if ring.is_empty() {
+            self.log_error("no history for this pane yet");
+            return;
+        }
+        let items = ring
+            .iter()
+            .map(|p| (p.display().to_string(), p.clone()))
+            .collect();
+        self.mode = Mode::Select {
+            kind: SelectKind::History,
+            title: "History".to_string(),
+            items,
+            cursor: 0,
+        };
+    }
+
+    fn begin_bookmark_jump(&mut self) {
+        if self.bookmarks.paths.is_empty() {
+            self.log_error("no bookmarks yet");
+            return;
+        }
+        let items = self
+            .bookmarks
+            .paths
+            .iter()
+            .map(|p| (p.display().to_string(), p.clone()))
+            .collect();
+        self.mode = Mode::Select {
+            kind: SelectKind::Bookmark,
+            title: "Bookmarks".to_string(),
+            items,
+            cursor: 0,
+        };
+    }
+
+    fn begin_bookmark_add(&mut self) {
+        let cwd = self.active_pane().cwd.clone();
+        if self.bookmarks.add(cwd.clone()) {
+            self.bookmarks_dirty = true;
+            self.log_info(format!("bookmarked: {}", cwd.display()));
+        } else {
+            self.log_info(format!("already bookmarked: {}", cwd.display()));
+        }
+    }
+
+    fn begin_go_home(&mut self) {
+        let home = self
+            .config
+            .home
+            .clone()
+            .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()));
+        let Some(home) = home else {
+            self.log_error("could not determine home directory");
+            return;
+        };
+        if !home.is_dir() {
+            self.log_error(format!("not a directory: {}", home.display()));
+            return;
+        }
+        self.jump_active_pane_to(home);
+    }
+
+    /// Fixed navigation keys for `Mode::Select`; never consults the
+    /// keymap. Up/Down move the highlight, Enter jumps the active pane
+    /// there, Esc cancels, `d` deletes the highlighted bookmark (a no-op
+    /// outside the bookmark menu).
+    fn handle_select_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up => {
+                if let Mode::Select { cursor, .. } = &mut self.mode {
+                    *cursor = cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Mode::Select { cursor, items, .. } = &mut self.mode
+                    && *cursor + 1 < items.len()
+                {
+                    *cursor += 1;
+                }
+            }
+            KeyCode::Enter => self.commit_select(),
+            KeyCode::Char('d') => self.delete_selected_bookmark(),
+            _ => {}
+        }
+    }
+
+    fn commit_select(&mut self) {
+        let target = match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Select { items, cursor, .. } => {
+                items.into_iter().nth(cursor).map(|(_, path)| path)
+            }
+            other => {
+                self.mode = other;
+                None
+            }
+        };
+        if let Some(path) = target {
+            self.jump_active_pane_to(path);
+        }
+    }
+
+    fn delete_selected_bookmark(&mut self) {
+        let removed_path = {
+            let Mode::Select {
+                kind: SelectKind::Bookmark,
+                items,
+                cursor,
+                ..
+            } = &mut self.mode
+            else {
+                return;
+            };
+            if items.is_empty() || *cursor >= items.len() {
+                return;
+            }
+            let (_, path) = items.remove(*cursor);
+            if *cursor >= items.len() {
+                *cursor = items.len().saturating_sub(1);
+            }
+            path
+        };
+        self.bookmarks.remove_path(&removed_path);
+        self.bookmarks_dirty = true;
+        self.log_info(format!("removed bookmark: {}", removed_path.display()));
+    }
+
+    /// Only fires on a file (never a directory): opens `config.editor`
+    /// (falling back to `$EDITOR`) suspended, without the "press any key"
+    /// pause — editors already take over the whole screen and hand control
+    /// back cleanly on their own.
+    fn begin_open_editor(&mut self) {
+        let pane = self.active_pane();
+        let target = match pane.selected_entry_kind() {
+            Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
+            _ => None,
+        };
+        let Some(path) = target else {
+            self.log_error("cursor is not on a file");
+            return;
+        };
+
+        let editor = self
+            .config
+            .editor
+            .clone()
+            .or_else(|| std::env::var("EDITOR").ok())
+            .filter(|s| !s.trim().is_empty());
+        let Some(editor) = editor else {
+            self.log_error("no editor configured (set editor in config.toml or $EDITOR)");
+            return;
+        };
+
+        let cmdline = format!(
+            "{editor} {}",
+            external::shell_quote(&path.to_string_lossy())
+        );
+        let cwd = self.active_pane().cwd.clone();
+        self.pending_external = Some(ExternalRequest {
+            cmdline,
+            cwd,
+            pause_after: false,
+        });
+    }
+
+    fn begin_open_default(&mut self) {
+        match self.active_pane().selected_entry_path() {
+            Some(path) => self.open_with_default(&path),
+            None => self.log_error("no entry selected to open"),
+        }
+    }
+
+    fn open_with_default(&mut self, path: &Path) {
+        match open::that_detached(path) {
+            Ok(()) => self.log_info(format!("opened {}", path.display())),
+            Err(err) => self.log_error(format!("failed to open {}: {err}", path.display())),
+        }
     }
 
     fn begin_rename(&mut self) {
@@ -477,7 +785,24 @@ impl App {
                 self.reload_both();
             }
             PromptKind::ZipName { targets } => self.commit_zip_name(targets, value),
+            PromptKind::Command => self.commit_command(value),
         }
+    }
+
+    /// Empty input cancels silently (matches Esc). A non-empty command is
+    /// queued as `pending_external`; `main.rs`'s loop is what actually
+    /// suspends the TUI and runs it, since that needs `&mut Terminal`,
+    /// which `App` doesn't have.
+    fn commit_command(&mut self, cmdline: String) {
+        if cmdline.trim().is_empty() {
+            return;
+        }
+        let cwd = self.active_pane().cwd.clone();
+        self.pending_external = Some(ExternalRequest {
+            cmdline,
+            cwd,
+            pause_after: true,
+        });
     }
 
     fn commit_zip_name(&mut self, targets: Vec<PathBuf>, name: String) {
@@ -925,5 +1250,296 @@ mod tests {
         wait_for_tasks_done(&mut app);
         assert!(right.path().join("a.txt").exists());
         assert!(right.path().join("b.txt").exists());
+    }
+
+    #[test]
+    fn enter_on_directory_navigates_and_records_history() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "sub");
+
+        app.dispatch(Action::Enter);
+        assert_eq!(app.panes[0].cwd, dir.path().join("sub"));
+        assert_eq!(
+            app.history.ring(Side::Left).first(),
+            Some(&dir.path().join("sub"))
+        );
+    }
+
+    #[test]
+    fn parent_navigation_also_records_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = test_app(&sub, &sub);
+
+        app.dispatch(Action::Parent);
+        assert_eq!(app.panes[0].cwd, dir.path());
+        assert_eq!(
+            app.history.ring(Side::Left).first(),
+            Some(&dir.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn go_home_jumps_to_configured_home_and_records_history() {
+        let start = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            start.path().to_path_buf(),
+            start.path().to_path_buf(),
+            Config {
+                home: Some(home.path().to_path_buf()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        app.dispatch(Action::GoHome);
+        assert_eq!(app.panes[0].cwd, home.path());
+        assert_eq!(
+            app.history.ring(Side::Left).first(),
+            Some(&home.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn go_home_errors_and_stays_put_when_configured_home_is_missing() {
+        let start = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            start.path().to_path_buf(),
+            start.path().to_path_buf(),
+            Config {
+                home: Some(PathBuf::from("/does/not/exist/at/all/ozzel-test")),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        app.dispatch(Action::GoHome);
+        assert_eq!(app.panes[0].cwd, start.path());
+        assert!(app.log.iter().any(|l| l.is_error));
+    }
+
+    #[test]
+    fn bookmark_add_dedups_and_marks_dirty_only_when_actually_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        assert!(!app.bookmarks_dirty);
+
+        app.dispatch(Action::BookmarkAdd);
+        assert_eq!(app.bookmarks.paths, vec![dir.path().to_path_buf()]);
+        assert!(app.bookmarks_dirty);
+
+        app.bookmarks_dirty = false;
+        app.dispatch(Action::BookmarkAdd); // duplicate
+        assert_eq!(app.bookmarks.paths.len(), 1, "must not add a duplicate");
+        assert!(
+            !app.bookmarks_dirty,
+            "a no-op add must not mark dirty again"
+        );
+    }
+
+    #[test]
+    fn bookmark_jump_menu_enter_navigates_active_pane() {
+        let target = tempfile::tempdir().unwrap();
+        let start = tempfile::tempdir().unwrap();
+        let mut app = test_app(start.path(), start.path());
+        app.bookmarks.add(target.path().to_path_buf());
+
+        app.dispatch(Action::BookmarkJump);
+        assert!(matches!(
+            app.mode,
+            Mode::Select {
+                kind: SelectKind::Bookmark,
+                ..
+            }
+        ));
+
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.panes[0].cwd, target.path());
+    }
+
+    #[test]
+    fn bookmark_jump_menu_esc_cancels_without_navigating() {
+        let target = tempfile::tempdir().unwrap();
+        let start = tempfile::tempdir().unwrap();
+        let mut app = test_app(start.path(), start.path());
+        app.bookmarks.add(target.path().to_path_buf());
+
+        app.dispatch(Action::BookmarkJump);
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.panes[0].cwd, start.path(), "Esc must not navigate");
+    }
+
+    #[test]
+    fn bookmark_menu_down_then_d_deletes_the_highlighted_entry() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let start = tempfile::tempdir().unwrap();
+        let mut app = test_app(start.path(), start.path());
+        app.bookmarks.add(a.path().to_path_buf());
+        app.bookmarks.add(b.path().to_path_buf());
+
+        app.dispatch(Action::BookmarkJump);
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert_eq!(app.bookmarks.paths, vec![a.path().to_path_buf()]);
+        assert!(app.bookmarks_dirty);
+        match &app.mode {
+            Mode::Select { items, .. } => {
+                assert_eq!(items.len(), 1, "menu list must refresh after delete")
+            }
+            other => panic!("expected Select mode to stay open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_jump_menu_lists_most_recent_first_and_selects() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        select_entry_named(&mut app, "sub");
+        app.dispatch(Action::Enter); // history: [sub]
+        app.dispatch(Action::Parent); // history: [dir, sub]
+
+        app.dispatch(Action::HistoryJump);
+        assert!(matches!(
+            app.mode,
+            Mode::Select {
+                kind: SelectKind::History,
+                ..
+            }
+        ));
+
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.panes[0].cwd, sub);
+    }
+
+    #[test]
+    fn history_jump_with_empty_history_logs_error_instead_of_opening_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::HistoryJump);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.log.iter().any(|l| l.is_error));
+    }
+
+    #[test]
+    fn command_line_prompt_commit_sets_pending_external() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::CommandLine);
+        assert!(matches!(
+            app.mode,
+            Mode::Prompt {
+                kind: PromptKind::Command,
+                ..
+            }
+        ));
+
+        for c in "ls -la".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.mode, Mode::Normal));
+        let req = app
+            .pending_external
+            .take()
+            .expect("expected a pending external request");
+        assert_eq!(req.cmdline, "ls -la");
+        assert_eq!(req.cwd, dir.path());
+        assert!(req.pause_after);
+    }
+
+    #[test]
+    fn command_line_empty_input_cancels_without_pending_external() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::CommandLine);
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.pending_external.is_none());
+    }
+
+    #[test]
+    fn open_editor_queues_suspended_command_with_configured_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), b"hi").unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                editor: Some("vim".to_string()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "file.txt");
+
+        app.dispatch(Action::OpenEditor);
+        let req = app
+            .pending_external
+            .take()
+            .expect("expected a pending external request");
+        assert!(
+            req.cmdline.starts_with("vim "),
+            "cmdline was: {}",
+            req.cmdline
+        );
+        assert!(req.cmdline.contains("file.txt"));
+        assert!(
+            !req.pause_after,
+            "editors don't get the press-any-key pause"
+        );
+    }
+
+    #[test]
+    fn open_editor_errors_when_cursor_is_on_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                editor: Some("vim".to_string()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "sub");
+
+        app.dispatch(Action::OpenEditor);
+        assert!(app.pending_external.is_none());
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.contains("not on a file"))
+        );
+    }
+
+    #[test]
+    fn open_default_errors_when_no_entry_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        // Cursor starts on ".." (index 0): a tempdir always has a real
+        // parent, so nothing is "selected" for OpenDefault's purposes.
+        app.dispatch(Action::OpenDefault);
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.contains("no entry selected"))
+        );
     }
 }

@@ -21,15 +21,14 @@ pub enum DeleteBehavior {
     Permanent,
 }
 
-/// `home`/`editor` are parsed now so the config file's shape is stable,
-/// even though nothing consumes them until later phases (jump-to-home key,
-/// external editor launch).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
-#[allow(dead_code, reason = "home/editor land in a later phase")]
 pub struct Config {
     pub delete_behavior: DeleteBehavior,
+    /// Directory `GoHome` (`~`/`H`) jumps to; falls back to the OS home
+    /// directory when unset.
     pub home: Option<PathBuf>,
+    /// Editor command `OpenEditor` (`e`) runs; falls back to `$EDITOR`.
     pub editor: Option<String>,
     pub keys: HashMap<String, String>,
 }

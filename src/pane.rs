@@ -185,12 +185,17 @@ impl Pane {
 
         match target {
             Target::Parent => self.go_parent(),
-            Target::Descend(path) => self.descend(path),
+            Target::Descend(path) => self.jump_to(path),
             Target::None => Ok(()),
         }
     }
 
-    fn descend(&mut self, path: PathBuf) -> Result<()> {
+    /// Changes `cwd` to an arbitrary directory — descending into a
+    /// subdirectory via `enter()`, or jumping there from a history/
+    /// bookmark/home menu selection. Resets cursor/marks/filter on
+    /// success; reverts (and reloads the old `cwd` back) on failure, so a
+    /// bad jump target never leaves the pane stuck mid-transition.
+    pub fn jump_to(&mut self, path: PathBuf) -> Result<()> {
         let previous = std::mem::replace(&mut self.cwd, path);
         match self.reload() {
             Ok(()) => {
@@ -251,6 +256,27 @@ impl Pane {
     pub fn selected_entry_name(&self) -> Option<String> {
         match self.visible_entries().get(self.cursor) {
             Some(VisibleItem::Entry(e)) => Some(e.name.clone()),
+            _ => None,
+        }
+    }
+
+    /// The full path of the entry under the cursor (file or directory),
+    /// or `None` if the cursor is on `..` or the pane is empty. Used by
+    /// `OpenDefault`/`OpenEditor`, which act on whatever's selected
+    /// regardless of kind.
+    pub fn selected_entry_path(&self) -> Option<PathBuf> {
+        match self.visible_entries().get(self.cursor) {
+            Some(VisibleItem::Entry(e)) => Some(e.path.clone()),
+            _ => None,
+        }
+    }
+
+    /// The kind of the entry under the cursor, or `None` for `..`/empty.
+    /// Used to decide whether `Enter` should navigate (dirs) or open with
+    /// the OS default handler (everything else, dyna-filer style).
+    pub fn selected_entry_kind(&self) -> Option<EntryKind> {
+        match self.visible_entries().get(self.cursor) {
+            Some(VisibleItem::Entry(e)) => Some(e.kind),
             _ => None,
         }
     }

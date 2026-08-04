@@ -56,6 +56,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 .map(str::to_string);
             modal::render_filter_line(frame, rows[2], &app.mode, error.as_deref());
         }
+        Mode::Select { .. } => {
+            render_status_bar(frame, rows[2], app);
+            modal::render_select(frame, area, &app.mode);
+        }
         Mode::Prompt { .. } => modal::render_prompt_line(frame, rows[2], &app.mode),
         Mode::Confirm { message, .. } => {
             render_status_bar(frame, rows[2], app);
@@ -65,23 +69,31 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
+/// One line, built from whatever's actually relevant right now (active
+/// filter, mark count, running-task count) followed by a keybinding hint,
+/// all cut off by the terminal's own width if it doesn't fit.
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let marks = app.active_pane().marks.len();
-    let marks_text = if marks > 0 {
-        format!("{marks} marked  |  ")
-    } else {
+    let pane = app.active_pane();
+    let mut segments = Vec::new();
+    if let Some(filter) = &pane.filter {
+        segments.push(format!("flt:{}", filter.raw));
+    }
+    if !pane.marks.is_empty() {
+        segments.push(format!("{} marked", pane.marks.len()));
+    }
+    if !app.tasks.running.is_empty() {
+        segments.push(format!("{} running", app.tasks.running.len()));
+    }
+    let info = if segments.is_empty() {
         String::new()
-    };
-    let tasks_text = if app.tasks.running.is_empty() {
-        String::new()
     } else {
-        format!("{} running  |  ", app.tasks.running.len())
+        format!("{}  |  ", segments.join("  "))
     };
+
     let status = Paragraph::new(format!(
-        " {}{}{}  |  q:quit  Tab:switch  Space:mark  C/M/D/R/K  s:sort  .:hidden",
-        tasks_text,
-        marks_text,
-        app.active_pane().cwd.display()
+        " {}{}  |  q:quit  Tab:switch  Space:mark  C/M/D/R/K  h:hist  b:bkmk  ~:home  ::cmd  e:edit  x:open",
+        info,
+        pane.cwd.display()
     ))
     .style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(status, area);

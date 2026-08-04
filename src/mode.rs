@@ -20,6 +20,16 @@ pub enum PromptKind {
     ZipName {
         targets: Vec<PathBuf>,
     },
+    /// Collecting a `:`-command line to run with the TUI suspended.
+    Command,
+}
+
+/// Which jump menu a `Mode::Select` is showing — `d` (delete) only makes
+/// sense for `Bookmark`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectKind {
+    History,
+    Bookmark,
 }
 
 /// Which direction a marked-or-cursor transfer is going.
@@ -64,6 +74,15 @@ pub enum Mode {
     /// active pane's `Pane.filter` (see `App::handle_filter_key`).
     Filter {
         input: LineEditor,
+    },
+    /// A centered jump menu (history or bookmarks): up/down move, Enter
+    /// selects (the active pane cd's there), Esc cancels, and `d` deletes
+    /// the highlighted entry when `kind` is `Bookmark`.
+    Select {
+        kind: SelectKind,
+        title: String,
+        items: Vec<(String, PathBuf)>,
+        cursor: usize,
     },
     Prompt {
         kind: PromptKind,

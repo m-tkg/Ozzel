@@ -117,7 +117,11 @@ impl Keymap {
     /// are the copy/move/delete/rename/mkdir commands, `w` swaps panes,
     /// `f`/`/` start an incremental filter (Esc clears one that's active),
     /// `p` zips the marked-or-cursor selection, `u` unzips the file under
-    /// the cursor, and `q`/Ctrl+C quit.
+    /// the cursor, `h`/`b` open the history/bookmark jump menus, `B` adds
+    /// a bookmark, `~`/`H` jump to home, `:` runs a shell command (TUI
+    /// suspended), `e` opens the cursor file in an editor (suspended,
+    /// no pause), `x`/`o` open the cursor entry with the OS default
+    /// handler, and `q`/Ctrl+C quit.
     pub fn default_dyna() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -146,6 +150,15 @@ impl Keymap {
             ("esc", ClearFilter),
             ("p", ZipMarked),
             ("u", Unzip),
+            ("h", HistoryJump),
+            ("b", BookmarkJump),
+            ("B", BookmarkAdd),
+            ("~", GoHome),
+            ("H", GoHome),
+            (":", CommandLine),
+            ("e", OpenEditor),
+            ("x", OpenDefault),
+            ("o", OpenDefault),
             ("q", Quit),
             ("C-c", Quit),
         ];
@@ -305,6 +318,47 @@ mod tests {
         assert_eq!(
             km.resolve(KeyCode::Char('p'), KeyModifiers::NONE),
             Some(Action::ZipMarked)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_history_bookmark_home_and_external_keys() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('h'), KeyModifiers::NONE),
+            Some(Action::HistoryJump)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('b'), KeyModifiers::NONE),
+            Some(Action::BookmarkJump)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('B'), KeyModifiers::SHIFT),
+            Some(Action::BookmarkAdd)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('~'), KeyModifiers::NONE),
+            Some(Action::GoHome)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('H'), KeyModifiers::SHIFT),
+            Some(Action::GoHome)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char(':'), KeyModifiers::NONE),
+            Some(Action::CommandLine)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('e'), KeyModifiers::NONE),
+            Some(Action::OpenEditor)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
+            Some(Action::OpenDefault)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('o'), KeyModifiers::NONE),
+            Some(Action::OpenDefault)
         );
     }
 

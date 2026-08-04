@@ -5,7 +5,8 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::mode::{Mode, PromptKind};
@@ -21,6 +22,7 @@ pub fn render_prompt_line(frame: &mut Frame, area: Rect, mode: &Mode) {
         PromptKind::Rename { .. } => "Rename: ",
         PromptKind::Mkdir => "New directory: ",
         PromptKind::ZipName { .. } => "Zip as: ",
+        PromptKind::Command => ": ",
     };
     render_input_line(frame, area, label, input, None);
 }
@@ -56,6 +58,49 @@ fn render_input_line(
     let col = area.x + UnicodeWidthStr::width(label) as u16 + input.cursor_display_col() as u16;
     let col = col.min(area.x + area.width.saturating_sub(1));
     frame.set_cursor_position((col, area.y));
+}
+
+/// Draws the centered `Select` jump menu (history/bookmarks) on top of
+/// `area` (normally the whole frame). No-op if `mode` is not `Select`.
+pub fn render_select(frame: &mut Frame, area: Rect, mode: &Mode) {
+    let Mode::Select {
+        title,
+        items,
+        cursor,
+        ..
+    } = mode
+    else {
+        return;
+    };
+
+    let inner_width = items
+        .iter()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(title.as_str()));
+    let width = (inner_width as u16 + 4).clamp(1, area.width);
+    let height = (items.len() as u16 + 2).clamp(1, area.height);
+    let popup = centered_rect(area, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default().title(title.as_str()).borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows: Vec<ListItem> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, _))| {
+            let style = if idx == *cursor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::styled(label.clone(), style))
+        })
+        .collect();
+    frame.render_widget(List::new(rows), inner);
 }
 
 /// Draws a centered confirm box with `message` on top of `area` (normally

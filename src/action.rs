@@ -32,5 +32,12 @@ pub enum Action {
     ClearFilter,
     ZipMarked,
     Unzip,
+    HistoryJump,
+    BookmarkJump,
+    BookmarkAdd,
+    GoHome,
+    CommandLine,
+    OpenEditor,
+    OpenDefault,
     Quit,
 }

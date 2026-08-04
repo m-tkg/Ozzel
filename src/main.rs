@@ -3,11 +3,13 @@ mod app;
 mod config;
 mod entry;
 mod event;
+mod external;
 mod filter;
 mod keymap;
 mod mode;
 mod ops;
 mod pane;
+mod persist;
 mod tasks;
 mod ui;
 
@@ -102,7 +104,32 @@ fn main() -> anyhow::Result<()> {
     let mut guard = TerminalGuard::new()?;
     let mut app = App::new(left, right, config)?;
 
+    // History/bookmarks are loaded after the terminal is already up (unlike
+    // config): a missing or corrupt file here is never fatal, just an
+    // empty-defaults-plus-a-log-line situation, so there's no reason to
+    // gate terminal startup on it the way a malformed config does.
+    let (history, history_warning) = persist::load_history();
+    let (bookmarks, bookmarks_warning) = persist::load_bookmarks();
+    app.history = history;
+    app.bookmarks = bookmarks;
+    if let Some(msg) = history_warning {
+        app.log_error(msg);
+    }
+    if let Some(msg) = bookmarks_warning {
+        app.log_error(msg);
+    }
+
     run(&mut guard.terminal, &mut app)?;
+
+    // Best-effort: the terminal is about to be restored by `guard`'s Drop
+    // regardless, so a save failure here has nowhere good to be shown —
+    // logged to stderr rather than silently dropped.
+    if let Err(err) = persist::save_history(&app.history) {
+        eprintln!("ozzel: failed to save history: {err}");
+    }
+    if let Err(err) = persist::save_bookmarks(&app.bookmarks) {
+        eprintln!("ozzel: failed to save bookmarks: {err}");
+    }
 
     Ok(())
 }
@@ -118,6 +145,27 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> anyh
 
         let event = event::read_event(Duration::from_millis(50))?;
         app.handle_event(event);
+
+        // `:` and `e` queue a suspend request rather than running the
+        // child process inline, since only `main.rs` holds the `Terminal`
+        // handle `external::run_suspended` needs to leave/re-enter the
+        // alternate screen around it.
+        if let Some(req) = app.pending_external.take() {
+            match external::run_suspended(terminal, &req) {
+                Ok(Some(spawn_error)) => app.log_error(spawn_error),
+                Ok(None) => {}
+                Err(err) => return Err(err),
+            }
+            app.drain_tasks();
+            app.refresh_panes();
+        }
+
+        if app.bookmarks_dirty {
+            if let Err(err) = persist::save_bookmarks(&app.bookmarks) {
+                app.log_error(format!("failed to save bookmarks: {err}"));
+            }
+            app.bookmarks_dirty = false;
+        }
 
         if app.should_quit {
             break;
