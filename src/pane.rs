@@ -84,6 +84,20 @@ impl Pane {
         Ok(())
     }
 
+    /// Like `reload`, but tries to keep the cursor on the same-named entry
+    /// it was on before the reload (falling back to `reload`'s plain index
+    /// clamp when there was no prior selection, or it's gone). Used after
+    /// a background task finishes, since the listing may have changed size
+    /// or order out from under the cursor.
+    pub fn reload_preserving_cursor(&mut self) -> Result<()> {
+        let previous = self.selected_entry_name();
+        self.reload()?;
+        if let Some(name) = previous {
+            self.restore_cursor_onto(&name);
+        }
+        Ok(())
+    }
+
     pub fn is_root(&self) -> bool {
         self.cwd.parent().is_none()
     }

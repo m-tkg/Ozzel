@@ -1,19 +1,22 @@
 //! Top-level application state: the two panes, which one is active, the
-//! current input mode, and the `Action` dispatch hub every Normal-mode key
-//! eventually funnels through.
+//! current input mode, running background tasks, and the `Action` dispatch
+//! hub every Normal-mode key eventually funnels through.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::mpsc;
 
 use anyhow::Context as _;
 
 use crate::action::Action;
 use crate::config::Config;
-use crate::event::{AppEvent, KeyCode, KeyModifiers};
+use crate::event::{AppEvent, KeyCode, KeyModifiers, TaskEvent};
 use crate::keymap::Keymap;
 use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, TransferKind};
 use crate::ops;
 use crate::pane::{PAGE_SIZE, Pane};
+use crate::tasks::delete as delete_task;
+use crate::tasks::{TaskManager, copy_move};
 
 /// Log lines are capped so a long session's log can't grow without bound.
 const LOG_CAPACITY: usize = 500;
@@ -55,6 +58,11 @@ pub struct App {
     pub config: Config,
     pub keymap: Keymap,
     pub log: VecDeque<LogLine>,
+    pub tasks: TaskManager,
+    /// The receiving end of every worker thread's `Sender<TaskEvent>` clone
+    /// (`tasks` holds the sender side). Drained once per main-loop
+    /// iteration by `drain_tasks`, ahead of the next terminal poll.
+    task_rx: mpsc::Receiver<TaskEvent>,
 }
 
 impl App {
@@ -63,6 +71,7 @@ impl App {
         keymap
             .merge_overrides(&config.keys)
             .context("invalid [keys] entry in config")?;
+        let (tx, task_rx) = mpsc::channel();
 
         Ok(Self {
             panes: [Pane::new(left)?, Pane::new(right)?],
@@ -72,6 +81,8 @@ impl App {
             config,
             keymap,
             log: VecDeque::new(),
+            tasks: TaskManager::new(tx),
+            task_rx,
         })
     }
 
@@ -98,9 +109,13 @@ impl App {
         self.log_push(message.into(), true);
     }
 
+    /// Reloads both panes, trying to keep each pane's cursor on the
+    /// same-named entry it was on before (see
+    /// `Pane::reload_preserving_cursor`). Reload failures are logged, not
+    /// propagated — one pane's unreadable directory shouldn't crash the UI.
     fn reload_both(&mut self) {
         for pane in &mut self.panes {
-            if let Err(err) = pane.reload() {
+            if let Err(err) = pane.reload_preserving_cursor() {
                 self.log.push_back(LogLine {
                     message: err.to_string(),
                     is_error: true,
@@ -109,24 +124,57 @@ impl App {
         }
     }
 
+    /// Drains every `TaskEvent` currently waiting on the channel. Called
+    /// once per main-loop iteration, before the next terminal poll, so
+    /// progress/log/finish handling never waits behind a keystroke.
+    pub fn drain_tasks(&mut self) {
+        while let Ok(event) = self.task_rx.try_recv() {
+            self.handle_event(AppEvent::Task(event));
+        }
+    }
+
+    fn handle_task_event(&mut self, event: TaskEvent) {
+        if let TaskEvent::Log { line, .. } = &event {
+            self.log_info(line.clone());
+        }
+        let finished = matches!(event, TaskEvent::Finished { .. });
+
+        if let Some((summary, is_error)) = self.tasks.apply_event(&event) {
+            if is_error {
+                self.log_error(summary);
+            } else {
+                self.log_info(summary);
+            }
+        }
+
+        if finished {
+            // A finished transfer/delete may have touched either pane
+            // (source and destination), so reload and unmark both rather
+            // than trying to track exactly which one.
+            self.reload_both();
+            for pane in &mut self.panes {
+                pane.clear_marks();
+            }
+        }
+    }
+
     /// Routes a normalized terminal event: `Normal` mode consults the
     /// `Keymap`, `Prompt`/`Confirm` consume fixed editing/confirmation keys
-    /// directly (they never look at the keymap). `Tick` is a no-op.
+    /// directly (they never look at the keymap). `Task` events update
+    /// running-task state and the log; `Tick` is a no-op.
     pub fn handle_event(&mut self, event: AppEvent) {
-        let AppEvent::Input(code, modifiers) = event else {
-            return;
-        };
-
-        // Snapshot which mode we're in so the match below doesn't need a
-        // live borrow of `self.mode` while also calling `&mut self` methods.
-        match &self.mode {
-            Mode::Normal => {
-                if let Some(action) = self.keymap.resolve(code, modifiers) {
-                    self.dispatch(action);
+        match event {
+            AppEvent::Input(code, modifiers) => match &self.mode {
+                Mode::Normal => {
+                    if let Some(action) = self.keymap.resolve(code, modifiers) {
+                        self.dispatch(action);
+                    }
                 }
-            }
-            Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
-            Mode::Confirm { .. } => self.handle_confirm_key(code),
+                Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
+                Mode::Confirm { .. } => self.handle_confirm_key(code),
+            },
+            AppEvent::Task(task_event) => self.handle_task_event(task_event),
+            AppEvent::Tick => {}
         }
     }
 
@@ -178,9 +226,8 @@ impl App {
                 Ok(())
             }
             Action::Refresh => {
-                let left = self.panes[0].reload();
-                let right = self.panes[1].reload();
-                left.and(right)
+                self.reload_both();
+                Ok(())
             }
             Action::Mark => {
                 self.active_pane_mut().toggle_mark_cursor();
@@ -214,7 +261,7 @@ impl App {
                 Ok(())
             }
             Action::Quit => {
-                self.should_quit = true;
+                self.begin_quit();
                 Ok(())
             }
         };
@@ -222,6 +269,25 @@ impl App {
         if let Err(err) = result {
             self.log_error(err.to_string());
         }
+    }
+
+    /// `q` quits immediately when nothing is running; otherwise asks for
+    /// confirmation, since the spawned worker threads are detached and get
+    /// killed outright (not gracefully stopped) if the process exits while
+    /// they're still writing.
+    fn begin_quit(&mut self) {
+        if self.tasks.running.is_empty() {
+            self.should_quit = true;
+            return;
+        }
+        let message = format!(
+            "{} task(s) running — quit anyway? (y/n)",
+            self.tasks.running.len()
+        );
+        self.mode = Mode::Confirm {
+            message,
+            on_yes: PendingOp::Quit,
+        };
     }
 
     fn begin_rename(&mut self) {
@@ -261,9 +327,9 @@ impl App {
             return;
         }
 
-        let collisions = ops::find_collisions(&sources, &dest_dir);
+        let collisions = copy_move::find_collisions(&sources, &dest_dir);
         if collisions.is_empty() {
-            self.run_transfer(kind, &sources, &dest_dir);
+            self.spawn_transfer(kind, sources, dest_dir);
         } else {
             let message = format!("Overwrite {} existing item(s)? (y/n)", collisions.len());
             self.mode = Mode::Confirm {
@@ -277,45 +343,30 @@ impl App {
         }
     }
 
-    fn run_transfer(&mut self, kind: TransferKind, sources: &[PathBuf], dest_dir: &Path) {
-        let mut succeeded = 0usize;
-        let mut errors = Vec::new();
-        for src in sources {
-            let result = match kind {
-                TransferKind::Copy => ops::copy_into(src, dest_dir),
-                TransferKind::Move => ops::move_into(src, dest_dir),
-            };
-            match result {
-                Ok(()) => succeeded += 1,
-                Err(err) => errors.push(format!("{}: {err}", src.display())),
-            }
-        }
-
+    /// Hands the actual copy/move off to a background task (see
+    /// `tasks::copy_move`); `dispatch`/`execute_pending` return immediately,
+    /// and completion arrives later as a `TaskEvent::Finished` drained by
+    /// `drain_tasks`.
+    fn spawn_transfer(&mut self, kind: TransferKind, sources: Vec<PathBuf>, dest_dir: PathBuf) {
         let verb = match kind {
-            TransferKind::Copy => "copied",
-            TransferKind::Move => "moved",
+            TransferKind::Copy => "copy",
+            TransferKind::Move => "move",
         };
-        if succeeded > 0 {
-            self.log_info(format!(
-                "{verb} {succeeded} item(s) to {}",
-                dest_dir.display()
-            ));
-        }
-        for error in errors {
-            self.log_error(error);
-        }
-
-        self.reload_both();
-        self.active_pane_mut().clear_marks();
+        let desc = format!("{verb} {} item(s) to {}", sources.len(), dest_dir.display());
+        self.tasks.spawn(desc, move |id, tx, cancel| match kind {
+            TransferKind::Copy => copy_move::run_copy(id, tx, cancel, sources, dest_dir),
+            TransferKind::Move => copy_move::run_move(id, tx, cancel, sources, dest_dir),
+        });
     }
 
-    fn run_delete(&mut self, targets: &[PathBuf]) {
-        match ops::delete_paths(targets, self.config.delete_behavior) {
-            Ok(()) => self.log_info(format!("deleted {} item(s)", targets.len())),
-            Err(err) => self.log_error(err.to_string()),
-        }
-        self.reload_both();
-        self.active_pane_mut().clear_marks();
+    /// Hands the actual delete off to a background task (see
+    /// `tasks::delete`); see `spawn_transfer` for the completion story.
+    fn spawn_delete(&mut self, targets: Vec<PathBuf>) {
+        let behavior = self.config.delete_behavior;
+        let desc = format!("delete {} item(s)", targets.len());
+        self.tasks.spawn(desc, move |id, tx, cancel| {
+            delete_task::run_delete(id, tx, cancel, targets, behavior);
+        });
     }
 
     /// Fixed editing keys for `Mode::Prompt`; never consults the keymap.
@@ -384,12 +435,13 @@ impl App {
 
     fn execute_pending(&mut self, op: PendingOp) {
         match op {
-            PendingOp::Delete { targets } => self.run_delete(&targets),
+            PendingOp::Delete { targets } => self.spawn_delete(targets),
             PendingOp::Overwrite {
                 kind,
                 sources,
                 dest_dir,
-            } => self.run_transfer(kind, &sources, &dest_dir),
+            } => self.spawn_transfer(kind, sources, dest_dir),
+            PendingOp::Quit => self.should_quit = true,
         }
     }
 }
@@ -397,18 +449,75 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::time::Duration;
 
     fn test_app(left: &Path, right: &Path) -> App {
         App::new(left.to_path_buf(), right.to_path_buf(), Config::default()).unwrap()
     }
 
+    /// Drains tasks in a loop until none are running, or panics after a
+    /// generous timeout. Background tasks in these tests are tiny
+    /// (single small files in a tempdir), so this should resolve almost
+    /// immediately; the loop only exists to avoid a fixed sleep racing the
+    /// worker thread.
+    fn wait_for_tasks_done(app: &mut App) {
+        for _ in 0..500 {
+            app.drain_tasks();
+            if app.tasks.running.is_empty() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("background task(s) did not finish in time");
+    }
+
     #[test]
-    fn quit_action_sets_should_quit() {
+    fn quit_action_sets_should_quit_when_nothing_running() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = test_app(dir.path(), dir.path());
         assert!(!app.should_quit);
         app.dispatch(Action::Quit);
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn quit_with_running_task_asks_for_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.tasks.spawn("noop", |id, tx, _| {
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = tx.send(TaskEvent::Finished {
+                id,
+                result: Ok("done".to_string()),
+            });
+        });
+
+        app.dispatch(Action::Quit);
+        assert!(!app.should_quit, "must not quit while a task is running");
+        assert!(matches!(app.mode, Mode::Confirm { .. }));
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.should_quit, "confirming quit-anyway must still quit");
+    }
+
+    #[test]
+    fn quit_confirmation_declined_keeps_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.tasks.spawn("noop", |id, tx, _| {
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = tx.send(TaskEvent::Finished {
+                id,
+                result: Ok("done".to_string()),
+            });
+        });
+
+        app.dispatch(Action::Quit);
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        assert!(matches!(app.mode, Mode::Normal));
+        wait_for_tasks_done(&mut app);
     }
 
     #[test]
@@ -461,23 +570,23 @@ mod tests {
         assert!(dir.path().join("newdir").is_dir());
     }
 
+    fn select_entry_named(app: &mut App, name: &str) {
+        let idx = app
+            .active_pane()
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == name))
+            .unwrap();
+        app.active_pane_mut().cursor = idx;
+    }
+
     #[test]
     fn rename_prompt_is_prefilled_and_commits() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("old.txt"), b"hi").unwrap();
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
-        // Move cursor onto "old.txt" (index 1: ".." is 0 since tempdir has
-        // a real parent).
-        let idx = app
-            .active_pane()
-            .visible_entries()
-            .iter()
-            .position(
-                |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "old.txt"),
-            )
-            .unwrap();
-        app.active_pane_mut().cursor = idx;
+        select_entry_named(&mut app, "old.txt");
 
         app.dispatch(Action::Rename);
         match &app.mode {
@@ -507,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_requires_confirmation_then_removes() {
+    fn delete_requires_confirmation_then_removes_via_background_task() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("victim.txt"), b"hi").unwrap();
         let mut app = App::new(
@@ -520,15 +629,7 @@ mod tests {
         )
         .unwrap();
         app.active_pane_mut().reload().unwrap();
-        let idx = app
-            .active_pane()
-            .visible_entries()
-            .iter()
-            .position(
-                |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "victim.txt"),
-            )
-            .unwrap();
-        app.active_pane_mut().cursor = idx;
+        select_entry_named(&mut app, "victim.txt");
 
         app.dispatch(Action::Delete);
         assert!(matches!(app.mode, Mode::Confirm { .. }));
@@ -539,7 +640,17 @@ mod tests {
 
         app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::Normal));
+        assert!(
+            !app.tasks.running.is_empty(),
+            "delete should now be running in the background"
+        );
+
+        wait_for_tasks_done(&mut app);
         assert!(!dir.path().join("victim.txt").exists());
+        assert!(
+            app.log.iter().any(|l| l.message.contains("deleted 1 item")),
+            "finished delete should log a summary"
+        );
     }
 
     #[test]
@@ -556,51 +667,45 @@ mod tests {
         )
         .unwrap();
         app.active_pane_mut().reload().unwrap();
-        let idx = app
-            .active_pane()
-            .visible_entries()
-            .iter()
-            .position(
-                |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "keep.txt"),
-            )
-            .unwrap();
-        app.active_pane_mut().cursor = idx;
+        select_entry_named(&mut app, "keep.txt");
 
         app.dispatch(Action::Delete);
         app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::Normal));
+        assert!(
+            app.tasks.running.is_empty(),
+            "declining must never spawn anything"
+        );
         assert!(dir.path().join("keep.txt").exists());
     }
 
     #[test]
-    fn copy_action_copies_marked_or_cursor_entry_to_other_pane() {
+    fn copy_action_spawns_a_background_task_that_copies_to_the_other_pane() {
         let left = tempfile::tempdir().unwrap();
         let right = tempfile::tempdir().unwrap();
         std::fs::write(left.path().join("a.txt"), b"hi").unwrap();
 
         let mut app = test_app(left.path(), right.path());
         app.active_pane_mut().reload().unwrap();
-        let idx = app
-            .active_pane()
-            .visible_entries()
-            .iter()
-            .position(
-                |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "a.txt"),
-            )
-            .unwrap();
-        app.active_pane_mut().cursor = idx;
+        select_entry_named(&mut app, "a.txt");
 
         app.dispatch(Action::Copy);
         assert!(
             matches!(app.mode, Mode::Normal),
-            "no collision => runs immediately"
+            "no collision => no prompt"
         );
+        assert!(
+            !app.tasks.running.is_empty(),
+            "copy should be running in the background"
+        );
+
+        wait_for_tasks_done(&mut app);
         assert!(right.path().join("a.txt").exists());
         assert!(left.path().join("a.txt").exists(), "copy keeps the source");
     }
 
     #[test]
-    fn copy_collision_requires_confirmation() {
+    fn copy_collision_requires_confirmation_before_spawning() {
         let left = tempfile::tempdir().unwrap();
         let right = tempfile::tempdir().unwrap();
         std::fs::write(left.path().join("a.txt"), b"new").unwrap();
@@ -608,24 +713,47 @@ mod tests {
 
         let mut app = test_app(left.path(), right.path());
         app.active_pane_mut().reload().unwrap();
-        let idx = app
-            .active_pane()
-            .visible_entries()
-            .iter()
-            .position(
-                |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "a.txt"),
-            )
-            .unwrap();
-        app.active_pane_mut().cursor = idx;
+        select_entry_named(&mut app, "a.txt");
 
         app.dispatch(Action::Copy);
         assert!(matches!(app.mode, Mode::Confirm { .. }));
+        assert!(
+            app.tasks.running.is_empty(),
+            "must not spawn before confirmation"
+        );
         assert_eq!(
             std::fs::read(right.path().join("a.txt")).unwrap(),
             b"existing"
         );
 
         app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
         assert_eq!(std::fs::read(right.path().join("a.txt")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn two_concurrent_transfers_both_complete() {
+        let left = tempfile::tempdir().unwrap();
+        let mid = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a.txt"), b"hi").unwrap();
+        std::fs::write(mid.path().join("b.txt"), b"hi").unwrap();
+
+        let mut app = test_app(left.path(), right.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "a.txt");
+        app.dispatch(Action::Copy);
+        assert_eq!(app.tasks.running.len(), 1);
+
+        // A second, independent transfer spawned while the first is (very
+        // likely still) in flight.
+        app.panes[0].cwd = mid.path().to_path_buf();
+        app.panes[0].reload().unwrap();
+        select_entry_named(&mut app, "b.txt");
+        app.dispatch(Action::Copy);
+
+        wait_for_tasks_done(&mut app);
+        assert!(right.path().join("a.txt").exists());
+        assert!(right.path().join("b.txt").exists());
     }
 }

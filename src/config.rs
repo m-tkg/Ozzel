@@ -1,14 +1,16 @@
-//! TOML configuration: `~/.config/ozzel/config.toml` (Linux/mac) or
-//! `%APPDATA%\ozzel\config.toml` (Windows) via `directories::ProjectDirs`.
-//! A missing file falls back to defaults; a *malformed* file is a hard
-//! error (never silently ignored) since that usually means the user just
-//! made a typo they'd want to know about.
+//! TOML configuration. ozzel is a terminal/CLI tool, so on macOS and Linux
+//! it follows the CLI-tool convention (`$XDG_CONFIG_HOME/ozzel/config.toml`,
+//! falling back to `~/.config/ozzel/config.toml`) rather than Apple's GUI-
+//! app convention (`~/Library/Application Support`); Windows still uses
+//! `%APPDATA%\ozzel\` via `directories::ProjectDirs`, which already matches
+//! CLI-tool norms there. A missing file falls back to defaults; a
+//! *malformed* file is a hard error (never silently ignored) since that
+//! usually means the user just made a typo they'd want to know about.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -34,7 +36,36 @@ pub struct Config {
 
 /// Path to the config file, if this platform has a resolvable config dir.
 pub fn config_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "ozzel").map(|dirs| dirs.config_dir().join("config.toml"))
+    #[cfg(windows)]
+    {
+        directories::ProjectDirs::from("", "", "ozzel")
+            .map(|dirs| dirs.config_dir().join("config.toml"))
+    }
+    #[cfg(not(windows))]
+    {
+        let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        let home_dir = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+        unix_config_path(xdg_config_home, home_dir)
+    }
+}
+
+/// Pure XDG-style resolution used on macOS and Linux: `$XDG_CONFIG_HOME`
+/// when it's set to an absolute path, otherwise `~/.config`. Kept as a
+/// standalone function (rather than inlined env/home lookups) purely so
+/// tests can exercise the fallback logic without mutating process-global
+/// environment state.
+#[cfg_attr(
+    windows,
+    allow(dead_code, reason = "only used on the unix config_path path")
+)]
+fn unix_config_path(
+    xdg_config_home: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let base = xdg_config_home
+        .filter(|p| p.is_absolute())
+        .or_else(|| home_dir.map(|home| home.join(".config")))?;
+    Some(base.join("ozzel").join("config.toml"))
 }
 
 /// Loads the config file, falling back to defaults when it doesn't exist.
@@ -90,5 +121,42 @@ mod tests {
         let bad = "delete_behavior = [not valid";
         let result: Result<Config, _> = toml::from_str(bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn xdg_config_home_takes_priority_when_absolute() {
+        let path = unix_config_path(
+            Some(PathBuf::from("/custom/xdg")),
+            Some(PathBuf::from("/home/user")),
+        );
+        assert_eq!(path, Some(PathBuf::from("/custom/xdg/ozzel/config.toml")));
+    }
+
+    #[test]
+    fn falls_back_to_home_dot_config_when_xdg_unset() {
+        let path = unix_config_path(None, Some(PathBuf::from("/home/user")));
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/home/user/.config/ozzel/config.toml"))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_home_dot_config_when_xdg_is_relative() {
+        // A relative XDG_CONFIG_HOME is invalid per the XDG spec; ignore it
+        // rather than joining it onto nothing meaningful.
+        let path = unix_config_path(
+            Some(PathBuf::from("relative/path")),
+            Some(PathBuf::from("/home/user")),
+        );
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/home/user/.config/ozzel/config.toml"))
+        );
+    }
+
+    #[test]
+    fn none_when_neither_xdg_nor_home_resolve() {
+        assert_eq!(unix_config_path(None, None), None);
     }
 }

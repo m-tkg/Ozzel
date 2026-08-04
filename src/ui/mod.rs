@@ -1,15 +1,16 @@
-//! Top-level draw routine: two 50% panes, a 4-line log area, and a 1-line
-//! status bar (replaced by the prompt line in `Mode::Prompt`, with a
-//! centered confirm box drawn on top in `Mode::Confirm`).
+//! Top-level draw routine: two 50% panes, a log area (4 content rows once
+//! its border is accounted for), and a 1-line status bar (replaced by the
+//! prompt line in `Mode::Prompt`, with a centered confirm box drawn on top
+//! in `Mode::Confirm`).
 
+mod log_view;
 mod modal;
 mod pane_view;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{ActivePane, App};
 use crate::mode::Mode;
@@ -20,7 +21,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(4),
+            Constraint::Length(6), // 4 content rows + top/bottom border
             Constraint::Length(1),
         ])
         .split(area);
@@ -43,7 +44,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         app.active == ActivePane::Right,
     );
 
-    render_log(frame, rows[1], app);
+    log_view::render(frame, rows[1], app);
 
     match &app.mode {
         Mode::Prompt { .. } => modal::render_prompt_line(frame, rows[2], &app.mode),
@@ -55,29 +56,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-fn render_log(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().title("Log").borders(Borders::ALL);
-    let inner_height = area.height.saturating_sub(2) as usize;
-
-    let lines: Vec<Line> = app
-        .log
-        .iter()
-        .rev()
-        .take(inner_height)
-        .rev()
-        .map(|line| {
-            let style = if line.is_error {
-                Style::default().fg(Color::Red)
-            } else {
-                Style::default()
-            };
-            Line::styled(line.message.clone(), style)
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let marks = app.active_pane().marks.len();
     let marks_text = if marks > 0 {
@@ -85,8 +63,14 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         String::new()
     };
+    let tasks_text = if app.tasks.running.is_empty() {
+        String::new()
+    } else {
+        format!("{} running  |  ", app.tasks.running.len())
+    };
     let status = Paragraph::new(format!(
-        " {}{}  |  q:quit  Tab:switch  Space:mark  C/M/D/R/K  s:sort  .:hidden",
+        " {}{}{}  |  q:quit  Tab:switch  Space:mark  C/M/D/R/K  s:sort  .:hidden",
+        tasks_text,
         marks_text,
         app.active_pane().cwd.display()
     ))

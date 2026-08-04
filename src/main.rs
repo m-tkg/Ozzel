@@ -7,6 +7,7 @@ mod keymap;
 mod mode;
 mod ops;
 mod pane;
+mod tasks;
 mod ui;
 
 use std::io::{self, Stdout};
@@ -108,6 +109,11 @@ fn main() -> anyhow::Result<()> {
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
+
+        // Drain background-task progress/log/finish events before the next
+        // terminal poll, so a running copy/move/delete's gauge and log
+        // lines update promptly instead of waiting behind a keystroke.
+        app.drain_tasks();
 
         let event = event::read_event(Duration::from_millis(50))?;
         app.handle_event(event);

@@ -32,6 +32,9 @@ pub enum PendingOp {
         sources: Vec<PathBuf>,
         dest_dir: PathBuf,
     },
+    /// Confirmed by the quit-while-busy guard: tasks are still running but
+    /// the user wants out anyway.
+    Quit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

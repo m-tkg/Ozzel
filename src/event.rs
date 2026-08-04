@@ -8,12 +8,36 @@ use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 pub use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-/// Events fed into `App::handle_event`. `Task` (background job progress)
-/// arrives in Phase 3 once `tasks/` exists; for now only keyboard input and
-/// an idle tick exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::tasks::TaskId;
+
+/// A message from a background task's worker thread back to the main
+/// thread, sent over the `mpsc::Sender<TaskEvent>` every `TaskManager::spawn`
+/// closure receives a clone of.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskEvent {
+    Progress {
+        id: TaskId,
+        done: u64,
+        total: u64,
+        detail: String,
+    },
+    Log {
+        id: TaskId,
+        line: String,
+    },
+    Finished {
+        id: TaskId,
+        result: Result<String, String>,
+    },
+}
+
+/// Events fed into `App::handle_event`. `Task` events are drained from the
+/// `TaskManager`'s channel (see `App::drain_tasks`) ahead of every terminal
+/// poll; `Tick` is what a poll timeout with no input produces.
+#[derive(Debug, Clone, PartialEq)]
 pub enum AppEvent {
     Input(KeyCode, KeyModifiers),
+    Task(TaskEvent),
     Tick,
 }
 
