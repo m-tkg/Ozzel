@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::entry::{EntryKind, FsEntry, read_dir_entries};
+use crate::filter::FilterSpec;
 
 /// How many rows a PageUp/PageDown jumps. Phase 2+ may make this track the
 /// actual rendered viewport height; a fixed constant is enough for MVP
@@ -57,8 +58,13 @@ pub struct Pane {
     pub cursor_memory: HashMap<PathBuf, String>,
     /// Paths marked for a bulk copy/move/delete. Survives a plain
     /// `reload()` of the same directory (re-sort, hidden toggle) but is
-    /// cleared whenever `cwd` actually changes.
+    /// cleared whenever `cwd` actually changes. Deliberately independent of
+    /// `filter`: a mark on an entry that's since been filtered out of view
+    /// is still a mark (see `marked_or_cursor`'s doc comment).
     pub marks: HashSet<PathBuf>,
+    /// The active incremental filter, if any. Applied in `visible_entries`
+    /// alongside the hidden-file filter; cleared on `cwd` change.
+    pub filter: Option<FilterSpec>,
 }
 
 impl Pane {
@@ -72,6 +78,7 @@ impl Pane {
             show_hidden: false,
             cursor_memory: HashMap::new(),
             marks: HashSet::new(),
+            filter: None,
         };
         pane.reload()?;
         Ok(pane)
@@ -102,14 +109,19 @@ impl Pane {
         self.cwd.parent().is_none()
     }
 
-    /// Hidden filter + sort (dirs always grouped before files) with a
-    /// synthetic `..` row prepended unless `cwd` is the filesystem root.
+    /// Hidden-file filter + incremental filter + sort (dirs always grouped
+    /// before files) with a synthetic `..` row prepended unless `cwd` is
+    /// the filesystem root (`..` is never subject to either filter).
     pub fn visible_entries(&self) -> Vec<VisibleItem<'_>> {
         let mut indices: Vec<usize> = self
             .entries
             .iter()
             .enumerate()
             .filter(|(_, e)| self.show_hidden || !e.is_hidden)
+            .filter(|(_, e)| match &self.filter {
+                Some(spec) => spec.matches(&e.name),
+                None => true,
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -184,6 +196,7 @@ impl Pane {
             Ok(()) => {
                 self.cursor = 0;
                 self.marks.clear();
+                self.filter = None;
                 Ok(())
             }
             Err(err) => {
@@ -208,6 +221,7 @@ impl Pane {
 
         self.cwd = parent;
         self.marks.clear();
+        self.filter = None;
         self.reload()?;
 
         match leaving_name {
@@ -281,9 +295,14 @@ impl Pane {
         self.marks.clear();
     }
 
-    /// The paths an operation (copy/move/delete) should act on: the marks
-    /// if any exist, otherwise just whatever is under the cursor. Never
-    /// includes the synthetic `..` row.
+    /// The paths an operation (copy/move/delete/zip) should act on: the
+    /// marks if any exist, otherwise just whatever is under the cursor.
+    /// Never includes the synthetic `..` row.
+    ///
+    /// Deliberately ignores the active filter: if an entry was marked and
+    /// then filtered out of view (rather than being cleared), it's still
+    /// part of `self.marks` and still a legitimate target — narrowing what
+    /// you can *see* isn't the same as narrowing what you *selected*.
     pub fn marked_or_cursor(&self) -> Vec<PathBuf> {
         if !self.marks.is_empty() {
             return self.marks.iter().cloned().collect();
@@ -296,6 +315,13 @@ impl Pane {
 
     pub fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
+        self.clamp_cursor();
+    }
+
+    /// Sets (or clears, with `None`) the incremental filter and re-clamps
+    /// the cursor, since the visible list may have just shrunk.
+    pub fn set_filter(&mut self, filter: Option<FilterSpec>) {
+        self.filter = filter;
         self.clamp_cursor();
     }
 
@@ -607,5 +633,112 @@ mod tests {
         pane.marks.insert(pane.cwd.join("nonexistent"));
         pane.go_parent().unwrap();
         assert!(pane.marks.is_empty(), "go_parent must clear marks");
+    }
+
+    #[test]
+    fn set_filter_narrows_visible_entries() {
+        let (_dir, mut pane) = pane_with_files(&["report.txt", "summary.txt", "notes.md"]);
+        pane.set_filter(FilterSpec::parse("report"));
+
+        let names: Vec<String> = pane
+            .visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                VisibleItem::Entry(e) => Some(e.name.clone()),
+                VisibleItem::Parent => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["report.txt".to_string()]);
+    }
+
+    #[test]
+    fn set_filter_matches_japanese_substrings() {
+        let (_dir, mut pane) = pane_with_files(&["日本語ファイル.txt", "english.txt"]);
+        pane.set_filter(FilterSpec::parse("日本語"));
+
+        let names: Vec<String> = pane
+            .visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                VisibleItem::Entry(e) => Some(e.name.clone()),
+                VisibleItem::Parent => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["日本語ファイル.txt".to_string()]);
+    }
+
+    #[test]
+    fn parent_row_is_never_filtered_out() {
+        let (_dir, mut pane) = pane_with_files(&["a.txt"]);
+        pane.set_filter(FilterSpec::parse("nothing-matches-this"));
+        assert!(matches!(
+            pane.visible_entries().first(),
+            Some(VisibleItem::Parent)
+        ));
+    }
+
+    #[test]
+    fn set_filter_clamps_cursor_when_the_visible_list_shrinks() {
+        let (_dir, mut pane) = pane_with_files(&["a.txt", "b.txt", "c.txt"]);
+        // Move to the last row (c.txt).
+        pane.cursor_to_bottom();
+        let bottom = pane.cursor;
+        assert!(bottom > 0);
+
+        // Filter down to a single match; cursor must not point past the
+        // end of the now-much-shorter list.
+        pane.set_filter(FilterSpec::parse("a.txt"));
+        assert!(pane.cursor < pane.visible_entries().len());
+    }
+
+    #[test]
+    fn filter_is_cleared_on_cwd_change() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        // A filter that still matches "sub" itself, so it stays reachable.
+        pane.set_filter(FilterSpec::parse("sub"));
+        assert!(pane.filter.is_some());
+
+        let sub_idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == "sub"))
+            .unwrap();
+        pane.cursor = sub_idx;
+
+        pane.enter().unwrap();
+        assert_eq!(pane.cwd, dir.path().join("sub"));
+        assert!(pane.filter.is_none(), "descending must clear the filter");
+
+        pane.set_filter(FilterSpec::parse("anything"));
+        pane.go_parent().unwrap();
+        assert!(pane.filter.is_none(), "go_parent must clear the filter");
+    }
+
+    #[test]
+    fn marked_or_cursor_still_returns_marks_hidden_by_the_active_filter() {
+        // Documents the deliberate choice: filtering narrows what's
+        // *visible*, not what's *selected*. A mark made before filtering
+        // (or on an entry the current filter now hides) still counts.
+        let (_dir, mut pane) = pane_with_files(&["report.txt", "summary.txt"]);
+        pane.marks.insert(pane.cwd.join("summary.txt"));
+
+        pane.set_filter(FilterSpec::parse("report"));
+        // "summary.txt" is no longer visible under this filter...
+        let visible_names: Vec<String> = pane
+            .visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                VisibleItem::Entry(e) => Some(e.name.clone()),
+                VisibleItem::Parent => None,
+            })
+            .collect();
+        assert!(!visible_names.contains(&"summary.txt".to_string()));
+
+        // ...but it's still a valid transfer target.
+        assert_eq!(pane.marked_or_cursor(), vec![pane.cwd.join("summary.txt")]);
     }
 }

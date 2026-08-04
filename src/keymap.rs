@@ -114,8 +114,10 @@ impl Keymap {
     /// The dyna-filer-style defaults: arrows/PageUp/PageDown/Home/End move
     /// the cursor, Tab switches panes, Enter/Backspace navigate, Space
     /// marks, `a` marks all, `s`/`.` cycle sort/hidden, `C`/`M`/`D`/`R`/`K`
-    /// are the copy/move/delete/rename/mkdir commands, `u` swaps panes, and
-    /// `q`/Ctrl+C quit.
+    /// are the copy/move/delete/rename/mkdir commands, `w` swaps panes,
+    /// `f`/`/` start an incremental filter (Esc clears one that's active),
+    /// `p` zips the marked-or-cursor selection, `u` unzips the file under
+    /// the cursor, and `q`/Ctrl+C quit.
     pub fn default_dyna() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -130,7 +132,7 @@ impl Keymap {
             ("backspace", Parent),
             ("s", CycleSort),
             (".", ToggleHidden),
-            ("u", SwapPanes),
+            ("w", SwapPanes),
             ("C-r", Refresh),
             ("space", Mark),
             ("a", MarkAll),
@@ -139,6 +141,11 @@ impl Keymap {
             ("D", Delete),
             ("C", Copy),
             ("M", Move),
+            ("f", Filter),
+            ("/", Filter),
+            ("esc", ClearFilter),
+            ("p", ZipMarked),
+            ("u", Unzip),
             ("q", Quit),
             ("C-c", Quit),
         ];
@@ -262,6 +269,43 @@ mod tests {
             Some(Action::Copy)
         );
         assert_eq!(km.resolve(KeyCode::Char('c'), KeyModifiers::NONE), None);
+    }
+
+    #[test]
+    fn default_keymap_binds_w_to_swap_panes_and_u_to_unzip() {
+        // `u` used to be SwapPanes; Phase 4 rebinds it to Unzip (dyna-filer's
+        // unpack key) and moves SwapPanes to `w`. Pin both here so a future
+        // change can't silently swap them back without a test failing.
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('w'), KeyModifiers::NONE),
+            Some(Action::SwapPanes)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('u'), KeyModifiers::NONE),
+            Some(Action::Unzip)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_filter_and_zip_keys() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('f'), KeyModifiers::NONE),
+            Some(Action::Filter)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('/'), KeyModifiers::NONE),
+            Some(Action::Filter)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Esc, KeyModifiers::NONE),
+            Some(Action::ClearFilter)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('p'), KeyModifiers::NONE),
+            Some(Action::ZipMarked)
+        );
     }
 
     #[test]

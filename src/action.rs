@@ -28,5 +28,9 @@ pub enum Action {
     Delete,
     Copy,
     Move,
+    Filter,
+    ClearFilter,
+    ZipMarked,
+    Unzip,
     Quit,
 }

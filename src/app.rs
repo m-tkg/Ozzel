@@ -11,12 +11,13 @@ use anyhow::Context as _;
 use crate::action::Action;
 use crate::config::Config;
 use crate::event::{AppEvent, KeyCode, KeyModifiers, TaskEvent};
+use crate::filter::FilterSpec;
 use crate::keymap::Keymap;
 use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, TransferKind};
 use crate::ops;
 use crate::pane::{PAGE_SIZE, Pane};
 use crate::tasks::delete as delete_task;
-use crate::tasks::{TaskManager, copy_move};
+use crate::tasks::{TaskManager, archive, copy_move};
 
 /// Log lines are capped so a long session's log can't grow without bound.
 const LOG_CAPACITY: usize = 500;
@@ -170,6 +171,7 @@ impl App {
                         self.dispatch(action);
                     }
                 }
+                Mode::Filter { .. } => self.handle_filter_key(code, modifiers),
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
             },
@@ -258,6 +260,24 @@ impl App {
             }
             Action::Move => {
                 self.begin_transfer(TransferKind::Move);
+                Ok(())
+            }
+            Action::Filter => {
+                self.mode = Mode::Filter {
+                    input: LineEditor::new(),
+                };
+                Ok(())
+            }
+            Action::ClearFilter => {
+                self.active_pane_mut().set_filter(None);
+                Ok(())
+            }
+            Action::ZipMarked => {
+                self.begin_zip();
+                Ok(())
+            }
+            Action::Unzip => {
+                self.begin_unzip();
                 Ok(())
             }
             Action::Quit => {
@@ -369,6 +389,42 @@ impl App {
         });
     }
 
+    /// Fixed editing keys for `Mode::Filter`; never consults the keymap.
+    /// Every edit live-applies to the active pane's filter (Esc clears it
+    /// and cancels; Enter just leaves it in place and returns to Normal).
+    fn handle_filter_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.active_pane_mut().set_filter(None);
+                return;
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            _ => {}
+        }
+
+        let value = {
+            let Mode::Filter { input } = &mut self.mode else {
+                return;
+            };
+            match code {
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Delete => input.delete(),
+                KeyCode::Left => input.move_left(),
+                KeyCode::Right => input.move_right(),
+                KeyCode::Home => input.move_home(),
+                KeyCode::End => input.move_end(),
+                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => input.insert(c),
+                _ => {}
+            }
+            input.value()
+        };
+        self.active_pane_mut().set_filter(FilterSpec::parse(&value));
+    }
+
     /// Fixed editing keys for `Mode::Prompt`; never consults the keymap.
     fn handle_prompt_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match code {
@@ -403,18 +459,124 @@ impl App {
     }
 
     fn commit_prompt(&mut self, kind: PromptKind, value: String) {
-        let cwd = self.active_pane().cwd.clone();
         match kind {
-            PromptKind::Mkdir => match ops::mkdir(&cwd, &value) {
-                Ok(()) => self.log_info(format!("created directory: {value}")),
-                Err(err) => self.log_error(err.to_string()),
-            },
-            PromptKind::Rename { orig } => match ops::rename(&cwd, &orig, &value) {
-                Ok(()) => self.log_info(format!("renamed {orig} -> {value}")),
-                Err(err) => self.log_error(err.to_string()),
-            },
+            PromptKind::Mkdir => {
+                let cwd = self.active_pane().cwd.clone();
+                match ops::mkdir(&cwd, &value) {
+                    Ok(()) => self.log_info(format!("created directory: {value}")),
+                    Err(err) => self.log_error(err.to_string()),
+                }
+                self.reload_both();
+            }
+            PromptKind::Rename { orig } => {
+                let cwd = self.active_pane().cwd.clone();
+                match ops::rename(&cwd, &orig, &value) {
+                    Ok(()) => self.log_info(format!("renamed {orig} -> {value}")),
+                    Err(err) => self.log_error(err.to_string()),
+                }
+                self.reload_both();
+            }
+            PromptKind::ZipName { targets } => self.commit_zip_name(targets, value),
         }
-        self.reload_both();
+    }
+
+    fn commit_zip_name(&mut self, targets: Vec<PathBuf>, name: String) {
+        if name.is_empty() {
+            self.log_error("name cannot be empty");
+            return;
+        }
+        if name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) {
+            self.log_error("name cannot contain a path separator");
+            return;
+        }
+
+        let dest_dir = self.panes[self.active.other().index()].cwd.clone();
+        let archive_path = dest_dir.join(&name);
+        if archive_path.exists() {
+            let message = format!("Overwrite {}? (y/n)", archive_path.display());
+            self.mode = Mode::Confirm {
+                message,
+                on_yes: PendingOp::ZipOverwrite {
+                    targets,
+                    archive_path,
+                },
+            };
+        } else {
+            self.spawn_zip(targets, archive_path);
+        }
+    }
+
+    /// Opens the zip-name prompt for the active pane's marked-or-cursor
+    /// selection, pre-filled with `<first-target-stem>.zip`.
+    fn begin_zip(&mut self) {
+        let targets = self.active_pane().marked_or_cursor();
+        if targets.is_empty() {
+            self.log_error("no entry selected to zip");
+            return;
+        }
+        let stem = targets[0]
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "archive".to_string());
+        let default_name = format!("{stem}.zip");
+        self.mode = Mode::Prompt {
+            kind: PromptKind::ZipName { targets },
+            input: LineEditor::from_str(&default_name),
+        };
+    }
+
+    /// Hands the actual zip creation off to a background task (see
+    /// `tasks::archive::run_zip`); see `spawn_transfer` for the completion
+    /// story.
+    fn spawn_zip(&mut self, targets: Vec<PathBuf>, archive_path: PathBuf) {
+        let desc = format!(
+            "zip {} item(s) to {}",
+            targets.len(),
+            archive_path.display()
+        );
+        self.tasks.spawn(desc, move |id, tx, cancel| {
+            archive::run_zip(id, tx, cancel, targets, archive_path);
+        });
+    }
+
+    /// The cursor entry must be a `.zip` file; extracts into the other
+    /// pane's cwd, confirming first if any top-level entry would collide.
+    fn begin_unzip(&mut self) {
+        let Some(name) = self.active_pane().selected_entry_name() else {
+            self.log_error("no entry selected to unzip");
+            return;
+        };
+        if !name.to_lowercase().ends_with(".zip") {
+            self.log_error("selected entry is not a .zip file");
+            return;
+        }
+        let archive_path = self.active_pane().cwd.join(&name);
+        let dest_dir = self.panes[self.active.other().index()].cwd.clone();
+
+        match archive::top_level_collisions(&archive_path, &dest_dir) {
+            Ok(collisions) if !collisions.is_empty() => {
+                let message = format!("Overwrite {} existing item(s)? (y/n)", collisions.len());
+                self.mode = Mode::Confirm {
+                    message,
+                    on_yes: PendingOp::UnzipOverwrite {
+                        archive_path,
+                        dest_dir,
+                    },
+                };
+            }
+            Ok(_) => self.spawn_unzip(archive_path, dest_dir),
+            Err(err) => self.log_error(err.to_string()),
+        }
+    }
+
+    /// Hands the actual extraction off to a background task (see
+    /// `tasks::archive::run_unzip`); see `spawn_transfer` for the
+    /// completion story.
+    fn spawn_unzip(&mut self, archive_path: PathBuf, dest_dir: PathBuf) {
+        let desc = format!("unzip {} to {}", archive_path.display(), dest_dir.display());
+        self.tasks.spawn(desc, move |id, tx, cancel| {
+            archive::run_unzip(id, tx, cancel, archive_path, dest_dir);
+        });
     }
 
     /// Fixed confirmation keys for `Mode::Confirm`; never consults the
@@ -441,6 +603,14 @@ impl App {
                 sources,
                 dest_dir,
             } => self.spawn_transfer(kind, sources, dest_dir),
+            PendingOp::ZipOverwrite {
+                targets,
+                archive_path,
+            } => self.spawn_zip(targets, archive_path),
+            PendingOp::UnzipOverwrite {
+                archive_path,
+                dest_dir,
+            } => self.spawn_unzip(archive_path, dest_dir),
             PendingOp::Quit => self.should_quit = true,
         }
     }

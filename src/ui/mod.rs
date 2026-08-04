@@ -47,6 +47,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     log_view::render(frame, rows[1], app);
 
     match &app.mode {
+        Mode::Filter { .. } => {
+            let error = app
+                .active_pane()
+                .filter
+                .as_ref()
+                .and_then(|f| f.error())
+                .map(str::to_string);
+            modal::render_filter_line(frame, rows[2], &app.mode, error.as_deref());
+        }
         Mode::Prompt { .. } => modal::render_prompt_line(frame, rows[2], &app.mode),
         Mode::Confirm { message, .. } => {
             render_status_bar(frame, rows[2], app);

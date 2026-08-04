@@ -29,7 +29,11 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool) {
     };
 
     let title_budget = area.width.saturating_sub(2) as usize; // account for the two border corners
-    let title = truncate_left(&pane.cwd.display().to_string(), title_budget);
+    let mut title_source = pane.cwd.display().to_string();
+    if let Some(filter) = &pane.filter {
+        title_source.push_str(&format!(" [flt: {}]", filter.raw));
+    }
+    let title = truncate_left(&title_source, title_budget);
 
     let block = Block::default()
         .title(title)

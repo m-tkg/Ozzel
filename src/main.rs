@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod entry;
 mod event;
+mod filter;
 mod keymap;
 mod mode;
 mod ops;

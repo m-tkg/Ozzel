@@ -4,7 +4,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
@@ -20,9 +20,37 @@ pub fn render_prompt_line(frame: &mut Frame, area: Rect, mode: &Mode) {
     let label = match kind {
         PromptKind::Rename { .. } => "Rename: ",
         PromptKind::Mkdir => "New directory: ",
+        PromptKind::ZipName { .. } => "Zip as: ",
     };
-    let text = format!("{label}{}", input.value());
-    let paragraph = Paragraph::new(text).style(Style::default().add_modifier(Modifier::REVERSED));
+    render_input_line(frame, area, label, input, None);
+}
+
+/// Draws the `Filter` line into `area`, showing the live input plus an
+/// error hint when the current `re:` pattern fails to compile. No-op if
+/// `mode` is not `Filter`.
+pub fn render_filter_line(frame: &mut Frame, area: Rect, mode: &Mode, error: Option<&str>) {
+    let Mode::Filter { input } = mode else {
+        return;
+    };
+    render_input_line(frame, area, "Filter: ", input, error);
+}
+
+fn render_input_line(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    input: &crate::mode::LineEditor,
+    error: Option<&str>,
+) {
+    let text = match error {
+        Some(err) => format!("{label}{}  (invalid regex: {err})", input.value()),
+        None => format!("{label}{}", input.value()),
+    };
+    let mut style = Style::default().add_modifier(Modifier::REVERSED);
+    if error.is_some() {
+        style = style.fg(Color::Red);
+    }
+    let paragraph = Paragraph::new(text).style(style);
     frame.render_widget(paragraph, area);
 
     let col = area.x + UnicodeWidthStr::width(label) as u16 + input.cursor_display_col() as u16;

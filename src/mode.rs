@@ -10,8 +10,16 @@ use unicode_width::UnicodeWidthStr;
 /// What a `Mode::Prompt` is collecting text for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptKind {
-    Rename { orig: String },
+    Rename {
+        orig: String,
+    },
     Mkdir,
+    /// Collecting the archive file name for a zip-create; `targets` is
+    /// captured at prompt-open time (the marks/cursor selection that
+    /// triggered it), not re-read when the prompt commits.
+    ZipName {
+        targets: Vec<PathBuf>,
+    },
 }
 
 /// Which direction a marked-or-cursor transfer is going.
@@ -32,6 +40,17 @@ pub enum PendingOp {
         sources: Vec<PathBuf>,
         dest_dir: PathBuf,
     },
+    /// The archive path already existed; overwrite it.
+    ZipOverwrite {
+        targets: Vec<PathBuf>,
+        archive_path: PathBuf,
+    },
+    /// One or more top-level entries in the archive already exist in the
+    /// destination directory; overwrite them.
+    UnzipOverwrite {
+        archive_path: PathBuf,
+        dest_dir: PathBuf,
+    },
     /// Confirmed by the quit-while-busy guard: tasks are still running but
     /// the user wants out anyway.
     Quit,
@@ -41,6 +60,11 @@ pub enum PendingOp {
 pub enum Mode {
     #[default]
     Normal,
+    /// Incremental filter/search: every edit keystroke live-applies to the
+    /// active pane's `Pane.filter` (see `App::handle_filter_key`).
+    Filter {
+        input: LineEditor,
+    },
     Prompt {
         kind: PromptKind,
         input: LineEditor,

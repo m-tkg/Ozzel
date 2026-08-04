@@ -3,6 +3,7 @@
 //! tracked here so the UI can render a gauge per running task and the app
 //! can offer a quit-while-busy confirmation.
 
+pub mod archive;
 pub mod copy_move;
 pub mod delete;
 
