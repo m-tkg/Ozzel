@@ -1,0 +1,53 @@
+# ozzel サンプル設定ファイル
+#
+# 配置先（存在しない場合はデフォルト設定で起動します）:
+#   Linux / macOS: $XDG_CONFIG_HOME/ozzel/config.toml
+#                  （$XDG_CONFIG_HOME 未設定時は ~/.config/ozzel/config.toml）
+#   Windows:       %APPDATA%\ozzel\config\config.toml
+#
+# このファイルをそのままコピーして使う場合は、コメントアウトされた行を
+# 必要に応じて有効化（先頭の # を削除）してください。すべての項目は省略可能です。
+
+# --- 削除の挙動 -------------------------------------------------------
+# "trash"（デフォルト）: OS のゴミ箱へ移動する
+# "permanent": 確認後に完全削除する（ゴミ箱を経由しない）
+#
+# Linux でのゴミ箱移動は XDG 対応デスクトップ環境が前提です。対応していない
+# 環境では失敗し、エラーを表示します（無言で完全削除にフォールバックしません）。
+delete_behavior = "trash"
+
+# --- ホームディレクトリ ------------------------------------------------
+# `~` / `H` キーで移動する先。省略時は OS のホームディレクトリが使われます。
+# home = "/Users/you/projects"
+
+# --- エディタ -----------------------------------------------------------
+# `e` キーで開くエディタコマンド。省略時は環境変数 $EDITOR が使われ、
+# それも未設定の場合はエラーになります。
+# editor = "vim"
+
+# --- キーバインドの上書き -----------------------------------------------
+# 左辺: キーの組み合わせ（"C-" = Ctrl, "S-" = Shift, "A-" = Alt を
+#        プレフィックスとして重ねられます。例: "C-r", "S-tab"）
+# 右辺: アクション名（snake_case）。"none" を指定するとそのキーの
+#        割り当てを解除します。
+#
+# デフォルトのキーバインドについては README.md の「キーバインド一覧」を
+# 参照してください。
+[keys]
+# 例: Ctrl+C にコピーを割り当てる（デフォルトの終了キーと衝突するので
+# 変更する場合は、終了用のキーを別途 "q" などに残しておくことを推奨します）
+# "C-c" = "copy"
+
+# 例: "q" 単体での終了を無効化し、誤操作を防ぐ
+# "q" = "none"
+
+# 例: vi 風に j/k でカーソル移動を追加する
+# "j" = "cursor_down"
+# "k" = "cursor_up"
+
+# 使用できるアクション名の一覧:
+# cursor_up, cursor_down, page_up, page_down, top, bottom, switch_pane,
+# enter, parent, cycle_sort, toggle_hidden, swap_panes, refresh, mark,
+# mark_all, rename, mkdir, delete, copy, move, filter, clear_filter,
+# zip_marked, unzip, history_jump, bookmark_jump, bookmark_add, go_home,
+# command_line, open_editor, open_default, quit

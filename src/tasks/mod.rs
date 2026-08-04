@@ -38,7 +38,7 @@ pub struct RunningTask {
     pub detail: String,
     #[allow(
         dead_code,
-        reason = "no cancel keybinding yet; flag is wired for Phase 4+"
+        reason = "cancel UI is explicitly post-MVP per the plan; every worker already checks this flag, so wiring a keybinding to it later needs no further threading changes"
     )]
     pub cancel: Arc<AtomicBool>,
 }

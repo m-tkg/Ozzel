@@ -2,6 +2,12 @@
 name = "ozzel"
 version = "0.1.0"
 edition = "2024"
+description = "A dyna-filer-inspired two-pane TUI file manager"
+license = "MIT"
+repository = "https://github.com/m-tkg/Ozzel"
+readme = "README.md"
+keywords = ["tui", "file-manager", "terminal", "filer"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 anyhow = "1.0.104"

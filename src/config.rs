@@ -89,6 +89,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn example_config_toml_parses_cleanly() {
+        // Guards against README/examples drift: the shipped example must
+        // stay valid TOML that deserializes into `Config`, even with every
+        // optional line commented out.
+        let text =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/config.toml"))
+                .expect("examples/config.toml must exist");
+        let config: Config = toml::from_str(&text).expect("examples/config.toml must parse");
+        assert_eq!(config.delete_behavior, DeleteBehavior::Trash);
+    }
+
+    #[test]
     fn defaults_are_trash_and_empty_keys() {
         let config = Config::default();
         assert_eq!(config.delete_behavior, DeleteBehavior::Trash);
