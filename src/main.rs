@@ -1,19 +1,25 @@
+mod action;
+mod app;
+mod entry;
+mod event;
+mod pane;
+mod ui;
+
 use std::io::{self, Stdout};
 use std::panic;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::{Context, bail};
 use clap::Parser;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+
+use app::App;
 
 /// ozzel: a dyna-filer-style two-pane TUI file manager.
 #[derive(Parser, Debug)]
@@ -60,91 +66,48 @@ fn install_panic_hook() {
     }));
 }
 
-/// Single chokepoint for turning a raw crossterm `Event` into a normalized
-/// `(KeyCode, KeyModifiers)` pair. Filters out everything but `Press` events
-/// so that Windows' extra Release/Repeat events never double-handle a key.
-fn normalize_key(event: &Event) -> Option<(KeyCode, KeyModifiers)> {
-    match event {
-        Event::Key(KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            ..
-        }) => Some((*code, *modifiers)),
-        _ => None,
+/// Resolves a startup directory argument, falling back to the current
+/// working directory when omitted, and failing loudly when an explicitly
+/// requested directory does not exist.
+fn resolve_startup_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match dir {
+        Some(path) => {
+            if !path.exists() {
+                bail!("directory does not exist: {}", path.display());
+            }
+            if !path.is_dir() {
+                bail!("not a directory: {}", path.display());
+            }
+            Ok(path)
+        }
+        None => std::env::current_dir().context("failed to determine current directory"),
     }
-}
-
-fn pane_title(dir: &Option<PathBuf>) -> String {
-    dir.as_deref()
-        .map(Path::display)
-        .map(|d| d.to_string())
-        .unwrap_or_else(|| ".".to_string())
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let left = resolve_startup_dir(cli.left_dir)?;
+    let right = resolve_startup_dir(cli.right_dir)?;
 
     install_panic_hook();
     let mut guard = TerminalGuard::new()?;
-    run(&mut guard.terminal, &cli.left_dir, &cli.right_dir)?;
+    let mut app = App::new(left, right)?;
+
+    run(&mut guard.terminal, &mut app)?;
 
     Ok(())
 }
 
-fn run(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    left: &Option<PathBuf>,
-    right: &Option<PathBuf>,
-) -> anyhow::Result<()> {
+fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> anyhow::Result<()> {
     loop {
-        terminal.draw(|frame| draw(frame, left, right))?;
+        terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if event::poll(Duration::from_millis(50))? {
-            let event = event::read()?;
-            if let Some((code, modifiers)) = normalize_key(&event) {
-                match code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => break,
-                    _ => {}
-                }
-            }
+        let event = event::read_event(Duration::from_millis(50))?;
+        app.handle_event(event);
+
+        if app.should_quit {
+            break;
         }
     }
     Ok(())
-}
-
-fn draw(frame: &mut ratatui::Frame, left: &Option<PathBuf>, right: &Option<PathBuf>) {
-    let area = frame.area();
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(4),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[0]);
-
-    frame.render_widget(
-        Block::default()
-            .title(pane_title(left))
-            .borders(Borders::ALL),
-        panes[0],
-    );
-    frame.render_widget(
-        Block::default()
-            .title(pane_title(right))
-            .borders(Borders::ALL),
-        panes[1],
-    );
-    frame.render_widget(Block::default().title("Log").borders(Borders::ALL), rows[1]);
-
-    let status = Paragraph::new(" q: quit  Ctrl+C: quit")
-        .style(Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_widget(status, rows[2]);
 }
