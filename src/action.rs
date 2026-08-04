@@ -39,5 +39,8 @@ pub enum Action {
     CommandLine,
     OpenEditor,
     OpenDefault,
+    View,
+    FocusLeft,
+    FocusRight,
     Quit,
 }

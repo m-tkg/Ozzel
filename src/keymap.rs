@@ -112,21 +112,26 @@ pub struct Keymap {
 
 impl Keymap {
     /// The dyna-filer-style defaults: arrows/PageUp/PageDown/Home/End move
-    /// the cursor, Tab switches panes, Enter/Backspace navigate, Space
-    /// marks, `a` marks all, `s`/`.` cycle sort/hidden, `C`/`M`/`D`/`R`/`K`
-    /// are the copy/move/delete/rename/mkdir commands, `w` swaps panes,
-    /// `f`/`/` start an incremental filter (Esc clears one that's active),
-    /// `p` zips the marked-or-cursor selection, `u` unzips the file under
-    /// the cursor, `h`/`b` open the history/bookmark jump menus, `B` adds
-    /// a bookmark, `~`/`H` jump to home, `:` runs a shell command (TUI
-    /// suspended), `e` opens the cursor file in an editor (suspended,
-    /// no pause), `x`/`o` open the cursor entry with the OS default
-    /// handler, and `q`/Ctrl+C quit.
+    /// the cursor, `Left`/`Right` additionally jump focus straight to that
+    /// pane, Tab switches panes, Enter/Backspace navigate, Space marks,
+    /// `a` marks all, `s`/`.` cycle sort/hidden, `C`/`M`/`D`/`R`/`K` are the
+    /// copy/move/delete/rename/mkdir commands, `w` swaps panes, `f`/`/`
+    /// start an incremental filter (Esc clears one that's active), `p`
+    /// zips the marked-or-cursor selection, `u` unzips the file under the
+    /// cursor, `h`/`b` open the history/bookmark jump menus, `B` adds a
+    /// bookmark, `~`/`H` jump to home, `:` runs a shell command (TUI
+    /// suspended), `e` opens the cursor file in an editor (suspended, no
+    /// pause), `x`/`o` open the cursor entry in the built-in text viewer,
+    /// and `q`/Ctrl+C quit. `OpenDefault` (the OS default-app handler) is a
+    /// valid action but deliberately unbound by default — rebind it via
+    /// `[keys]` to get the old behavior back.
     pub fn default_dyna() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
             ("up", CursorUp),
             ("down", CursorDown),
+            ("left", FocusLeft),
+            ("right", FocusRight),
             ("pageup", PageUp),
             ("pagedown", PageDown),
             ("home", Top),
@@ -157,8 +162,8 @@ impl Keymap {
             ("H", GoHome),
             (":", CommandLine),
             ("e", OpenEditor),
-            ("x", OpenDefault),
-            ("o", OpenDefault),
+            ("x", View),
+            ("o", View),
             ("q", Quit),
             ("C-c", Quit),
         ];
@@ -354,11 +359,48 @@ mod tests {
         );
         assert_eq!(
             km.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
-            Some(Action::OpenDefault)
+            Some(Action::View)
         );
         assert_eq!(
             km.resolve(KeyCode::Char('o'), KeyModifiers::NONE),
+            Some(Action::View)
+        );
+    }
+
+    #[test]
+    fn open_default_action_is_unbound_by_default_but_rebindable() {
+        // OS-default-app opening is still a valid action — it just isn't
+        // on any key out of the box, since `x`/`o` now open the built-in
+        // viewer instead. A user can still rebind it via `[keys]`.
+        let mut km = Keymap::default_dyna();
+        assert_ne!(
+            km.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
             Some(Action::OpenDefault)
+        );
+        assert_ne!(
+            km.resolve(KeyCode::Char('o'), KeyModifiers::NONE),
+            Some(Action::OpenDefault)
+        );
+
+        let mut overrides = HashMap::new();
+        overrides.insert("g".to_string(), "open_default".to_string());
+        km.merge_overrides(&overrides).unwrap();
+        assert_eq!(
+            km.resolve(KeyCode::Char('g'), KeyModifiers::NONE),
+            Some(Action::OpenDefault)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_left_right_arrows_to_pane_focus() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Left, KeyModifiers::NONE),
+            Some(Action::FocusLeft)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Right, KeyModifiers::NONE),
+            Some(Action::FocusRight)
         );
     }
 

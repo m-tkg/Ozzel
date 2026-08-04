@@ -25,6 +25,18 @@ delete_behavior = "trash"
 # それも未設定の場合はエラーになります。
 # editor = "vim"
 
+# --- 色 -------------------------------------------------------------------
+[colors]
+# カーソル行の背景色。名前付きの ratatui カラー（大文字小文字を区別しない。
+# 例: "red", "light_green", "lightgreen" はどちらも同じ色）、または
+# "#RRGGBB" 形式の16進数カラーコードを指定できます。不正な値を指定した場合は
+# 他の設定エラーと同様に起動時にエラーとなります。
+#
+# デフォルトは薄い緑（#90EE90）です。トゥルーカラー非対応のターミナルでは
+# 正しく表示されないことがあるため、その場合は ANSI の近似色として
+# cursor = "light_green" を指定してください。
+cursor = "#90EE90"
+
 # --- キーバインドの上書き -----------------------------------------------
 # 左辺: キーの組み合わせ（"C-" = Ctrl, "S-" = Shift, "A-" = Alt を
 #        プレフィックスとして重ねられます。例: "C-r", "S-tab"）
@@ -45,9 +57,12 @@ delete_behavior = "trash"
 # "j" = "cursor_down"
 # "k" = "cursor_up"
 
+# 例: x/o に元の「OS既定アプリで開く」を戻す（デフォルトでは未割り当て）
+# "x" = "open_default"
+
 # 使用できるアクション名の一覧:
-# cursor_up, cursor_down, page_up, page_down, top, bottom, switch_pane,
-# enter, parent, cycle_sort, toggle_hidden, swap_panes, refresh, mark,
-# mark_all, rename, mkdir, delete, copy, move, filter, clear_filter,
-# zip_marked, unzip, history_jump, bookmark_jump, bookmark_add, go_home,
-# command_line, open_editor, open_default, quit
+# cursor_up, cursor_down, focus_left, focus_right, page_up, page_down,
+# top, bottom, switch_pane, enter, parent, cycle_sort, toggle_hidden,
+# swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
+# filter, clear_filter, zip_marked, unzip, history_jump, bookmark_jump,
+# bookmark_add, go_home, command_line, open_editor, open_default, view, quit

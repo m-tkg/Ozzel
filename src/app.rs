@@ -22,9 +22,14 @@ use crate::pane::{PAGE_SIZE, Pane};
 use crate::persist::{Bookmarks, History, Side};
 use crate::tasks::delete as delete_task;
 use crate::tasks::{TaskManager, archive, copy_move};
+use crate::viewer;
 
 /// Log lines are capped so a long session's log can't grow without bound.
 const LOG_CAPACITY: usize = 500;
+/// How many lines `Mode::Viewer`'s PageUp/PageDown jumps.
+const VIEWER_PAGE_SIZE: usize = 20;
+/// How many display columns `Mode::Viewer`'s Left/Right scrolls per press.
+const VIEWER_H_SCROLL_STEP: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePane {
@@ -221,6 +226,7 @@ impl App {
                 Mode::Select { .. } => self.handle_select_key(code),
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
+                Mode::Viewer { .. } => self.handle_viewer_key(code),
             },
             AppEvent::Task(task_event) => self.handle_task_event(task_event),
             AppEvent::Tick => {}
@@ -258,6 +264,14 @@ impl App {
             }
             Action::SwitchPane => {
                 self.active = self.active.other();
+                Ok(())
+            }
+            Action::FocusLeft => {
+                self.active = ActivePane::Left;
+                Ok(())
+            }
+            Action::FocusRight => {
+                self.active = ActivePane::Right;
                 Ok(())
             }
             Action::Enter => {
@@ -364,6 +378,10 @@ impl App {
                 self.begin_open_default();
                 Ok(())
             }
+            Action::View => {
+                self.begin_view();
+                Ok(())
+            }
             Action::Quit => {
                 self.begin_quit();
                 Ok(())
@@ -420,8 +438,8 @@ impl App {
     }
 
     /// `Enter`'s dyna-filer behavior: `..`/directories navigate (and get
-    /// recorded in history via `navigate`); anything else opens with the
-    /// OS default handler, same as `OpenDefault`.
+    /// recorded in history via `navigate`); anything else opens in the
+    /// built-in text viewer, same as `View`.
     fn handle_enter(&mut self) {
         let pane = self.active_pane();
         // `..`/directories navigate (via `Pane::enter`, which already
@@ -432,7 +450,7 @@ impl App {
             _ => None,
         };
         match open_path {
-            Some(path) => self.open_with_default(&path),
+            Some(path) => self.open_viewer(&path),
             None => self.navigate(|pane| pane.enter()),
         }
     }
@@ -615,6 +633,73 @@ impl App {
         match open::that_detached(path) {
             Ok(()) => self.log_info(format!("opened {}", path.display())),
             Err(err) => self.log_error(format!("failed to open {}: {err}", path.display())),
+        }
+    }
+
+    /// Only fires on a file (never a directory): opens the built-in
+    /// full-frame text viewer, same target rule as `OpenEditor`.
+    fn begin_view(&mut self) {
+        let pane = self.active_pane();
+        let target = match pane.selected_entry_kind() {
+            Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
+            _ => None,
+        };
+        let Some(path) = target else {
+            self.log_error("cursor is not on a file");
+            return;
+        };
+        self.open_viewer(&path);
+    }
+
+    /// Loads `path` and, if it's readable text, switches to `Mode::Viewer`.
+    /// A binary file is logged and *not* opened (never shown as garbage);
+    /// an I/O error is logged the same way any other failed action would
+    /// be.
+    fn open_viewer(&mut self, path: &Path) {
+        match viewer::load(path) {
+            Ok(loaded) => {
+                self.mode = Mode::Viewer {
+                    path: path.to_path_buf(),
+                    lines: loaded.lines,
+                    scroll: 0,
+                    h_scroll: 0,
+                    truncated: loaded.truncated,
+                };
+            }
+            Err(err) => self.log_error(format!("{}: {err}", path.display())),
+        }
+    }
+
+    /// Fixed keys for `Mode::Viewer`; never consults the keymap. `q`/Esc
+    /// is handled before the field-destructure below so assigning
+    /// `self.mode = Mode::Normal` there never conflicts with the still-live
+    /// borrow the other arms need (same pattern as `handle_prompt_key`).
+    fn handle_viewer_key(&mut self, code: KeyCode) {
+        if matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
+            self.mode = Mode::Normal;
+            return;
+        }
+
+        let Mode::Viewer {
+            lines,
+            scroll,
+            h_scroll,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        let max_scroll = lines.len().saturating_sub(1);
+        match code {
+            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down => *scroll = (*scroll + 1).min(max_scroll),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(VIEWER_PAGE_SIZE),
+            KeyCode::PageDown => *scroll = (*scroll + VIEWER_PAGE_SIZE).min(max_scroll),
+            KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => *scroll = max_scroll,
+            KeyCode::Left => *h_scroll = h_scroll.saturating_sub(VIEWER_H_SCROLL_STEP),
+            KeyCode::Right => *h_scroll += VIEWER_H_SCROLL_STEP,
+            _ => {}
         }
     }
 
@@ -1541,5 +1626,222 @@ mod tests {
                 .iter()
                 .any(|l| l.is_error && l.message.contains("no entry selected"))
         );
+    }
+
+    #[test]
+    fn focus_left_and_focus_right_activate_the_named_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        assert_eq!(app.active, ActivePane::Left);
+
+        app.dispatch(Action::FocusRight);
+        assert_eq!(app.active, ActivePane::Right);
+
+        // No-op when already active.
+        app.dispatch(Action::FocusRight);
+        assert_eq!(app.active, ActivePane::Right);
+
+        app.dispatch(Action::FocusLeft);
+        assert_eq!(app.active, ActivePane::Left);
+    }
+
+    #[test]
+    fn left_right_arrow_keys_switch_pane_focus_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.active, ActivePane::Right);
+        app.handle_event(AppEvent::Input(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.active, ActivePane::Left);
+    }
+
+    #[test]
+    fn view_action_opens_the_built_in_viewer_on_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "one\ntwo\nthree").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "notes.txt");
+
+        app.dispatch(Action::View);
+        match &app.mode {
+            Mode::Viewer {
+                path,
+                lines,
+                scroll,
+                h_scroll,
+                truncated,
+            } => {
+                assert_eq!(path, &dir.path().join("notes.txt"));
+                assert_eq!(
+                    lines,
+                    &vec!["one".to_string(), "two".to_string(), "three".to_string()]
+                );
+                assert_eq!(*scroll, 0);
+                assert_eq!(*h_scroll, 0);
+                assert!(!truncated);
+            }
+            other => panic!("expected Mode::Viewer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_a_file_opens_the_viewer_instead_of_navigating() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "readme.txt");
+
+        app.dispatch(Action::Enter);
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+        assert_eq!(
+            app.panes[0].cwd,
+            dir.path(),
+            "cwd must not change for a file"
+        );
+    }
+
+    #[test]
+    fn view_errors_and_does_not_open_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "sub");
+
+        app.dispatch(Action::View);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.contains("not on a file"))
+        );
+    }
+
+    #[test]
+    fn view_logs_and_does_not_open_a_binary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bin.dat"), [b'a', 0u8, b'b']).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "bin.dat");
+
+        app.dispatch(Action::View);
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "a binary file must not open the viewer"
+        );
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.contains("binary file")),
+            "log: {:?}",
+            app.log
+        );
+    }
+
+    #[test]
+    fn viewer_scroll_clamps_to_the_line_count() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lines.txt"), "1\n2\n3").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "lines.txt");
+        app.dispatch(Action::View);
+
+        // Up from the very top stays at 0.
+        app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0);
+
+        // Down twice reaches the last line (3 lines: max index 2)...
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 2);
+        // ...and one more Down doesn't overshoot it.
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 2);
+
+        app.handle_event(AppEvent::Input(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0);
+        app.handle_event(AppEvent::Input(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 2);
+        app.handle_event(AppEvent::Input(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0);
+        app.handle_event(AppEvent::Input(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 2);
+    }
+
+    #[test]
+    fn viewer_page_up_down_clamp_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: String = (0..5).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.path().join("many.txt"), content).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "many.txt");
+        app.dispatch(Action::View);
+
+        app.handle_event(AppEvent::Input(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(
+            scroll_of(&app),
+            4,
+            "PageDown must clamp to the last line, not overshoot"
+        );
+        app.handle_event(AppEvent::Input(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0, "PageUp must clamp to 0, not underflow");
+    }
+
+    #[test]
+    fn viewer_left_right_scroll_horizontally_without_underflow() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("wide.txt"), "a line of text").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "wide.txt");
+        app.dispatch(Action::View);
+
+        // Left at the start must not underflow (saturating_sub).
+        app.handle_event(AppEvent::Input(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(h_scroll_of(&app), 0);
+
+        app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+        let after_one_right = h_scroll_of(&app);
+        assert!(after_one_right > 0);
+        app.handle_event(AppEvent::Input(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(h_scroll_of(&app), 0);
+    }
+
+    #[test]
+    fn viewer_q_and_esc_close_back_to_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "a.txt");
+
+        app.dispatch(Action::View);
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+        app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        app.dispatch(Action::View);
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    fn scroll_of(app: &App) -> usize {
+        match &app.mode {
+            Mode::Viewer { scroll, .. } => *scroll,
+            other => panic!("expected Mode::Viewer, got {other:?}"),
+        }
+    }
+
+    fn h_scroll_of(app: &App) -> usize {
+        match &app.mode {
+            Mode::Viewer { h_scroll, .. } => *h_scroll,
+            other => panic!("expected Mode::Viewer, got {other:?}"),
+        }
     }
 }

@@ -6,6 +6,7 @@
 mod log_view;
 mod modal;
 mod pane_view;
+mod viewer_view;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -17,6 +18,15 @@ use crate::mode::Mode;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+
+    // The viewer is a full-frame takeover (panes, log, and status bar are
+    // all replaced while a file is open), so it's handled before any of
+    // the normal layout is computed.
+    if matches!(app.mode, Mode::Viewer { .. }) {
+        viewer_view::render(frame, area, &app.mode);
+        return;
+    }
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -31,17 +41,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rows[0]);
 
+    let cursor_color = app.config.colors.cursor;
     pane_view::render(
         frame,
         panes[0],
         &app.panes[0],
         app.active == ActivePane::Left,
+        cursor_color,
     );
     pane_view::render(
         frame,
         panes[1],
         &app.panes[1],
         app.active == ActivePane::Right,
+        cursor_color,
     );
 
     log_view::render(frame, rows[1], app);
@@ -66,6 +79,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             modal::render_confirm(frame, area, message);
         }
         Mode::Normal => render_status_bar(frame, rows[2], app),
+        Mode::Viewer { .. } => unreachable!("handled by the full-frame takeover return above"),
     }
 }
 
@@ -91,7 +105,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let status = Paragraph::new(format!(
-        " {}{}  |  q:quit  Tab:switch  Space:mark  C/M/D/R/K  h:hist  b:bkmk  ~:home  ::cmd  e:edit  x:open",
+        " {}{}  |  q:quit  ←→/Tab:switch  Space:mark  C/M/D/R/K  h:hist  b:bkmk  ~:home  ::cmd  e:edit  x:view",
         info,
         pane.cwd.display()
     ))

@@ -92,6 +92,20 @@ pub enum Mode {
         message: String,
         on_yes: PendingOp,
     },
+    /// The built-in full-frame text viewer (`x`/`o`/Enter-on-file). Fixed
+    /// keys only (see `App::handle_viewer_key`): Up/Down/PageUp/PageDown/
+    /// Home/End (`g`/`G` too) scroll vertically, Left/Right scroll
+    /// horizontally, `q`/Esc closes back to the filer.
+    Viewer {
+        path: PathBuf,
+        lines: Vec<String>,
+        /// Index of the first visible line.
+        scroll: usize,
+        /// Display-column offset of the first visible column.
+        h_scroll: usize,
+        /// The file was larger than the viewer's size cap and got cut off.
+        truncated: bool,
+    },
 }
 
 /// A grapheme-safe single-line text editor: every unit the cursor moves

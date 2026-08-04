@@ -1,5 +1,6 @@
 mod action;
 mod app;
+mod color;
 mod config;
 mod entry;
 mod event;
@@ -12,6 +13,7 @@ mod pane;
 mod persist;
 mod tasks;
 mod ui;
+mod viewer;
 
 use std::io::{self, Stdout};
 use std::panic;

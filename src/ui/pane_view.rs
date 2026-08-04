@@ -21,7 +21,7 @@ const MARK_COL_WIDTH: usize = 1;
 const SIZE_COL_WIDTH: usize = 9;
 const MTIME_COL_WIDTH: usize = 14;
 
-pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool) {
+pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool, cursor_color: Color) {
     let border_style = if active {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
@@ -59,14 +59,20 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool) {
         .map(|(idx, item)| {
             let marked = matches!(item, VisibleItem::Entry(e) if pane.marks.contains(&e.path));
             let text = format_row(item, inner.width as usize, marked);
-            let mut style = if marked {
+            // The cursor row's bg/fg takes priority over the marked
+            // row's yellow fg when both apply — yellow-on-light-green
+            // reads poorly, and the row's own `*` prefix already marks
+            // "marked" unambiguously regardless of color.
+            let style = if idx == cursor {
+                Style::default()
+                    .bg(cursor_color)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else if marked {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default()
             };
-            if idx == cursor {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
             ListItem::new(Line::styled(text, style))
         })
         .collect();

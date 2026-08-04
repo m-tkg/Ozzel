@@ -11,7 +11,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use ratatui::style::Color;
+use serde::{Deserialize, Deserializer};
+
+use crate::color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +22,41 @@ pub enum DeleteBehavior {
     #[default]
     Trash,
     Permanent,
+}
+
+/// `#90EE90` ("light green" in CSS terms) — a soft pastel that reads
+/// clearly as a cursor highlight without the harshness of pure ANSI green.
+/// Requires a truecolor-capable terminal; on one that only supports the
+/// 16-color ANSI palette, set `cursor = "light_green"` in `[colors]`
+/// instead for the closest built-in approximation.
+fn default_cursor_color() -> Color {
+    Color::Rgb(0x90, 0xEE, 0x90)
+}
+
+fn deserialize_color<'de, D>(deserializer: D) -> std::result::Result<Color, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    color::parse_color(&raw).map_err(serde::de::Error::custom)
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ColorsConfig {
+    #[serde(
+        deserialize_with = "deserialize_color",
+        default = "default_cursor_color"
+    )]
+    pub cursor: Color,
+}
+
+impl Default for ColorsConfig {
+    fn default() -> Self {
+        Self {
+            cursor: default_cursor_color(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -31,6 +69,7 @@ pub struct Config {
     /// Editor command `OpenEditor` (`e`) runs; falls back to `$EDITOR`.
     pub editor: Option<String>,
     pub keys: HashMap<String, String>,
+    pub colors: ColorsConfig,
 }
 
 /// Path to the config file, if this platform has a resolvable config dir.
@@ -107,6 +146,34 @@ mod tests {
         assert!(config.keys.is_empty());
         assert!(config.home.is_none());
         assert!(config.editor.is_none());
+        assert_eq!(config.colors.cursor, Color::Rgb(0x90, 0xEE, 0x90));
+    }
+
+    #[test]
+    fn colors_section_absent_falls_back_to_default_cursor_color() {
+        let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
+        assert_eq!(config.colors.cursor, Color::Rgb(0x90, 0xEE, 0x90));
+    }
+
+    #[test]
+    fn colors_cursor_accepts_named_color() {
+        let config: Config = toml::from_str("[colors]\ncursor = \"red\"").unwrap();
+        assert_eq!(config.colors.cursor, Color::Red);
+    }
+
+    #[test]
+    fn colors_cursor_accepts_hex_color() {
+        let config: Config = toml::from_str("[colors]\ncursor = \"#123456\"").unwrap();
+        assert_eq!(config.colors.cursor, Color::Rgb(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn colors_cursor_invalid_value_is_a_hard_parse_error() {
+        let result: Result<Config, _> = toml::from_str("[colors]\ncursor = \"not-a-color\"");
+        assert!(
+            result.is_err(),
+            "an invalid color must fail to parse, not silently fall back"
+        );
     }
 
     #[test]
