@@ -69,8 +69,8 @@ pub enum Action {
     /// Opens the full-frame in-memory log viewer (`Mode::Log`); see
     /// `App::begin_show_log`.
     ShowLog,
-    /// Opens the command-palette (`Mode::FunctionList`) — dyna's "Function
-    /// List": a filterable list of every action, executable by name. See
+    /// Opens the command palette (`Mode::FunctionList`): a filterable
+    /// list of every action, executable by name. See
     /// `App::begin_function_list`.
     FunctionList,
     Quit,

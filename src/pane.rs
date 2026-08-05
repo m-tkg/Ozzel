@@ -79,8 +79,8 @@ pub struct Pane {
     /// same as a real browser).
     pub forward: Vec<PathBuf>,
     /// `Some` when this pane is browsing inside a `.zip` archive as a
-    /// Virtual Directory (dyna-filer's feature of the same name) instead
-    /// of a real directory — see `virtual_dir`'s module doc comment for
+    /// Virtual Directory instead of a real directory — see
+    /// `virtual_dir`'s module doc comment for
     /// the overall design. `cwd` is deliberately left pointing at the real
     /// directory containing the archive the whole time a pane is virtual
     /// (nothing about entering/navigating/leaving one ever changes it),
@@ -416,7 +416,7 @@ impl Pane {
 
     /// The kind of the entry under the cursor, or `None` for `..`/empty.
     /// Used to decide whether `Enter` should navigate (dirs) or open with
-    /// the OS default handler (everything else, dyna-filer style).
+    /// the OS default handler (everything else).
     pub fn selected_entry_kind(&self) -> Option<EntryKind> {
         match self.visible_entries().get(self.cursor) {
             Some(VisibleItem::Entry(e)) => Some(e.kind),
@@ -425,8 +425,8 @@ impl Pane {
     }
 
     /// Toggles the mark on whatever is under the cursor (a no-op on `..`
-    /// or an empty pane) and, per dyna-filer convention, advances the
-    /// cursor down one row when a toggle actually happened.
+    /// or an empty pane) and advances the cursor down one row when a
+    /// toggle actually happened.
     pub fn toggle_mark_cursor(&mut self) {
         let path = match self.visible_entries().get(self.cursor) {
             Some(VisibleItem::Entry(e)) => Some(e.path.clone()),

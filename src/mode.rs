@@ -92,8 +92,8 @@ pub enum PendingOp {
         dest_dir: PathBuf,
     },
     /// A confirmed extraction from a Virtual Directory (`C` while the
-    /// active pane is browsing inside a `.zip`) — dyna's "select + Copy =
-    /// partial extraction". `inner_targets` are archive-internal paths
+    /// active pane is browsing inside a `.zip`): a partial extraction of
+    /// the marked/cursor entries. `inner_targets` are archive-internal paths
     /// (marks/cursor from the virtual pane), extracted into `dest_dir`
     /// (the *other*, necessarily real, pane's cwd).
     Extract {
@@ -177,8 +177,8 @@ pub enum Mode {
     Log {
         scroll_from_bottom: usize,
     },
-    /// The command palette (`F`/`S-f`, dyna's "Function List"): a
-    /// filterable, scrollable list of every action. Typing narrows the
+    /// The command palette (`F`/`S-f`): a filterable, scrollable list of
+    /// every action. Typing narrows the
     /// list (see `crate::function_list::filter_actions`); `cursor` indexes
     /// into that *filtered* list, not `Action::ALL`, so it's clamped
     /// relative to whatever the current `input` matches.

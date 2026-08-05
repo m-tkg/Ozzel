@@ -252,7 +252,7 @@ fn push_log_line(log: &mut VecDeque<LogLine>, message: String, is_error: bool) {
 /// by `App::new` (startup) and `App::apply_reloaded_config` (`,`'s live
 /// reload), so the two can never build a keymap two different ways.
 fn build_keymap(config: &Config) -> anyhow::Result<Keymap> {
-    let mut keymap = Keymap::default_dyna();
+    let mut keymap = Keymap::defaults();
     keymap
         .merge_overrides(&config.keys)
         .context("invalid [keys] entry in config")?;
@@ -893,11 +893,10 @@ impl App {
         }
     }
 
-    /// `Open`'s dyna-filer behavior (bound to `Enter`/`o` by default, and
-    /// the single action `Enter`/`View` used to be split across before
-    /// they were merged): `..`/directories navigate (and get recorded in
-    /// history via `navigate`); anything else opens in the built-in
-    /// viewer.
+    /// `Open`'s behavior (bound to `Enter`/`o` by default, and the single
+    /// action `Enter`/`View` used to be split across before they were
+    /// merged): `..`/directories navigate (and get recorded in history
+    /// via `navigate`); anything else opens in the built-in viewer.
     ///
     /// Virtual Directory (browsing a `.zip` as if it were a directory —
     /// see `virtual_dir`) hooks into exactly this one function, not a
@@ -1633,8 +1632,8 @@ impl App {
     /// (`Copy 3 item(s) -> /dest? (2 will be overwritten) (y/n)`) rather
     /// than two sequential ones.
     fn begin_transfer(&mut self, kind: TransferKind) {
-        // Virtual Directory: `C` (Copy) is repurposed as extract (dyna's
-        // "select + Copy = partial extraction" — see `begin_extract`);
+        // Virtual Directory: `C` (Copy) is repurposed as extract (partial
+        // extraction of the marked/cursor entries — see `begin_extract`);
         // `M` (Move) has no virtual-mode meaning at all ("move INTO/OUT-as-
         // move" is explicitly rejected) and always bails. Copying/moving
         // INTO a virtual pane (the *other* pane is the one browsing a
@@ -1935,8 +1934,8 @@ impl App {
         });
     }
 
-    /// `C` while the active pane is a Virtual Directory: dyna's "select +
-    /// Copy = partial extraction". `inner_targets` (marks-or-cursor) are
+    /// `C` while the active pane is a Virtual Directory: extracts the
+    /// marked (or cursor) entries out of the archive. `inner_targets` are
     /// archive-internal paths, extracted into the *other* pane's real
     /// cwd — already confirmed by `begin_transfer` to not itself be
     /// virtual before this is ever called. Same confirm-before-overwrite

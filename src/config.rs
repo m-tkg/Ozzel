@@ -50,8 +50,7 @@ fn default_dim_inactive() -> bool {
     true
 }
 
-/// Cyan (水色) for directories — the dyna-filer-esque convention this app
-/// otherwise follows throughout.
+/// Cyan (水色) for directories.
 fn default_directory_color() -> Color {
     Color::Cyan
 }
@@ -350,7 +349,7 @@ mod tests {
         // examples/config.toml's [bindings] block is meant to be the exact,
         // hand-committed output of `Keymap::to_bindings_toml()` (see its
         // doc comment) — this guards against it ever drifting from
-        // whatever `Keymap::default_dyna()` actually builds, comparing
+        // whatever `Keymap::defaults()` actually builds, comparing
         // parsed maps (not raw text) so comments/whitespace/line-order in
         // the checked-in file are free to differ.
         #[derive(Deserialize)]
@@ -364,15 +363,15 @@ mod tests {
         let from_file: BindingsOnly =
             toml::from_str(&text).expect("examples/config.toml must parse");
 
-        let generated_text = crate::keymap::Keymap::default_dyna().to_bindings_toml();
+        let generated_text = crate::keymap::Keymap::defaults().to_bindings_toml();
         let generated: BindingsOnly = toml::from_str(&generated_text)
             .expect("Keymap::to_bindings_toml()'s own output must parse");
 
         assert_eq!(
             from_file.bindings, generated.bindings,
             "examples/config.toml's [bindings] section has drifted from \
-             Keymap::default_dyna() — regenerate it from \
-             Keymap::default_dyna().to_bindings_toml()'s real output"
+             Keymap::defaults() — regenerate it from \
+             Keymap::defaults().to_bindings_toml()'s real output"
         );
     }
 

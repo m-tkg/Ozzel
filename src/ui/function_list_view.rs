@@ -1,6 +1,6 @@
 //! Renders the `F`/`S-f` command palette (`Mode::FunctionList`): a centered
-//! popup — dyna's "Function List" — with an incremental-filter input line
-//! on top and the matching actions listed below it, the highlighted one
+//! popup with an incremental-filter input line on top and the matching
+//! actions listed below it, the highlighted one
 //! reversed. A popup overlay (like `modal::render_select`), not a
 //! full-frame takeover: the two panes stay visible (if dimmed by the
 //! `Clear` underneath the popup box) so the palette doesn't feel like it

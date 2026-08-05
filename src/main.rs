@@ -53,7 +53,7 @@ static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// `TerminalGuard`'s own scope.
 static MOUSE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// ozzel: a dyna-filer-style two-pane TUI file manager.
+/// ozzel: a two-pane TUI file manager.
 #[derive(Parser, Debug)]
 #[command(name = "ozzel", version, about = "Two-pane TUI file manager")]
 struct Cli {

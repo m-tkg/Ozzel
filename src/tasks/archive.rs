@@ -374,8 +374,8 @@ pub fn extract_collisions(inner_targets: &[PathBuf], dest_dir: &Path) -> Vec<Pat
 /// `TaskManager::spawn` closure signature. `inner_targets` are
 /// archive-internal paths (from the virtual pane's marks-or-cursor) —
 /// each one lands under `dest_dir` by its own `file_name()`, a file
-/// extracted directly or a directory extracted as the whole subtree under
-/// it (matching dyna-filer's "select + Copy = partial extraction").
+/// extracted directly or a directory extracted as the whole subtree
+/// under it.
 pub fn run_extract(
     id: TaskId,
     tx: Sender<TaskEvent>,

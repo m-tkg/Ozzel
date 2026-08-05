@@ -111,9 +111,9 @@ pub struct Keymap {
 }
 
 impl Keymap {
-    /// The dyna-filer-style defaults: arrows/PageUp/PageDown/Home/End move
+    /// The default keymap: arrows/PageUp/PageDown/Home/End move
     /// the cursor, `Left`/`Right` additionally jump focus straight to that
-    /// pane (ijkl-style `i`/`k`/`j`/`l` are bound the same way, alongside
+    /// pane (`i`/`k`/`j`/`l` are bound the same way, alongside
     /// the arrows — not instead of them), Tab switches panes, `Enter`/`o`
     /// run `Open` (directory navigates in, recorded in history; anything
     /// else opens in the built-in viewer — this merges what used to be
@@ -148,7 +148,7 @@ impl Keymap {
     /// name in the same directory, `y` copies its absolute path to the
     /// clipboard, `S-l` (capital `L`) opens the full in-memory log, and
     /// `S-f` (capital `F`) opens the function-list command palette.
-    pub fn default_dyna() -> Self {
+    pub fn defaults() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
             ("up", CursorUp),
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn default_keymap_resolves_core_bindings() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('q'), KeyModifiers::NONE),
             Some(Action::Quit)
@@ -469,10 +469,10 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_w_to_swap_panes_and_u_to_unzip() {
-        // `u` used to be SwapPanes; Phase 4 rebinds it to Unzip (dyna-filer's
-        // unpack key) and moves SwapPanes to `w`. Pin both here so a future
+        // `u` used to be SwapPanes; it was rebound to Unzip (the unpack
+        // key) and SwapPanes moved to `w`. Pin both here so a future
         // change can't silently swap them back without a test failing.
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('w'), KeyModifiers::NONE),
             Some(Action::SwapPanes)
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_filter_and_zip_keys() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('f'), KeyModifiers::NONE),
             Some(Action::Filter)
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_history_back_and_forward_to_shift_arrows() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Left, KeyModifiers::SHIFT),
             Some(Action::HistoryBack)
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_duplicate_and_copy_path() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('c'), KeyModifiers::NONE),
             Some(Action::Duplicate)
@@ -538,9 +538,9 @@ mod tests {
     #[test]
     fn default_keymap_binds_show_log_and_function_list_to_shifted_letters() {
         // Bound via the bare uppercase form ("L"/"F"), not "S-l"/"S-f" —
-        // see `default_dyna`'s doc comment on why only the former actually
+        // see `defaults`'s doc comment on why only the former actually
         // matches a real terminal's Shift+letter key report.
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('L'), KeyModifiers::SHIFT),
             Some(Action::ShowLog)
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_history_bookmark_home_and_external_keys() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         // `h` moved to Help (see the dedicated test below); history is now
         // on `S-h` (capital `H`) only.
         assert_eq!(
@@ -591,7 +591,7 @@ mod tests {
     fn default_keymap_binds_enter_and_o_both_to_open() {
         // Enter/View merged into a single action, Open, bound to both
         // Enter and o (x is freed, no longer bound to anything).
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Enter, KeyModifiers::NONE),
             Some(Action::Open)
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_comma_to_edit_config() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char(','), KeyModifiers::NONE),
             Some(Action::EditConfig)
@@ -616,7 +616,7 @@ mod tests {
     fn default_keymap_binds_r_and_shift_r_both_to_rename() {
         // The showcase multi-binding pair: `r` and `R`/`S-r` (the same real
         // keypress) both resolve to Rename.
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('r'), KeyModifiers::NONE),
             Some(Action::Rename)
@@ -629,7 +629,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_d_and_shift_d_both_to_delete() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('d'), KeyModifiers::NONE),
             Some(Action::Delete)
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_h_and_question_mark_to_help_and_shift_h_to_history() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('h'), KeyModifiers::NONE),
             Some(Action::Help)
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn default_keymap_go_home_is_bound_only_to_tilde() {
         // `H`/`S-h` moved to HistoryJump; GoHome no longer has a second key.
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('~'), KeyModifiers::NONE),
             Some(Action::GoHome)
@@ -676,7 +676,7 @@ mod tests {
         // OS-default-app opening is still a valid action — it just isn't
         // on any key out of the box, since `Enter`/`o` run `Open` (the
         // built-in viewer) instead. A user can still rebind it via `[keys]`.
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         assert_ne!(
             km.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
             Some(Action::OpenDefault)
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_left_right_arrows_to_pane_focus() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Left, KeyModifiers::NONE),
             Some(Action::FocusLeft)
@@ -710,7 +710,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_ijkl_navigation_alongside_the_arrows() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('i'), KeyModifiers::NONE),
             Some(Action::CursorUp)
@@ -744,7 +744,7 @@ mod tests {
         // No real conflict existed (lowercase k was unbound before ijkl),
         // but this pins the resolved intent explicitly: Mkdir stays on
         // uppercase K/S-k only, lowercase k is cursor_down.
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Char('K'), KeyModifiers::SHIFT),
             Some(Action::Mkdir)
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_shift_up_down_to_top_bottom_and_keeps_home_end() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Up, KeyModifiers::SHIFT),
             Some(Action::Top)
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn default_keymap_binds_shift_enter_to_open_default_and_keeps_plain_enter() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert_eq!(
             km.resolve(KeyCode::Enter, KeyModifiers::SHIFT),
             Some(Action::OpenDefault)
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn merge_overrides_rebinds_and_unbinds() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut overrides = HashMap::new();
         overrides.insert("C-c".to_string(), "copy".to_string());
         overrides.insert("q".to_string(), "none".to_string());
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn merge_overrides_rejects_unknown_action_name() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut overrides = HashMap::new();
         overrides.insert("x".to_string(), "not_a_real_action".to_string());
         assert!(km.merge_overrides(&overrides).is_err());
@@ -817,7 +817,7 @@ mod tests {
         // `enter` and `view` no longer exist as of the merge into `open` —
         // this is an intentional breaking rename, so the old names must
         // still be hard errors, not silently ignored.
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut with_enter = HashMap::new();
         with_enter.insert("z".to_string(), "enter".to_string());
         assert!(km.merge_overrides(&with_enter).is_err());
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn apply_bindings_binds_every_listed_combo_to_the_action() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut bindings = HashMap::new();
         bindings.insert("quit".to_string(), vec!["z".to_string(), "S-z".to_string()]);
         km.apply_bindings(&bindings).unwrap();
@@ -846,7 +846,7 @@ mod tests {
 
     #[test]
     fn apply_bindings_overrides_whatever_the_combo_previously_held() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         // "q" defaults to Quit; rebind it via [bindings] to Copy.
         let mut bindings = HashMap::new();
         bindings.insert("copy".to_string(), vec!["q".to_string()]);
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn apply_bindings_is_applied_after_keys_and_wins_on_overlap() {
         // Mirrors App::new's actual order: [keys] first, then [bindings].
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut keys = HashMap::new();
         keys.insert("z".to_string(), "quit".to_string());
         km.merge_overrides(&keys).unwrap();
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn apply_bindings_rejects_unknown_action_name() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut bindings = HashMap::new();
         bindings.insert("not_a_real_action".to_string(), vec!["z".to_string()]);
         assert!(km.apply_bindings(&bindings).is_err());
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn apply_bindings_rejects_the_old_enter_and_view_action_names() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut with_enter = HashMap::new();
         with_enter.insert("enter".to_string(), vec!["z".to_string()]);
         assert!(km.apply_bindings(&with_enter).is_err());
@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn apply_bindings_rejects_a_bad_combo() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut bindings = HashMap::new();
         bindings.insert("quit".to_string(), vec!["not-a-combo".to_string()]);
         assert!(km.apply_bindings(&bindings).is_err());
@@ -907,14 +907,14 @@ mod tests {
 
     #[test]
     fn combos_for_lists_every_key_bound_to_an_action_sorted() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         let combos = km.combos_for(Action::Rename);
         assert_eq!(combos, vec!["R".to_string(), "r".to_string()]);
     }
 
     #[test]
     fn combos_for_an_unbound_action_is_empty() {
-        let mut km = Keymap::default_dyna();
+        let mut km = Keymap::defaults();
         let mut overrides = HashMap::new();
         overrides.insert("g".to_string(), "open_default".to_string());
         km.merge_overrides(&overrides).unwrap();
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn ordered_bindings_lists_every_bound_action_in_category_then_all_order() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         let ordered = km.ordered_bindings();
 
         // Every action with at least one combo bound must appear exactly
@@ -958,7 +958,7 @@ mod tests {
 
     #[test]
     fn to_bindings_toml_starts_with_the_bindings_header() {
-        let km = Keymap::default_dyna();
+        let km = Keymap::defaults();
         assert!(km.to_bindings_toml().starts_with("[bindings]\n"));
     }
 
@@ -967,14 +967,14 @@ mod tests {
         // The whole point of the generator: parsing its own output back
         // through `apply_bindings` on an *empty* keymap (no compiled-in
         // defaults at all) must reconstruct exactly the same bindings map
-        // `default_dyna` builds from source — proving every emitted combo
+        // `defaults` builds from source — proving every emitted combo
         // string is faithful to `KeyCombo::parse`, not just readable.
         #[derive(Deserialize)]
         struct BindingsOnly {
             bindings: HashMap<String, Vec<String>>,
         }
 
-        let default_km = Keymap::default_dyna();
+        let default_km = Keymap::defaults();
         let toml_text = default_km.to_bindings_toml();
 
         let parsed: BindingsOnly = toml::from_str(&toml_text)

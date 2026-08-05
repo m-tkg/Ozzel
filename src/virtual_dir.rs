@@ -1,6 +1,6 @@
-//! dyna-filer's "Virtual Directory": browsing a `.zip` archive's contents
-//! as if it were a real directory, without ever extracting the whole
-//! thing to disk first. A `Pane` holding `Some(VirtualDir)` reads its
+//! "Virtual Directory": browsing a `.zip` archive's contents as if it
+//! were a real directory, without ever extracting the whole thing to
+//! disk first. A `Pane` holding `Some(VirtualDir)` reads its
 //! listing from here (see `read_zip_dir_entries`) instead of
 //! `entry::read_dir_entries`; everything else about the pane (sort,
 //! filter, marks, hidden-toggle) is unmodified generic code that has no

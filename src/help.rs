@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn includes_a_multi_bound_action_with_comma_joined_keys() {
-        let keymap = Keymap::default_dyna();
+        let keymap = Keymap::defaults();
         let lines = build_lines(&keymap);
         let rename_row = lines
             .iter()
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn reflects_a_keys_override() {
-        let mut keymap = Keymap::default_dyna();
+        let mut keymap = Keymap::defaults();
         let mut overrides = HashMap::new();
         overrides.insert("z".to_string(), "quit".to_string());
         overrides.insert("q".to_string(), "none".to_string());
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn reflects_a_bindings_override() {
-        let mut keymap = Keymap::default_dyna();
+        let mut keymap = Keymap::defaults();
         let mut bindings = HashMap::new();
         bindings.insert("open".to_string(), vec!["v".to_string()]);
         keymap.apply_bindings(&bindings).unwrap();
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn skips_an_action_with_zero_combos_bound() {
-        let mut keymap = Keymap::default_dyna();
+        let mut keymap = Keymap::defaults();
         // OpenDefault defaults to S-enter only; unbind that so it has none.
         let mut overrides = HashMap::new();
         overrides.insert("S-enter".to_string(), "none".to_string());
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn ends_with_the_fixed_key_section() {
-        let keymap = Keymap::default_dyna();
+        let keymap = Keymap::defaults();
         let lines = build_lines(&keymap);
         assert!(matches!(lines.last(), Some(HelpLine::Text(_))));
         assert!(
