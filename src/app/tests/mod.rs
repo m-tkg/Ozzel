@@ -1,0 +1,9 @@
+mod dispatch;
+mod external;
+mod file_ops;
+mod mouse;
+mod navigation;
+mod pager;
+mod settings;
+mod startup;
+mod virtual_dir;
