@@ -116,24 +116,33 @@ fn unix_shell_command(shell: &str, cmdline: &str) -> (String, Vec<String>) {
 /// `keyboard_enhancement` mirrors whatever `TerminalGuard` decided at
 /// startup (see `main.rs`): when `true`, the kitty keyboard-enhancement
 /// flags ozzel pushed are popped *before* the child gets the terminal and
-/// re-pushed immediately after re-enabling raw mode, symmetric with
-/// `TerminalGuard`'s own push/pop — otherwise the child would either
-/// inherit flags it doesn't expect, or (worse) ozzel would come back with
-/// no flags active despite `main.rs` believing they still were, breaking
-/// `S-enter` disambiguation after e.g. `:vim`.
+/// re-pushed immediately after re-entering the alternate screen, symmetric
+/// with `TerminalGuard`'s own push-after-enter/pop-before-leave ordering —
+/// otherwise the child would either inherit flags it doesn't expect, or
+/// (worse) the *pop* here would land on the alternate screen's flag stack
+/// instead of the one the corresponding push actually used (kitty-protocol
+/// terminals keep those two stacks separate), leaving the flags stuck
+/// active on the main screen once the child exits. See `main.rs`'s
+/// `TerminalGuard::new` for the full explanation of why the ordering
+/// matters here.
 ///
 /// `mouse` gets the exact same treatment for the same reason: mouse
 /// capture (if `TerminalGuard` enabled it) is disabled before the child
 /// gets the terminal — otherwise a suspended `:vim` would receive raw
 /// mouse escape sequences instead of native mouse support, and its own
 /// terminal-selection behavior would be broken too — and re-enabled right
-/// after raw mode comes back.
+/// after raw mode comes back (mouse capture isn't a per-screen-buffer
+/// stack, so its ordering relative to the alternate screen doesn't matter
+/// for correctness the way the keyboard flags' does; it's kept alongside
+/// them here purely for symmetry).
 pub fn run_suspended(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     req: &ExternalRequest,
     keyboard_enhancement: bool,
     mouse: bool,
 ) -> Result<Option<String>> {
+    // Popped *before* `LeaveAlternateScreen`, while the alternate screen
+    // is still current — see this function's doc comment.
     if keyboard_enhancement {
         execute!(io::stdout(), PopKeyboardEnhancementFlags)
             .context("failed to pop keyboard enhancement flags")?;
@@ -155,11 +164,28 @@ pub fn run_suspended(
         .stderr(Stdio::inherit());
     let spawn_result = spawn_and_wait(&mut command);
 
-    // Re-enabling raw mode (and re-pushing the enhancement flags, if
-    // active) is common to every outcome, so it's hoisted above the match
-    // instead of duplicated in all three arms.
-    let reenable = |pause_message: Option<String>| -> Result<()> {
+    // Re-enabling raw mode, re-entering the alternate screen, and
+    // re-pushing the enhancement flags (if active) is common to every
+    // outcome, so it's hoisted above the match instead of duplicated in
+    // both arms. The pause message (if any) is deliberately printed and
+    // waited-on *before* `EnterAlternateScreen` — on the main screen,
+    // which is the entire point of `pause_after` ("stays on screen and
+    // readable instead of being immediately overwritten by the redrawn
+    // TUI") — but *after* `enable_raw_mode`, since `wait_for_keypress`
+    // needs raw mode to see a single keystroke immediately rather than
+    // waiting on the tty driver's own line buffering for an Enter that
+    // was never asked for. Only once that's done do we re-enter the
+    // alternate screen and re-push the flags, so the push lands back on
+    // the alternate screen's own stack — mirroring `TerminalGuard::new`.
+    let reenter = |pause_message: Option<String>| -> Result<()> {
         enable_raw_mode().context("failed to re-enable raw mode")?;
+        if let Some(msg) = pause_message {
+            print!("{msg}");
+            let _ = io::stdout().flush();
+            wait_for_keypress().context("failed to wait for keypress")?;
+        }
+        execute!(io::stdout(), EnterAlternateScreen)
+            .context("failed to re-enter alternate screen")?;
         if keyboard_enhancement {
             execute!(
                 io::stdout(),
@@ -171,11 +197,6 @@ pub fn run_suspended(
             execute!(io::stdout(), EnableMouseCapture)
                 .context("failed to re-enable mouse capture")?;
         }
-        if let Some(msg) = pause_message {
-            print!("{msg}");
-            let _ = io::stdout().flush();
-            wait_for_keypress().context("failed to wait for keypress")?;
-        }
         Ok(())
     };
 
@@ -184,16 +205,15 @@ pub fn run_suspended(
             let pause_message = req
                 .pause_after
                 .then(|| format!("\r\n[ozzel] exit: {status} — press any key\r\n"));
-            reenable(pause_message)?;
+            reenter(pause_message)?;
             None
         }
         Err(err) => {
-            reenable(None)?;
+            reenter(None)?;
             Some(format!("failed to run `{}`: {err}", req.cmdline))
         }
     };
 
-    execute!(io::stdout(), EnterAlternateScreen).context("failed to re-enter alternate screen")?;
     terminal.clear().context("failed to clear terminal")?;
     Ok(spawn_error)
 }

@@ -121,6 +121,58 @@ struct TerminalGuard {
     keyboard_enhancement: bool,
 }
 
+/// Writes the alternate-screen/keyboard-enhancement-flags half of startup,
+/// in the one order that lands the push on the *alternate* screen's flag
+/// stack rather than the main screen's: entering the alternate screen
+/// *before* pushing. kitty-protocol terminals (Ghostty, kitty itself, ...)
+/// maintain that flag stack *separately per screen buffer*, and every
+/// corresponding pop in this codebase (`write_teardown_sequence` below,
+/// and `external::run_suspended`'s own resume path) happens while the
+/// alternate screen is still current — so a push landing on the wrong
+/// stack here is exactly what leaves the flags stuck active on the main
+/// screen after exit (Ctrl+A etc. showing up as literal `7;5u`-style
+/// bytes in the shell). Split out from `TerminalGuard::new` purely so this
+/// ordering is directly unit-testable against a `Vec<u8>` sink instead of
+/// a real terminal (see the tests below) — mouse capture isn't part of it
+/// since it isn't a per-screen-buffer stack, so its ordering here doesn't
+/// affect correctness.
+fn write_startup_sequence(w: &mut impl io::Write, keyboard_enhancement: bool) -> io::Result<()> {
+    execute!(w, EnterAlternateScreen)?;
+    if keyboard_enhancement {
+        execute!(
+            w,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
+    Ok(())
+}
+
+/// The mirror of `write_startup_sequence`, for final teardown (`Drop`/the
+/// panic hook — *not* `external::run_suspended`'s temporary suspend,
+/// which has its own reason to keep raw-mode/pause-message timing
+/// interleaved differently): pops *before* `LeaveAlternateScreen`, while
+/// the alternate screen — and therefore its flag stack, the one the
+/// matching push actually landed on — is still current. Then, as defense
+/// in depth, an *unconditional* second pop after leaving: if every push/
+/// pop in this codebase stayed perfectly paired this is always popping an
+/// empty stack (a spec'd no-op), but it costs nothing and means a desync
+/// anywhere — a bug here, a terminal that doesn't fully implement the
+/// separate-stacks behavior — still can't leave the *shell* stuck with
+/// stray flags active, which is the failure mode that actually matters to
+/// a user. `keyboard_enhancement_active` gates only the first (ordering-
+/// critical) pop; the defense-in-depth one is unconditional on purpose.
+fn write_teardown_sequence(
+    w: &mut impl io::Write,
+    keyboard_enhancement_active: bool,
+) -> io::Result<()> {
+    if keyboard_enhancement_active {
+        execute!(w, PopKeyboardEnhancementFlags)?;
+    }
+    execute!(w, LeaveAlternateScreen)?;
+    execute!(w, PopKeyboardEnhancementFlags)?;
+    Ok(())
+}
+
 impl TerminalGuard {
     /// `mouse` mirrors `config.mouse` (default on): when `true`, mouse
     /// capture is enabled right alongside the kitty keyboard-enhancement
@@ -134,18 +186,17 @@ impl TerminalGuard {
         // Queried right after raw mode is up, and only once per run: this
         // makes a real terminal round-trip (it writes an escape query and
         // reads the response), so re-querying per-keystroke would add
-        // needless latency for a value that can't change mid-session.
+        // needless latency for a value that can't change mid-session. The
+        // query itself doesn't care which screen buffer is active, so its
+        // position relative to `write_startup_sequence` below is
+        // arbitrary.
         let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
         let mut stdout = io::stdout();
+        write_startup_sequence(&mut stdout, keyboard_enhancement)?;
         if keyboard_enhancement {
-            execute!(
-                stdout,
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            )?;
             KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
         }
         sync_mouse_capture(mouse)?;
-        execute!(stdout, EnterAlternateScreen)?;
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         Ok(Self {
             terminal,
@@ -156,13 +207,11 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        if KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst) {
-            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        }
         if MOUSE_CAPTURE_ACTIVE.swap(false, Ordering::SeqCst) {
             let _ = execute!(io::stdout(), DisableMouseCapture);
         }
+        let active = KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst);
+        let _ = write_teardown_sequence(&mut io::stdout(), active);
         let _ = disable_raw_mode();
     }
 }
@@ -172,17 +221,17 @@ impl Drop for TerminalGuard {
 /// by the alternate screen or mangled by raw mode. Installed before
 /// `TerminalGuard` exists, so it can't borrow the guard's fields — it
 /// consults the shared `KEYBOARD_ENHANCEMENT_ACTIVE`/`MOUSE_CAPTURE_ACTIVE`
-/// flags instead.
+/// flags instead. Uses the exact same `write_teardown_sequence` as
+/// `TerminalGuard::drop` — a panic must leave the terminal exactly as
+/// clean as a normal quit does.
 fn install_panic_hook() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        if KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst) {
-            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        }
         if MOUSE_CAPTURE_ACTIVE.swap(false, Ordering::SeqCst) {
             let _ = execute!(io::stdout(), DisableMouseCapture);
         }
+        let active = KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst);
+        let _ = write_teardown_sequence(&mut io::stdout(), active);
         let _ = disable_raw_mode();
         default_hook(info);
     }));
@@ -381,6 +430,111 @@ mod tests {
         assert!(!mouse_capture_needs_sync(false, false));
         assert!(mouse_capture_needs_sync(true, false));
         assert!(mouse_capture_needs_sync(false, true));
+    }
+
+    // --- Kitty keyboard-enhancement flag stack ordering ---------------
+    //
+    // Regression tests for the bug this round fixes: the flags leaking
+    // active into the shell after exit (Ctrl+A etc. arriving as literal
+    // `7;5u`-style bytes) because a push/pop landed on the wrong one of
+    // the kitty protocol's two *separate* per-screen-buffer flag stacks
+    // (main vs. alternate). These don't need a real terminal — they
+    // capture the exact bytes `write_startup_sequence`/
+    // `write_teardown_sequence` write into a `Vec<u8>` and check the
+    // *order* the alternate-screen and keyboard-flags escapes appear in,
+    // which is the entire crux of the bug.
+
+    /// crossterm's own escape bytes for each of the four commands
+    /// involved, confirmed once against the real `execute!` macro output
+    /// rather than guessed — see this test module's use of them below.
+    const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
+    const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
+    const PUSH_KEYBOARD_FLAGS: &str = "\x1b[>1u";
+    const POP_KEYBOARD_FLAGS: &str = "\x1b[<1u";
+
+    fn captured(f: impl FnOnce(&mut Vec<u8>) -> io::Result<()>) -> String {
+        let mut buf = Vec::new();
+        f(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn startup_sequence_pushes_keyboard_flags_after_entering_the_alternate_screen() {
+        let out = captured(|w| write_startup_sequence(w, true));
+        let enter_pos = out.find(ENTER_ALT_SCREEN).expect("EnterAlternateScreen");
+        let push_pos = out
+            .find(PUSH_KEYBOARD_FLAGS)
+            .expect("PushKeyboardEnhancementFlags");
+        assert!(
+            enter_pos < push_pos,
+            "push must come after entering the alternate screen, so it lands \
+             on the alternate screen's own flag stack: {out:?}"
+        );
+    }
+
+    #[test]
+    fn startup_sequence_without_keyboard_enhancement_only_enters_the_alternate_screen() {
+        let out = captured(|w| write_startup_sequence(w, false));
+        assert!(out.contains(ENTER_ALT_SCREEN));
+        assert!(!out.contains(PUSH_KEYBOARD_FLAGS));
+    }
+
+    #[test]
+    fn teardown_sequence_pops_keyboard_flags_before_leaving_the_alternate_screen() {
+        let out = captured(|w| write_teardown_sequence(w, true));
+        let pop_positions: Vec<usize> = out
+            .match_indices(POP_KEYBOARD_FLAGS)
+            .map(|(i, _)| i)
+            .collect();
+        let leave_pos = out.find(LEAVE_ALT_SCREEN).expect("LeaveAlternateScreen");
+        assert_eq!(
+            pop_positions.len(),
+            2,
+            "expected the ordering-critical pop plus the defense-in-depth \
+             extra one: {out:?}"
+        );
+        assert!(
+            pop_positions[0] < leave_pos,
+            "the first pop must land on the alternate screen's own flag \
+             stack — the one the matching push actually used — which only \
+             happens while the alternate screen is still current: {out:?}"
+        );
+        assert!(
+            pop_positions[1] > leave_pos,
+            "the defense-in-depth pop must come after leaving, so it \
+             targets the main screen's stack too: {out:?}"
+        );
+    }
+
+    #[test]
+    fn teardown_sequence_still_emits_the_defense_in_depth_pop_even_when_never_active() {
+        // The whole point of the second pop is to cover *desync* cases —
+        // it must never be gated on the same tracking that might itself
+        // be wrong.
+        let out = captured(|w| write_teardown_sequence(w, false));
+        assert_eq!(out.match_indices(POP_KEYBOARD_FLAGS).count(), 1);
+        assert!(out.find(POP_KEYBOARD_FLAGS).unwrap() > out.find(LEAVE_ALT_SCREEN).unwrap());
+    }
+
+    #[test]
+    fn startup_and_teardown_sequences_are_symmetric_round_trips() {
+        // A push from `write_startup_sequence` followed immediately by a
+        // `write_teardown_sequence` must net out to a clean pair on the
+        // alternate screen's stack: enter, push, pop, leave, (extra pop).
+        let mut buf = Vec::new();
+        write_startup_sequence(&mut buf, true).unwrap();
+        write_teardown_sequence(&mut buf, true).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+
+        let enter_pos = out.find(ENTER_ALT_SCREEN).unwrap();
+        let push_pos = out.find(PUSH_KEYBOARD_FLAGS).unwrap();
+        let first_pop_pos = out.find(POP_KEYBOARD_FLAGS).unwrap();
+        let leave_pos = out.find(LEAVE_ALT_SCREEN).unwrap();
+
+        assert!(
+            enter_pos < push_pos && push_pos < first_pop_pos && first_pop_pos < leave_pos,
+            "expected enter < push < pop < leave: {out:?}"
+        );
     }
 
     #[test]
