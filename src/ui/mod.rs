@@ -95,8 +95,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 /// One line, built from whatever's actually relevant right now (active
-/// filter, mark count, running-task count) followed by a keybinding hint,
-/// all cut off by the terminal's own width if it doesn't fit.
+/// filter, mark count, running-task count) followed by a single trailing
+/// `h:help` hint — the full keybinding list used to be spelled out here,
+/// but that's redundant now that the help screen (`h`/`?`) shows the
+/// complete, current-config-aware keymap; all cut off by the terminal's
+/// own width if it doesn't fit.
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let pane = app.active_pane();
     let mut segments = Vec::new();
@@ -115,11 +118,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         format!("{}  |  ", segments.join("  "))
     };
 
-    let status = Paragraph::new(format!(
-        " {}{}  |  q:quit  ←→/Tab:switch  Space:mark  C/M/D/R/K  h:help  S-h:hist  b:bkmk  ~:home  ::cmd  e:edit  x:view",
-        info,
-        pane.cwd.display()
-    ))
-    .style(Style::default().add_modifier(Modifier::REVERSED));
+    let status = Paragraph::new(format!(" {}{}  |  h:help", info, pane.cwd.display()))
+        .style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(status, area);
 }
