@@ -729,8 +729,22 @@ mod tests {
         // column absorbs whatever the permissions column doesn't use), so
         // the meaningful check is *content*, not raw length: the
         // permissions text must appear only when the column is shown.
+        //
+        // `format_row`'s column-width math reserves exactly
+        // `PERMS_COL_WIDTH` for the permissions text, which is only
+        // accurate when `unix_mode`'s presence agrees with which of
+        // `format_permissions`'s two branches — and therefore which
+        // width — actually fires (see `entry.rs`, which only ever
+        // populates `unix_mode` on unix). Build the entry the same way so
+        // this stays true on every platform, and derive the expected
+        // permissions text from `format_permissions` itself rather than a
+        // hard-coded, platform-specific string.
         use std::path::PathBuf;
         use std::time::SystemTime;
+        #[cfg(unix)]
+        let (unix_mode, readonly) = (Some(0o755), false);
+        #[cfg(not(unix))]
+        let (unix_mode, readonly) = (None, false);
         let entry = FsEntry {
             name: "run.sh".to_string(),
             path: PathBuf::from("run.sh"),
@@ -738,16 +752,17 @@ mod tests {
             size: 10,
             mtime: Some(SystemTime::UNIX_EPOCH),
             is_hidden: false,
-            unix_mode: Some(0o755),
-            readonly: false,
+            unix_mode,
+            readonly,
             is_executable: true,
         };
         let item = VisibleItem::Entry(&entry);
+        let expected_perms = format_permissions(EntryKind::File, unix_mode, readonly);
 
         let with = format_row(&item, 60, false, true);
         let without = format_row(&item, 60, false, false);
-        assert!(with.contains("rwxr-xr-x"));
-        assert!(!without.contains("rwxr-xr-x"));
+        assert!(with.contains(&expected_perms));
+        assert!(!without.contains(&expected_perms));
         assert_eq!(UnicodeWidthStr::width(with.as_str()), 60);
         assert_eq!(UnicodeWidthStr::width(without.as_str()), 60);
     }

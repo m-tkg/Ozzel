@@ -248,7 +248,11 @@ mod tests {
         assert_eq!(bookmarks.paths, vec![PathBuf::from("/b")]);
     }
 
+    // `unix_data_dir` is XDG-style resolution meaningful only on unix
+    // (Windows paths like "/custom/xdg" aren't absolute, and the join
+    // semantics differ), so these tests are unix-only.
     #[test]
+    #[cfg(unix)]
     fn unix_data_dir_prefers_absolute_xdg_data_home() {
         let path = unix_data_dir(
             Some(PathBuf::from("/custom/xdg")),
@@ -258,12 +262,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn unix_data_dir_falls_back_to_home_local_share() {
         let path = unix_data_dir(None, Some(PathBuf::from("/home/user")));
         assert_eq!(path, Some(PathBuf::from("/home/user/.local/share/ozzel")));
     }
 
     #[test]
+    #[cfg(unix)]
     fn unix_data_dir_ignores_relative_xdg_data_home() {
         let path = unix_data_dir(
             Some(PathBuf::from("relative")),

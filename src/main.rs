@@ -570,8 +570,19 @@ mod tests {
     /// involved, confirmed once against the real `execute!` macro output
     /// rather than guessed — see this test module's use of them below.
     const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
+    // Only referenced by the keyboard-enhancement tests below, which are
+    // unix-only (see their `#[cfg(not(windows))]`) — so on Windows these
+    // two would otherwise be dead code.
+    #[cfg_attr(
+        windows,
+        allow(dead_code, reason = "only used by unix-only tests below")
+    )]
     const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
     const PUSH_KEYBOARD_FLAGS: &str = "\x1b[>1u";
+    #[cfg_attr(
+        windows,
+        allow(dead_code, reason = "only used by unix-only tests below")
+    )]
     const POP_KEYBOARD_FLAGS: &str = "\x1b[<1u";
 
     fn captured(f: impl FnOnce(&mut Vec<u8>) -> io::Result<()>) -> String {
@@ -580,7 +591,22 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    // Push/PopKeyboardEnhancementFlags have no legacy-Windows-API
+    // implementation in crossterm — only an ANSI one. `execute!` decides
+    // ANSI vs. legacy at runtime by probing the process's *real* stdout
+    // console handle (crossterm::ansi_support::supports_ansi()), completely
+    // independent of the `Vec<u8>` sink these tests write into. Under a
+    // headless `cargo test` run on Windows CI there is no real console
+    // handle to probe, so that check comes back false, `execute!` falls
+    // back to the legacy path, and Push/PopKeyboardEnhancementFlags's
+    // legacy implementation unconditionally returns
+    // `Unsupported("Keyboard progressive enhancement not implemented for
+    // the legacy Windows API.")` — no bytes are ever written, so there is
+    // nothing for these ordering assertions to check. Unix's `execute!`
+    // has no such runtime probe (it always writes ANSI), so these stay
+    // exercised there.
     #[test]
+    #[cfg(not(windows))]
     fn startup_sequence_pushes_keyboard_flags_after_entering_the_alternate_screen() {
         let out = captured(|w| write_startup_sequence(w, true));
         let enter_pos = out.find(ENTER_ALT_SCREEN).expect("EnterAlternateScreen");
@@ -601,7 +627,11 @@ mod tests {
         assert!(!out.contains(PUSH_KEYBOARD_FLAGS));
     }
 
+    // See the comment on `startup_sequence_pushes_keyboard_flags_after_...`
+    // above: PopKeyboardEnhancementFlags hits the same Windows-CI-only
+    // Unsupported error, unix-only for the same reason.
     #[test]
+    #[cfg(not(windows))]
     fn teardown_sequence_pops_keyboard_flags_before_leaving_the_alternate_screen() {
         let out = captured(|w| write_teardown_sequence(w, true));
         let pop_positions: Vec<usize> = out
@@ -628,7 +658,11 @@ mod tests {
         );
     }
 
+    // Same Windows-CI-only Unsupported error as the two tests above — the
+    // unconditional defense-in-depth pop is itself a
+    // PopKeyboardEnhancementFlags call, unix-only for the same reason.
     #[test]
+    #[cfg(not(windows))]
     fn teardown_sequence_still_emits_the_defense_in_depth_pop_even_when_never_active() {
         // The whole point of the second pop is to cover *desync* cases —
         // it must never be gated on the same tracking that might itself
@@ -638,7 +672,10 @@ mod tests {
         assert!(out.find(POP_KEYBOARD_FLAGS).unwrap() > out.find(LEAVE_ALT_SCREEN).unwrap());
     }
 
+    // Same Windows-CI-only Unsupported error as the tests above — this
+    // round-trips both a push and a pop, unix-only for the same reason.
     #[test]
+    #[cfg(not(windows))]
     fn startup_and_teardown_sequences_are_symmetric_round_trips() {
         // A push from `write_startup_sequence` followed immediately by a
         // `write_teardown_sequence` must net out to a clean pair on the

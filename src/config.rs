@@ -645,7 +645,11 @@ mod tests {
         assert!(!err.to_string().contains("section header"), "{err}");
     }
 
+    // `unix_config_path` is XDG-style resolution meaningful only on unix
+    // (Windows paths like "/custom/xdg" aren't absolute, and the join
+    // semantics differ), so these tests are unix-only.
     #[test]
+    #[cfg(unix)]
     fn xdg_config_home_takes_priority_when_absolute() {
         let path = unix_config_path(
             Some(PathBuf::from("/custom/xdg")),
@@ -655,6 +659,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn falls_back_to_home_dot_config_when_xdg_unset() {
         let path = unix_config_path(None, Some(PathBuf::from("/home/user")));
         assert_eq!(
@@ -664,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn falls_back_to_home_dot_config_when_xdg_is_relative() {
         // A relative XDG_CONFIG_HOME is invalid per the XDG spec; ignore it
         // rather than joining it onto nothing meaningful.
@@ -678,6 +684,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn none_when_neither_xdg_nor_home_resolve() {
         assert_eq!(unix_config_path(None, None), None);
     }
