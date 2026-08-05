@@ -208,8 +208,11 @@ fn styled_line(
 /// boundaries. A grapheme whose *start* column falls inside the window is
 /// included in full; one that starts before it is dropped in full — cheap
 /// and correct for the common case, at the cost of not clipping a wide
-/// grapheme that straddles the window edge mid-glyph.
-fn slice_display_cols(line: &str, start_col: usize, width: usize) -> String {
+/// grapheme that straddles the window edge mid-glyph. `pub(super)` (rather
+/// than private) so `ui::modal`'s centered prompt box can reuse the exact
+/// same horizontal-scroll math for a `LineEditor`'s content instead of
+/// duplicating it.
+pub(super) fn slice_display_cols(line: &str, start_col: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
