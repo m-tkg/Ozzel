@@ -64,6 +64,73 @@ impl ViewMode {
     }
 }
 
+/// Which way a viewer search (`/` vs `?`) reads the file — `n` repeats the
+/// last search in this direction, `N` in the reverse of it, exactly like
+/// `less`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchDirection {
+    /// `/` — toward the end of the file.
+    Forward,
+    /// `?` — toward the start of the file.
+    Backward,
+}
+
+impl SearchDirection {
+    pub fn reversed(self) -> Self {
+        match self {
+            SearchDirection::Forward => SearchDirection::Backward,
+            SearchDirection::Backward => SearchDirection::Forward,
+        }
+    }
+}
+
+/// `less`-style incremental search state for `Mode::Viewer`. `Idle` is the
+/// steady state outside of any search; pressing `/` or `?` moves to
+/// `Editing` (a bottom input line, same UI pattern as `Filter`/
+/// `JumpSearch`); `Enter` there runs the search and — if it matched
+/// anything — moves to `Active`, which drives both the highlighted matches
+/// on screen and `n`/`N` navigation until `Esc` (in plain, non-editing
+/// viewer state) clears it back to `Idle`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ViewerSearch {
+    #[default]
+    Idle,
+    Editing {
+        input: LineEditor,
+        direction: SearchDirection,
+        /// The search state (if any) that was active before `/`/`?` was
+        /// pressed, restored verbatim on `Esc` — canceling an in-progress
+        /// search must never lose a previous search's highlights, the same
+        /// way `less` leaves you exactly where you were before pressing
+        /// `/` again if you back out of it.
+        previous: Box<ViewerSearch>,
+    },
+    Active {
+        /// The raw text as typed — re-compiled into a `viewer::Matcher` on
+        /// demand (by `n`/`N` navigation and by rendering, for
+        /// highlighting) rather than stored compiled, since a compiled
+        /// `regex::Regex` doesn't implement `PartialEq`/`Eq` and every
+        /// other `Mode` variant does.
+        pattern: String,
+        direction: SearchDirection,
+        /// Line indices (text mode) or hex-dump row indices (hex mode)
+        /// containing at least one match, ascending. Always non-empty —
+        /// a search with zero matches never produces `Active` (see
+        /// `App::run_viewer_search`).
+        matches: Vec<usize>,
+        /// Index into `matches` of the line the viewer is currently
+        /// parked on — what `n`/`N` advance and the footer's `i/N` counter
+        /// reads.
+        current: usize,
+        /// Set by `App::run_viewer_search`/`App::viewer_search_step`
+        /// whenever the *most recent* jump had to wrap around the start or
+        /// end of the file to find a match — drives the footer's `less`-
+        /// style "search wrapped" notice. Cleared by the next jump that
+        /// *doesn't* wrap, not time-based.
+        wrapped: bool,
+    },
+}
+
 /// The operation a `Mode::Confirm` will perform if the user answers yes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingOp {
@@ -144,11 +211,14 @@ pub enum Mode {
         message: String,
         on_yes: PendingOp,
     },
-    /// The built-in full-frame text viewer (`x`/`o`/Enter-on-file). Fixed
-    /// keys only (see `App::handle_viewer_key`): Up/Down/PageUp/PageDown/
-    /// Home/End (`g`/`G` too) scroll vertically, Left/Right scroll
-    /// horizontally, Tab toggles text/hex mode, `q`/Esc closes back to the
-    /// filer.
+    /// The built-in full-frame text viewer (`x`/`o`/Enter-on-file),
+    /// `less`-like. Fixed keys only (see `App::handle_viewer_key`):
+    /// Up/Down/PageUp/PageDown/Home/End (`g`/`G`, `j`/`k`, `f`/`b`/`Space`,
+    /// `d`/`u` too) scroll vertically, Left/Right scroll horizontally, Tab
+    /// toggles text/hex mode, `/`/`?` open a forward/backward search input
+    /// (see `ViewerSearch`), `n`/`N` repeat it forward/backward, `q`/Esc
+    /// closes back to the filer (Esc clears an active search's highlights
+    /// first instead, if there is one).
     Viewer {
         path: PathBuf,
         lines: Vec<String>,
@@ -165,6 +235,8 @@ pub enum Mode {
         h_scroll: usize,
         /// The file was larger than the viewer's size cap and got cut off.
         truncated: bool,
+        /// `less`-style `/`/`?` search state — see `ViewerSearch`.
+        search: ViewerSearch,
     },
     /// The full-frame keybinding help screen (`h`/`?`). Fixed keys only
     /// (see `App::handle_help_key`): Up/Down/PageUp/PageDown/Home/End

@@ -20,7 +20,10 @@ use crate::event::{
 use crate::external::{self, ExternalRequest};
 use crate::filter::FilterSpec;
 use crate::keymap::Keymap;
-use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, SelectKind, TransferKind, ViewMode};
+use crate::mode::{
+    LineEditor, Mode, PendingOp, PromptKind, SearchDirection, SelectKind, TransferKind, ViewMode,
+    ViewerSearch,
+};
 use crate::ops;
 use crate::pane::{CursorAnchor, PAGE_SIZE, Pane};
 use crate::persist::{Bookmarks, History, Side};
@@ -31,8 +34,12 @@ use crate::virtual_dir;
 
 /// Log lines are capped so a long session's log can't grow without bound.
 const LOG_CAPACITY: usize = 500;
-/// How many lines `Mode::Viewer`'s PageUp/PageDown jumps.
+/// How many lines `Mode::Viewer`'s PageUp/PageDown (also `f`/`Space`/`b`)
+/// jumps.
 const VIEWER_PAGE_SIZE: usize = 20;
+/// How many lines `Mode::Viewer`'s `d`/`u` (`less`-style half-page scroll)
+/// jumps.
+const VIEWER_HALF_PAGE_SIZE: usize = VIEWER_PAGE_SIZE / 2;
 /// How many display columns `Mode::Viewer`'s Left/Right scrolls per press.
 const VIEWER_H_SCROLL_STEP: usize = 8;
 /// How many rows one mouse-wheel "tick" moves a pane's cursor, or scrolls a
@@ -269,6 +276,45 @@ fn build_keymap(config: &Config) -> anyhow::Result<Keymap> {
     Ok(keymap)
 }
 
+/// What `Mode::Viewer`'s `/`/`?` search matches against: the decoded text
+/// lines as-is in text mode, or every row's `xxd`-style formatting in hex
+/// mode (see `viewer::format_hex_lines`) — spec'd as "search the formatted
+/// line strings" rather than the raw bytes, so a hex search behaves the
+/// way it looks on screen. `Cow` so text mode (the common case, and
+/// potentially a 10 MiB file's worth of lines) never clones; only hex
+/// mode's on-demand formatting allocates.
+fn viewer_search_haystack<'a>(
+    lines: &'a [String],
+    bytes: &[u8],
+    view_mode: ViewMode,
+) -> std::borrow::Cow<'a, [String]> {
+    match view_mode {
+        ViewMode::Text => std::borrow::Cow::Borrowed(lines),
+        ViewMode::Hex => std::borrow::Cow::Owned(viewer::format_hex_lines(bytes)),
+    }
+}
+
+/// The index into `matches` (sorted ascending) that a fresh `/`/`?` search
+/// should land on: the nearest match at-or-after `from` for a forward
+/// search, at-or-before `from` for a backward one — wrapping around to the
+/// other end (and reporting that it did, for the footer's "search wrapped"
+/// notice) when nothing qualifies in that direction. A free, pure function
+/// so the wrap/no-wrap edge cases are directly unit-testable without going
+/// through `App`/a loaded file. `matches` must be non-empty — callers
+/// (`App::run_viewer_search`) never call this otherwise.
+fn nearest_match(matches: &[usize], from: usize, direction: SearchDirection) -> (usize, bool) {
+    match direction {
+        SearchDirection::Forward => match matches.iter().position(|&m| m >= from) {
+            Some(i) => (i, false),
+            None => (0, true),
+        },
+        SearchDirection::Backward => match matches.iter().rposition(|&m| m <= from) {
+            Some(i) => (i, false),
+            None => (matches.len() - 1, true),
+        },
+    }
+}
+
 impl App {
     pub fn new(left: PathBuf, right: PathBuf, config: Config) -> anyhow::Result<Self> {
         let keymap = build_keymap(&config)?;
@@ -444,7 +490,7 @@ impl App {
                 Mode::Select { .. } => self.handle_select_key(code),
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
-                Mode::Viewer { .. } => self.handle_viewer_key(code),
+                Mode::Viewer { .. } => self.handle_viewer_key(code, modifiers),
                 Mode::Help { .. } => self.handle_help_key(code),
                 Mode::Log { .. } => self.handle_log_view_key(code),
                 Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
@@ -1302,6 +1348,7 @@ impl App {
                     scroll: 0,
                     h_scroll: 0,
                     truncated: loaded.truncated,
+                    search: ViewerSearch::Idle,
                 };
             }
             Err(err) => self.log_error(format!("{}: {err}", path.display())),
@@ -1331,19 +1378,62 @@ impl App {
                     scroll: 0,
                     h_scroll: 0,
                     truncated: loaded.truncated,
+                    search: ViewerSearch::Idle,
                 };
             }
             Err(err) => self.log_error(format!("{}: {err}", inner_path.display())),
         }
     }
 
-    /// Fixed keys for `Mode::Viewer`; never consults the keymap. `q`/Esc
-    /// is handled before the field-destructure below so assigning
-    /// `self.mode = Mode::Normal` there never conflicts with the still-live
-    /// borrow the other arms need (same pattern as `handle_prompt_key`).
-    fn handle_viewer_key(&mut self, code: KeyCode) {
-        if matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
+    /// Fixed keys for `Mode::Viewer`; never consults the keymap. A search
+    /// input in progress (`ViewerSearch::Editing`) is peeled off first and
+    /// routed to `handle_viewer_search_input_key` — same "handle the nested
+    /// modal layer before anything else" pattern as `handle_prompt_key`.
+    /// `q`/Esc is handled next, before the main field-destructure, so
+    /// assigning `self.mode = Mode::Normal` there never conflicts with the
+    /// still-live borrow the scroll arms need.
+    fn handle_viewer_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        if let Mode::Viewer {
+            search: ViewerSearch::Editing { .. },
+            ..
+        } = &self.mode
+        {
+            self.handle_viewer_search_input_key(code, modifiers);
+            return;
+        }
+
+        if code == KeyCode::Char('q') {
             self.mode = Mode::Normal;
+            return;
+        }
+        if code == KeyCode::Esc {
+            let Mode::Viewer { search, .. } = &mut self.mode else {
+                return;
+            };
+            if matches!(search, ViewerSearch::Active { .. }) {
+                // Clear the highlights/match state but stay open — a
+                // second Esc (now with nothing left to clear) closes the
+                // viewer, same as `q`.
+                *search = ViewerSearch::Idle;
+            } else {
+                self.mode = Mode::Normal;
+            }
+            return;
+        }
+        if code == KeyCode::Char('/') {
+            self.begin_viewer_search(SearchDirection::Forward);
+            return;
+        }
+        if code == KeyCode::Char('?') {
+            self.begin_viewer_search(SearchDirection::Backward);
+            return;
+        }
+        if code == KeyCode::Char('n') {
+            self.viewer_search_step(false);
+            return;
+        }
+        if code == KeyCode::Char('N') {
+            self.viewer_search_step(true);
             return;
         }
 
@@ -1374,16 +1464,207 @@ impl App {
                 .saturating_sub(1),
         };
         match code {
-            KeyCode::Up => *scroll = scroll.saturating_sub(1),
-            KeyCode::Down => *scroll = (*scroll + 1).min(max_scroll),
-            KeyCode::PageUp => *scroll = scroll.saturating_sub(VIEWER_PAGE_SIZE),
-            KeyCode::PageDown => *scroll = (*scroll + VIEWER_PAGE_SIZE).min(max_scroll),
+            KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => *scroll = (*scroll + 1).min(max_scroll),
+            KeyCode::PageUp | KeyCode::Char('b') => {
+                *scroll = scroll.saturating_sub(VIEWER_PAGE_SIZE)
+            }
+            KeyCode::PageDown | KeyCode::Char('f') | KeyCode::Char(' ') => {
+                *scroll = (*scroll + VIEWER_PAGE_SIZE).min(max_scroll)
+            }
+            KeyCode::Char('d') => *scroll = (*scroll + VIEWER_HALF_PAGE_SIZE).min(max_scroll),
+            KeyCode::Char('u') => *scroll = scroll.saturating_sub(VIEWER_HALF_PAGE_SIZE),
             KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
             KeyCode::End | KeyCode::Char('G') => *scroll = max_scroll,
             KeyCode::Left => *h_scroll = h_scroll.saturating_sub(VIEWER_H_SCROLL_STEP),
             KeyCode::Right => *h_scroll += VIEWER_H_SCROLL_STEP,
             _ => {}
         }
+    }
+
+    /// Opens the `less`-style search input (`/`/`?`) — see
+    /// `ViewerSearch::Editing`. No-op if `self.mode` isn't `Viewer` (can't
+    /// happen through normal dispatch, but keeps this safe to call).
+    fn begin_viewer_search(&mut self, direction: SearchDirection) {
+        let Mode::Viewer { search, .. } = &mut self.mode else {
+            return;
+        };
+        let previous = std::mem::replace(search, ViewerSearch::Idle);
+        *search = ViewerSearch::Editing {
+            input: LineEditor::new(),
+            direction,
+            previous: Box::new(previous),
+        };
+    }
+
+    /// Fixed keys for `ViewerSearch::Editing`'s input line — same editing
+    /// keys as `handle_filter_key`/`handle_jump_search_key` (Ctrl+char is
+    /// never inserted as text, so e.g. Ctrl+C still reaches whatever it
+    /// would otherwise mean at the terminal level rather than typing a
+    /// literal character).
+    fn handle_viewer_search_input_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                let Mode::Viewer { search, .. } = &mut self.mode else {
+                    return;
+                };
+                let ViewerSearch::Editing { previous, .. } =
+                    std::mem::replace(search, ViewerSearch::Idle)
+                else {
+                    return;
+                };
+                *search = *previous;
+            }
+            KeyCode::Enter => {
+                let Some((pattern, direction, previous)) = (match &mut self.mode {
+                    Mode::Viewer { search, .. } => {
+                        match std::mem::replace(search, ViewerSearch::Idle) {
+                            ViewerSearch::Editing {
+                                input,
+                                direction,
+                                previous,
+                            } => Some((input.value(), direction, previous)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }) else {
+                    return;
+                };
+                if pattern.is_empty() {
+                    // Nothing typed — same as canceling: restore whatever
+                    // search (if any) was active before `/`/`?`.
+                    let Mode::Viewer { search, .. } = &mut self.mode else {
+                        return;
+                    };
+                    *search = *previous;
+                    return;
+                }
+                self.run_viewer_search(pattern, direction);
+            }
+            _ => {
+                let Mode::Viewer {
+                    search: ViewerSearch::Editing { input, .. },
+                    ..
+                } = &mut self.mode
+                else {
+                    return;
+                };
+                match code {
+                    KeyCode::Backspace => input.backspace(),
+                    KeyCode::Delete => input.delete(),
+                    KeyCode::Left => input.move_left(),
+                    KeyCode::Right => input.move_right(),
+                    KeyCode::Home => input.move_home(),
+                    KeyCode::End => input.move_end(),
+                    KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                        input.insert(c)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Runs a `/`/`?` search once Enter confirms the pattern: builds a
+    /// `viewer::Matcher` from it, scans the current view mode's haystack
+    /// (text lines, or formatted hex-dump rows — see
+    /// `viewer_search_haystack`) for every matching line/row, and jumps to
+    /// the nearest one in `direction` from the current scroll position
+    /// (wrapping around if nothing qualifies before the end — see
+    /// `nearest_match`). A pattern that matches nothing at all leaves
+    /// `search` at `Idle` (nothing to highlight, nowhere to jump) and logs
+    /// it instead of silently doing nothing.
+    fn run_viewer_search(&mut self, pattern: String, direction: SearchDirection) {
+        // Scoped to an immutable borrow of `self.mode`, and dropped before
+        // any `&mut self` call below (`self.log_error`) — scanning for
+        // matches never needs to mutate anything.
+        let matches: Vec<usize> = {
+            let Mode::Viewer {
+                lines,
+                bytes,
+                view_mode,
+                ..
+            } = &self.mode
+            else {
+                return;
+            };
+            let haystack = viewer_search_haystack(lines, bytes, *view_mode);
+            let matcher = viewer::Matcher::build(&pattern);
+            haystack
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| matcher.is_match(line))
+                .map(|(i, _)| i)
+                .collect()
+        };
+
+        if matches.is_empty() {
+            if let Mode::Viewer { search, .. } = &mut self.mode {
+                *search = ViewerSearch::Idle;
+            }
+            self.log_error(format!("pattern not found: {pattern}"));
+            return;
+        }
+
+        let Mode::Viewer { scroll, search, .. } = &mut self.mode else {
+            return;
+        };
+        let (current, wrapped) = nearest_match(&matches, *scroll, direction);
+        *scroll = matches[current];
+        *search = ViewerSearch::Active {
+            pattern,
+            direction,
+            matches,
+            current,
+            wrapped,
+        };
+    }
+
+    /// `n` (`reverse: false`) / `N` (`reverse: true`) — advances to the
+    /// next/previous match of the active search in `matches` order,
+    /// wrapping around and recording it in `wrapped` the same way
+    /// `run_viewer_search`'s initial jump does. No-op when there's no
+    /// active search (`n`/`N` otherwise have no meaning in the viewer).
+    fn viewer_search_step(&mut self, reverse: bool) {
+        let Mode::Viewer { scroll, search, .. } = &mut self.mode else {
+            return;
+        };
+        let ViewerSearch::Active {
+            direction,
+            matches,
+            current,
+            wrapped,
+            ..
+        } = search
+        else {
+            return;
+        };
+        let effective_direction = if reverse {
+            direction.reversed()
+        } else {
+            *direction
+        };
+        let len = matches.len();
+        let (next, did_wrap) = match effective_direction {
+            SearchDirection::Forward => {
+                if *current + 1 < len {
+                    (*current + 1, false)
+                } else {
+                    (0, true)
+                }
+            }
+            SearchDirection::Backward => {
+                if *current > 0 {
+                    (*current - 1, false)
+                } else {
+                    (len - 1, true)
+                }
+            }
+        };
+        *current = next;
+        *wrapped = did_wrap;
+        *scroll = matches[*current];
     }
 
     fn begin_help(&mut self) {
@@ -3416,6 +3697,7 @@ mod tests {
                 scroll,
                 h_scroll,
                 truncated,
+                search,
             } => {
                 assert_eq!(path, &dir.path().join("notes.txt"));
                 assert_eq!(
@@ -3427,6 +3709,7 @@ mod tests {
                 assert_eq!(*scroll, 0);
                 assert_eq!(*h_scroll, 0);
                 assert!(!truncated);
+                assert_eq!(search, &ViewerSearch::Idle);
             }
             other => panic!("expected Mode::Viewer, got {other:?}"),
         }
@@ -3614,6 +3897,307 @@ mod tests {
             Mode::Viewer { view_mode, .. } => *view_mode,
             other => panic!("expected Mode::Viewer, got {other:?}"),
         }
+    }
+
+    fn search_of(app: &App) -> ViewerSearch {
+        match &app.mode {
+            Mode::Viewer { search, .. } => search.clone(),
+            other => panic!("expected Mode::Viewer, got {other:?}"),
+        }
+    }
+
+    fn type_into_viewer(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    /// A file with a distinct, greppable line at indices 2, 5, and 8 (and
+    /// filler lines everywhere else) — enough spread to exercise wraparound
+    /// in both directions without the matches being adjacent.
+    fn write_needle_file(dir: &Path) -> PathBuf {
+        let mut lines = vec!["filler".to_string(); 12];
+        lines[2] = "the needle is here".to_string();
+        lines[5] = "another needle spot".to_string();
+        lines[8] = "final needle line".to_string();
+        let path = dir.join("haystack.txt");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        path
+    }
+
+    fn open_viewer_on(app: &mut App, name: &str) {
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(app, name);
+        app.dispatch(Action::Open);
+    }
+
+    #[test]
+    fn viewer_forward_search_jumps_to_the_first_match_at_or_below_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        write_needle_file(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "haystack.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(matches!(
+            &app.mode,
+            Mode::Viewer {
+                search: ViewerSearch::Editing {
+                    direction: SearchDirection::Forward,
+                    ..
+                },
+                ..
+            }
+        ),);
+        type_into_viewer(&mut app, "needle");
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(scroll_of(&app), 2, "first match at-or-below the top (0)");
+        match search_of(&app) {
+            ViewerSearch::Active {
+                pattern,
+                matches,
+                current,
+                wrapped,
+                ..
+            } => {
+                assert_eq!(pattern, "needle");
+                assert_eq!(matches, vec![2, 5, 8]);
+                assert_eq!(current, 0);
+                assert!(!wrapped);
+            }
+            other => panic!("expected an active search, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn viewer_n_and_capital_n_cycle_forward_and_backward_with_wraparound() {
+        let dir = tempfile::tempdir().unwrap();
+        write_needle_file(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "haystack.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        type_into_viewer(&mut app, "needle");
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 2);
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 5);
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 8);
+
+        // One more `n` past the last match wraps to the first.
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 2);
+        match search_of(&app) {
+            ViewerSearch::Active { wrapped, .. } => assert!(wrapped, "must note the wrap"),
+            other => panic!("expected an active search, got {other:?}"),
+        }
+
+        // `N` reverses: from the (wrapped-to) first match, going backward
+        // lands on the last one again, and this jump does NOT wrap (moving
+        // from index 0 to index 2 backward is exactly the wraparound this
+        // assertion is checking resets `wrapped` back to false only when
+        // the step itself isn't a wrap — here it is one, so it stays set).
+        app.handle_event(AppEvent::Input(KeyCode::Char('N'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 8);
+
+        // A plain, non-wrapping `N` from here clears the notice.
+        app.handle_event(AppEvent::Input(KeyCode::Char('N'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 5);
+        match search_of(&app) {
+            ViewerSearch::Active { wrapped, .. } => assert!(!wrapped),
+            other => panic!("expected an active search, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn viewer_backward_search_and_its_n_direction_is_inverted() {
+        let dir = tempfile::tempdir().unwrap();
+        write_needle_file(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "haystack.txt");
+
+        // Move to line 8 first so the backward search has somewhere to
+        // search "upward" from other than the very top.
+        for _ in 0..8 {
+            app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(scroll_of(&app), 8);
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(matches!(
+            &app.mode,
+            Mode::Viewer {
+                search: ViewerSearch::Editing {
+                    direction: SearchDirection::Backward,
+                    ..
+                },
+                ..
+            }
+        ));
+        type_into_viewer(&mut app, "needle");
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        // Already sitting on a match (line 8) — backward search finds the
+        // nearest match at-or-*before* the top line, which is itself.
+        assert_eq!(scroll_of(&app), 8);
+
+        // `n` repeats the ORIGINAL (backward) direction: upward.
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 5);
+
+        // `N` inverts it: downward, back to 8.
+        app.handle_event(AppEvent::Input(KeyCode::Char('N'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 8);
+    }
+
+    #[test]
+    fn viewer_esc_while_editing_cancels_and_restores_the_previous_search() {
+        let dir = tempfile::tempdir().unwrap();
+        write_needle_file(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "haystack.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        type_into_viewer(&mut app, "needle");
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        let before = search_of(&app);
+        assert_eq!(scroll_of(&app), 2);
+
+        // Start a second, different search but back out of it.
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        type_into_viewer(&mut app, "filler");
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(
+            search_of(&app),
+            before,
+            "canceling a new search must restore the previous one exactly"
+        );
+        assert_eq!(scroll_of(&app), 2, "canceling must not move the cursor");
+        assert!(matches!(app.mode, Mode::Viewer { .. }), "must stay open");
+    }
+
+    #[test]
+    fn viewer_esc_in_normal_state_clears_the_search_then_a_second_esc_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_needle_file(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "haystack.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        type_into_viewer(&mut app, "needle");
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(search_of(&app), ViewerSearch::Active { .. }));
+
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(search_of(&app), ViewerSearch::Idle);
+        assert!(
+            matches!(app.mode, Mode::Viewer { .. }),
+            "first Esc only clears highlights, stays open"
+        );
+
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal), "second Esc closes");
+    }
+
+    #[test]
+    fn viewer_enter_with_an_empty_pattern_cancels_like_esc() {
+        let dir = tempfile::tempdir().unwrap();
+        write_needle_file(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "haystack.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(search_of(&app), ViewerSearch::Idle);
+        assert_eq!(scroll_of(&app), 0);
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+    }
+
+    #[test]
+    fn viewer_search_with_no_match_logs_an_error_and_leaves_search_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        write_needle_file(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "haystack.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        type_into_viewer(&mut app, "nonexistent");
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(search_of(&app), ViewerSearch::Idle);
+        assert_eq!(scroll_of(&app), 0, "no match must not move the cursor");
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.contains("nonexistent")),
+            "log: {:?}",
+            app.log
+        );
+    }
+
+    #[test]
+    fn viewer_hex_mode_search_matches_the_formatted_hex_dump_line() {
+        let dir = tempfile::tempdir().unwrap();
+        // 20 bytes of zeros -> sniffs as binary, opens in hex mode, and
+        // spans 2 sixteen-byte rows (ceil(20/16) = 2).
+        let mut bytes = vec![0u8; 20];
+        bytes[17] = b'Z'; // lands in the second hex row (bytes 16..20)
+        std::fs::write(dir.path().join("bin.dat"), &bytes).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "bin.dat");
+        assert_eq!(view_mode_of(&app), ViewMode::Hex);
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
+        type_into_viewer(&mut app, "5a"); // hex for 'Z', case-insensitive
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(scroll_of(&app), 1, "the row containing the 'Z' byte");
+    }
+
+    #[test]
+    fn viewer_vim_style_scroll_keys_behave_like_their_arrow_equivalents() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: String = (0..50)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("many.txt"), content).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        open_viewer_on(&mut app, "many.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 1, "j must scroll down one line, like Down");
+        app.handle_event(AppEvent::Input(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0, "k must scroll up one line, like Up");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(
+            scroll_of(&app),
+            VIEWER_HALF_PAGE_SIZE,
+            "d must scroll down half a page"
+        );
+        app.handle_event(AppEvent::Input(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0, "u must scroll back up half a page");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(
+            scroll_of(&app),
+            VIEWER_PAGE_SIZE,
+            "f must scroll down a full page, like PageDown"
+        );
+        app.handle_event(AppEvent::Input(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0, "b must scroll back up a full page");
+
+        app.handle_event(AppEvent::Input(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(
+            scroll_of(&app),
+            VIEWER_PAGE_SIZE,
+            "Space must page down exactly like f/PageDown"
+        );
     }
 
     fn help_scroll_of(app: &App) -> usize {
