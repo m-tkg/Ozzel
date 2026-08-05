@@ -110,3 +110,40 @@ Phase 2 で入れた変更: ログ下部パネル（`ui::log_view::render_log_li
    ```
 
 5. 得られた平均値をこのファイルに追記し、前後のリファクタリングで比較する。イベントループが `Duration::from_millis(50)` のポーリング間隔で回っている（`main.rs` の `run` 関数）ため、何もしていない間もこのポーリング周期に応じたCPU消費が発生する — 削減余地があるとすればここが対象になる。
+
+## 結果（Phase 3 後、中央値）
+
+Phase 3 で入れた変更:
+
+1. **`VirtualDir` エントリ一覧キャッシュ**（`src/virtual_dir.rs`）: アーカイブの生エントリ一覧（`RawEntry` 全件）を `VirtualDir`（`Rc<RefCell<Option<CachedEntries>>>`）に保持し、`(mtime, len)` が変わらない限り descend/go_parent/`Pane::reload` のたびの再オープン・再パース・再解凍を排除。zip は central directory の再パース、tar 系はストリームの再走査、`.tar.xz` はアーカイブ全体の再インフレートをそれぞれ回避する。`VirtualDir::clone`（`Pane::virtual_go_parent` が使う）はキャッシュを共有（`Rc` のクローンのみ）するので、archive 内を潜っても登っても同じキャッシュを使い続ける。アーカイブファイル自体が置き換わった場合（mtime/len 変化）は再読込。`stat` 自体が失敗する場合（アーカイブ削除後など）は既存キャッシュをそのまま使う（一覧のための stat 失敗を「変化なし」として扱う）。
+2. **コピーの高速化**（`src/tasks/copy_move.rs`）: `WHOLE_FILE_COPY_THRESHOLD`（4 MiB）以下のファイルは `std::fs::copy` 一発（OS の clonefile/copy_file_range が効き、permissions もコピーされる）。それを超えるファイルは従来通りチャンク読み書き（`TransferCtx::buf` に1回だけ確保した 1 MiB バッファを全ファイルで再利用、per-chunk のキャンセルチェック・進捗報告を維持）し、完了後に明示的に `src` の permissions を `dest` にコピーして両経路の挙動を揃えた。
+3. **起動時の初回描画**（`src/main.rs`/`src/app.rs`）: `App::new_unloaded` で両ペインを空のまま構築 → `run` の先頭で `terminal.draw` を1回実行 → `App::load_initial_dirs` で実際のディレクトリ読込 → 通常ループ、という順序に変更。遅いマウントや巨大ディレクトリでも alternate screen に入った直後に画面が出る。`App::new`（既存テスト・`test_app` が使う経路）自体の外部挙動は変えていない（`new_unloaded` + `load_initial_dirs` の合成のまま、eager load を維持）。
+
+`archive_listing_cached/*` が今回の新規ベンチ（Phase 0〜2 に対応ベンチなし）— `VirtualDir::list` を一度呼んでキャッシュを温めた後、同じインスタンスに対して繰り返し呼ぶ「実際にアプリ内で descend/go_parent するたびに通る」経路を計測したもの。`archive_listing/*`（`read_archive_dir_entries` 直呼び、`VirtualDir` を経由しない常にコールド経路）は Phase 3 で一切変更していない対照群として残してある。実行環境は上記「実行環境」節と同一マシン・同一プロファイル（rustc 1.94.0、criterion 0.8.2）。
+
+| ベンチ | 対象 | Phase 2 後 中央値 | Phase 3 後 中央値 | 変化 |
+|---|---|---|---|---|
+| `archive_listing/zip_100_entries` | 常にコールド（`read_archive_dir_entries` 直呼び、対照） | 280.15 µs | 273.69 µs | ノイズ内（-2.3%） |
+| `archive_listing/tar_gz_100_entries` | 同上（対照） | 101.92 µs | 98.875 µs | ノイズ内（-3.0%） |
+| `archive_listing/tar_xz_100_entries` | 同上（対照、Phase 2 に対応ベンチなし） | — | 93.515 µs | — |
+| `archive_listing_cached/zip_100_entries/cache_hit` | `VirtualDir::list` キャッシュヒット（Phase 2 に対応ベンチなし） | — | 12.891 µs | 参考: コールド比 約 -95.3%（1/21） |
+| `archive_listing_cached/tar_gz_100_entries/cache_hit` | 同上 | — | 12.866 µs | 参考: コールド比 約 -87.0%（1/7.7） |
+| `archive_listing_cached/tar_xz_100_entries/cache_hit` | 同上 | — | 12.849 µs | 参考: コールド比 約 -86.3%（1/7.3） |
+| `pane_visible_entries/1000_files/Name` | 未変更コード（対照） | 1.5003 ms | 1.2954 ms | ノイズ内（-13.6%、実行間ブレ） |
+| `pane_visible_entries/10000_files/Name` | 未変更コード（対照） | 20.319 ms | 15.774 ms | ノイズ内（-22.4%、実行間ブレ） |
+| `pane_visible_entries_cached/10000_files/cache_hit` | 未変更コード（対照） | 3.2402 µs | 3.2054 µs | 変化なし |
+| `wrap_log_lines_500_lines_width_80` | 未変更コード（対照） | 540.72 µs | 521.85 µs | ノイズ内（-3.5%） |
+| `wrap_log_lines_tail_500_lines_width_80_need_4_rows` | 未変更コード（対照） | 2.5848 µs | 2.5264 µs | ノイズ内（-2.3%） |
+
+所見:
+
+- `archive_listing_cached/*` は3フォーマットとも約 12.8〜12.9 µs で横並び — キャッシュヒット後は `group_children`（メモリ内の `HashMap` フィルタ）のコストが支配的で、元のフォーマット差（zip の central directory 再パース vs tar 系のストリーム再走査 vs xz の全展開）が完全に消えている。これは狙い通り: descend/go_parent/`reload` の毎回のコストが、フォーマットに関係なく「小さな一定コスト」に潰れた。
+- コールド経路（`archive_listing/*`）に対する削減率は zip が最大（約 1/21）、tar_gz/tar_xz が約 1/7〜1/8。zip はそもそも central directory の再パースコストが tar 系の逐次ストリーム走査より重く、キャッシュの効果がそのまま比率に出ている。
+- `.tar.xz` はこのベンチのアーカイブサイズ（100エントリ・ペイロード17バイトずつ）では全展開のコストがまだ小さいため、削減率自体は tar_gz と大差ない。プランで問題視されていた「2GBのtar.xzで1階層降りるだけで2GB再解凍」のような巨大アーカイブほど、キャッシュ有無の差は絶対時間で見て桁違いに開く（全展開コストがアーカイブサイズに比例するのに対し、キャッシュヒット後のコストはエントリ数にしか依存しないため）。
+- `pane_visible_entries/*`・`wrap_log_lines*` は Phase 3 で一切触れていない対照群。今回の実行では前回計測比で軒並み改善方向に振れているが、コード変更のない箇所なので Phase 1/2 の記録同様この日の実行間ノイズ（マシン負荷差）と判断し、Phase 3 の効果としては扱わない。`pane_visible_entries_cached/10000_files/cache_hit` はノイズの影響が最も小さい参照点として「実質変化なし」を確認する用途で見るとよい。
+- コピー高速化（`src/tasks/copy_move.rs`）と起動時初回描画（`main.rs`/`app.rs`）は criterion の単発関数呼び出しベンチでは測りにくい種類の変更（前者は `std::fs::copy` の OS 側最適化次第、後者はイベントループ全体の見た目の挙動）。正しさは `cargo test` の新規テスト（`copy_preserves_source_permissions_on_both_the_small_and_chunked_paths`、`run_copy_of_a_large_file_goes_through_the_chunked_path_and_finishes_ok`、`new_unloaded_builds_both_panes_with_no_entries_and_no_io` 等）で担保。体感確認は `cargo run --release` での手動操作のみ（巨大ファイルコピー時の alloc 削減、起動直後に空ペインがすぐ表示されること）。
+
+### 設計判断メモ
+
+- **xz の展開済みバッファ保持について**: 一覧のためだけの再解凍はキャッシュで解消したが、単一ファイルの抽出/ビューア表示経路（`extract_single_from_tar`、ひいては `.tar.xz` の場合は `open_tar_archive` の全展開）は今回のスコープでは従来通り毎回再解凍する。理由: (1) 展開済みバッファを `VirtualDir` に保持すると、巨大な `.tar.xz`（プラン記載の2GB級）をブラウズしているだけでその全体をメモリに常駐させ続けることになり、「一覧のための再解凍を避ける」という目的に対してメモリコストが不釣り合いに大きい。(2) 単一ファイルの抽出はユーザー操作（ビューアで開く/展開する）のたびに1回起きるだけで、一覧のように「ディレクトリ移動のたびに毎回」ではないため、頻度あたりのコスト削減効果が一覧キャッシュよりずっと小さい。以上より「一覧はキャッシュ、単一抽出は従来通り」で本フェーズの目標（ブラウズ操作のたびの重い再デコードの排除）は達成していると判断し、単一抽出側のキャッシュ化は将来課題として見送った。
+- **コピー閾値（`WHOLE_FILE_COPY_THRESHOLD` = 4 MiB）について**: 進捗バーの更新間隔（`PROGRESS_MIN_INTERVAL` = 100ms）を下回る時間で完了するファイルは、そもそもチャンク単位の進捗報告が画面に反映される機会がほとんどない。4 MiB は目安として「一般的なディスク/SSD速度なら100ms以内に転送が終わる規模」を想定した値。この閾値以下は `std::fs::copy` 一発（cancel チェックはファイル開始前のみ）、超える場合は従来通りチャンクループ（cancel チェックはチャンク毎、進捗報告も継続）とし、大量の小ファイルコピー（例: 10万ファイル）で `vec![0u8; 1MiB]` の zeroed alloc がファイル数分発生していた問題を解消しつつ、大きい単一ファイルのコピー中に体感できるキャンセル応答性・進捗表示は変えていない。

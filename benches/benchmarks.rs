@@ -5,14 +5,14 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{Local, TimeZone};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ozzel::app::LogLine;
 use ozzel::pane::{Pane, SortKey};
 use ozzel::ui::log_view::{wrap_log_lines, wrap_log_lines_tail};
-use ozzel::virtual_dir::read_archive_dir_entries;
+use ozzel::virtual_dir::{VirtualDir, read_archive_dir_entries};
 
 // --- Pane::visible_entries (directory read + sort) -------------------------
 
@@ -170,6 +170,33 @@ fn make_tar_gz_archive(entry_count: usize) -> (tempfile::TempDir, PathBuf) {
     (dir, archive_path)
 }
 
+/// `.tar.xz` is the worst case `open_tar_archive` handles: `lzma-rs` only
+/// exposes a whole-buffer decode, so every read (before Phase 3's
+/// `VirtualDir` cache) inflates the *entire* archive into memory just to
+/// list its root — see `bench_archive_listing_cached` below for the
+/// before/after this bench group exists to set up a baseline for.
+fn make_tar_xz_archive(entry_count: usize) -> (tempfile::TempDir, PathBuf) {
+    let mut builder = tar::Builder::new(Vec::new());
+    for i in 0..entry_count {
+        let data = b"benchmark payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, nested_entry_path(i), &data[..])
+            .unwrap();
+    }
+    let tar_bytes = builder.into_inner().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let archive_path = dir.path().join("bench.tar.xz");
+    let mut compressed = Vec::new();
+    lzma_rs::xz_compress(&mut &tar_bytes[..], &mut compressed).unwrap();
+    fs::write(&archive_path, &compressed).unwrap();
+    (dir, archive_path)
+}
+
 fn bench_archive_listing(c: &mut Criterion) {
     let mut group = c.benchmark_group("archive_listing");
     group.sample_size(20);
@@ -177,19 +204,61 @@ fn bench_archive_listing(c: &mut Criterion) {
     let (_zip_dir, zip_path) = make_zip_archive(100);
     group.bench_function("zip_100_entries", |b| {
         b.iter(|| {
-            std::hint::black_box(
-                read_archive_dir_entries(&zip_path, std::path::Path::new("")).unwrap(),
-            )
+            std::hint::black_box(read_archive_dir_entries(&zip_path, Path::new("")).unwrap())
         });
     });
 
     let (_tar_dir, tar_gz_path) = make_tar_gz_archive(100);
     group.bench_function("tar_gz_100_entries", |b| {
         b.iter(|| {
-            std::hint::black_box(
-                read_archive_dir_entries(&tar_gz_path, std::path::Path::new("")).unwrap(),
-            )
+            std::hint::black_box(read_archive_dir_entries(&tar_gz_path, Path::new("")).unwrap())
         });
+    });
+
+    let (_tar_xz_dir, tar_xz_path) = make_tar_xz_archive(100);
+    group.bench_function("tar_xz_100_entries", |b| {
+        b.iter(|| {
+            std::hint::black_box(read_archive_dir_entries(&tar_xz_path, Path::new("")).unwrap())
+        });
+    });
+
+    group.finish();
+}
+
+/// Phase 3's `VirtualDir` entry-list cache: the archive is opened/decoded
+/// exactly once (outside `b.iter`, via `VirtualDir::list`'s first call),
+/// then every timed iteration is a pure cache hit — no reopening the file,
+/// no re-parsing the zip central directory, no re-streaming the tar, and
+/// critically for `.tar.xz`, no re-inflating the whole archive into memory
+/// (see `make_tar_xz_archive`'s doc comment). Companion to
+/// `bench_archive_listing` above, which stays the always-cold
+/// (`read_archive_dir_entries`, no `VirtualDir` involved) measurement on
+/// purpose — that group is the "descend into a virtual directory for the
+/// first time" cost, unaffected by this cache and therefore the control
+/// group proving Phase 3 didn't regress it.
+fn bench_archive_listing_cached(c: &mut Criterion) {
+    let mut group = c.benchmark_group("archive_listing_cached");
+    group.sample_size(20);
+
+    let (_zip_dir, zip_path) = make_zip_archive(100);
+    let zip_vd = VirtualDir::new(zip_path);
+    zip_vd.list(Path::new("")).unwrap();
+    group.bench_function("zip_100_entries/cache_hit", |b| {
+        b.iter(|| std::hint::black_box(zip_vd.list(Path::new("")).unwrap()));
+    });
+
+    let (_tar_gz_dir, tar_gz_path) = make_tar_gz_archive(100);
+    let tar_gz_vd = VirtualDir::new(tar_gz_path);
+    tar_gz_vd.list(Path::new("")).unwrap();
+    group.bench_function("tar_gz_100_entries/cache_hit", |b| {
+        b.iter(|| std::hint::black_box(tar_gz_vd.list(Path::new("")).unwrap()));
+    });
+
+    let (_tar_xz_dir, tar_xz_path) = make_tar_xz_archive(100);
+    let tar_xz_vd = VirtualDir::new(tar_xz_path);
+    tar_xz_vd.list(Path::new("")).unwrap();
+    group.bench_function("tar_xz_100_entries/cache_hit", |b| {
+        b.iter(|| std::hint::black_box(tar_xz_vd.list(Path::new("")).unwrap()));
     });
 
     group.finish();
@@ -201,6 +270,7 @@ criterion_group!(
     bench_pane_visible_entries_cached,
     bench_wrap_log_lines,
     bench_wrap_log_lines_tail_bottom_panel,
-    bench_archive_listing
+    bench_archive_listing,
+    bench_archive_listing_cached
 );
 criterion_main!(benches);

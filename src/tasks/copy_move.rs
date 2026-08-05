@@ -17,6 +17,14 @@ use crate::tasks::{TaskId, Throttle};
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
 const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+/// Files at or below this size skip the manual read/write loop entirely in
+/// favor of a single `std::fs::copy` call — cheap enough that per-chunk
+/// progress reporting wouldn't be visible anyway (the whole transfer
+/// finishes well inside one `PROGRESS_MIN_INTERVAL` tick), so there's
+/// nothing lost by handing it to the OS's own accelerated path instead
+/// (clonefile on macOS/APFS, copy_file_range on Linux) rather than paying
+/// for a userspace buffer round-trip on every single file.
+const WHOLE_FILE_COPY_THRESHOLD: u64 = 4 * 1024 * 1024; // 4 MiB
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransferMode {
@@ -41,6 +49,11 @@ struct TransferCtx<'a> {
     done_bytes: u64,
     total_bytes: u64,
     throttle: &'a mut Throttle,
+    /// The chunked-copy read buffer, allocated once per task and reused for
+    /// every file over `WHOLE_FILE_COPY_THRESHOLD` — a bulk copy/move of
+    /// many large files previously re-zeroed a fresh 1 MiB `Vec` per file;
+    /// this way the allocation happens once regardless of file count.
+    buf: Vec<u8>,
 }
 
 impl TransferCtx<'_> {
@@ -122,6 +135,7 @@ pub fn run_duplicate(
         done_bytes: 0,
         total_bytes: total,
         throttle: &mut throttle,
+        buf: vec![0u8; CHUNK_SIZE],
     };
 
     let result = match copy_one(&mut ctx, &source, &dest) {
@@ -153,6 +167,7 @@ fn run_transfer(
         done_bytes: 0,
         total_bytes: total,
         throttle: &mut throttle,
+        buf: vec![0u8; CHUNK_SIZE],
     };
     let mut failures = 0usize;
 
@@ -247,33 +262,58 @@ fn copy_one(ctx: &mut TransferCtx, src: &Path, dest: &Path) -> Result<(), OpOutc
     Ok(())
 }
 
+/// Copies one regular file, dispatching on size: at or below
+/// `WHOLE_FILE_COPY_THRESHOLD` a single `std::fs::copy` handles the whole
+/// thing (OS-accelerated, permissions included, cancellation only checked
+/// before it starts); above it, the manual chunked read/write loop keeps
+/// per-chunk cancellation checks and progress reporting, then explicitly
+/// propagates `src`'s permissions afterward so both paths leave `dest` with
+/// the same metadata regardless of which one ran.
 fn copy_file_chunked(ctx: &mut TransferCtx, src: &Path, dest: &Path) -> Result<(), OpOutcome> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| OpOutcome::Failed(e.to_string()))?;
     }
-    let mut reader = fs::File::open(src).map_err(|e| OpOutcome::Failed(e.to_string()))?;
-    let mut writer = fs::File::create(dest).map_err(|e| OpOutcome::Failed(e.to_string()))?;
-    let mut buf = vec![0u8; CHUNK_SIZE];
+    if ctx.is_cancelled() {
+        return Err(OpOutcome::Cancelled);
+    }
+    let size = fs::metadata(src)
+        .map_err(|e| OpOutcome::Failed(e.to_string()))?
+        .len();
     let detail = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+
+    if size <= WHOLE_FILE_COPY_THRESHOLD {
+        fs::copy(src, dest).map_err(|e| OpOutcome::Failed(e.to_string()))?;
+        ctx.done_bytes += size;
+        ctx.send_progress(&detail); // whole-file jump; always worth reporting, not throttled
+        return Ok(());
+    }
+
+    let mut reader = fs::File::open(src).map_err(|e| OpOutcome::Failed(e.to_string()))?;
+    let mut writer = fs::File::create(dest).map_err(|e| OpOutcome::Failed(e.to_string()))?;
 
     loop {
         if ctx.is_cancelled() {
             return Err(OpOutcome::Cancelled);
         }
         let n = reader
-            .read(&mut buf)
+            .read(&mut ctx.buf)
             .map_err(|e| OpOutcome::Failed(e.to_string()))?;
         if n == 0 {
             break;
         }
         writer
-            .write_all(&buf[..n])
+            .write_all(&ctx.buf[..n])
             .map_err(|e| OpOutcome::Failed(e.to_string()))?;
         ctx.advance(n as u64, &detail);
     }
+    drop(writer);
+    let src_permissions = fs::metadata(src)
+        .map_err(|e| OpOutcome::Failed(e.to_string()))?
+        .permissions();
+    fs::set_permissions(dest, src_permissions).map_err(|e| OpOutcome::Failed(e.to_string()))?;
     Ok(())
 }
 
@@ -547,6 +587,7 @@ mod tests {
             done_bytes: 0,
             total_bytes: 5,
             throttle: &mut throttle,
+            buf: vec![0u8; CHUNK_SIZE],
         };
 
         let result = move_via_copy_then_delete(&mut ctx, &src, &dest);
@@ -585,5 +626,85 @@ mod tests {
             fs::read(dest_dir.path().join("nested/child.txt")).unwrap(),
             b"world"
         );
+    }
+
+    #[test]
+    fn run_copy_of_a_large_file_goes_through_the_chunked_path_and_finishes_ok() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        // Bigger than WHOLE_FILE_COPY_THRESHOLD so this exercises the
+        // chunked read/write loop (reusing `ctx.buf`) rather than the
+        // single `std::fs::copy` call the small-file path takes.
+        let big = vec![b'z'; (WHOLE_FILE_COPY_THRESHOLD + 1) as usize];
+        fs::write(src_dir.path().join("big.bin"), &big).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let id = TaskId::next();
+        run_copy(
+            id,
+            tx,
+            cancel,
+            vec![src_dir.path().join("big.bin")],
+            dest_dir.path().to_path_buf(),
+        );
+
+        let events = drain(&rx);
+        assert!(matches!(
+            events.last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TaskEvent::Progress { .. })),
+            "the chunked path must still report per-chunk progress"
+        );
+        assert_eq!(fs::read(dest_dir.path().join("big.bin")).unwrap(), big);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_preserves_source_permissions_on_both_the_small_and_chunked_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let small = src_dir.path().join("small.sh");
+        fs::write(&small, b"#!/bin/sh\necho hi\n").unwrap();
+        fs::set_permissions(&small, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let large = src_dir.path().join("large.bin");
+        fs::write(&large, vec![b'a'; (WHOLE_FILE_COPY_THRESHOLD + 1) as usize]).unwrap();
+        fs::set_permissions(&large, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let id = TaskId::next();
+        run_copy(
+            id,
+            tx,
+            cancel,
+            vec![small, large],
+            dest_dir.path().to_path_buf(),
+        );
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+
+        let small_mode = fs::metadata(dest_dir.path().join("small.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let large_mode = fs::metadata(dest_dir.path().join("large.bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(small_mode, 0o755);
+        assert_eq!(large_mode, 0o640);
     }
 }
