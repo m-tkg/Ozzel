@@ -26,3 +26,4 @@ pub mod tasks;
 pub mod ui;
 pub mod viewer;
 pub mod virtual_dir;
+mod xdg;

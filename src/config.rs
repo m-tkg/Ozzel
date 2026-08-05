@@ -259,8 +259,7 @@ impl Default for Config {
 pub fn config_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        directories::ProjectDirs::from("", "", "ozzel")
-            .map(|dirs| dirs.config_dir().join("config.toml"))
+        crate::xdg::windows_project_dirs().map(|dirs| dirs.config_dir().join("config.toml"))
     }
     #[cfg(not(windows))]
     {
@@ -270,11 +269,14 @@ pub fn config_path() -> Option<PathBuf> {
     }
 }
 
-/// Pure XDG-style resolution used on macOS and Linux: `$XDG_CONFIG_HOME`
-/// when it's set to an absolute path, otherwise `~/.config`. Kept as a
-/// standalone function (rather than inlined env/home lookups) purely so
-/// tests can exercise the fallback logic without mutating process-global
-/// environment state.
+/// `config.rs`'s own thin wrapper around the resolution logic shared with
+/// `persist::unix_data_dir` (see `crate::xdg::unix_ozzel_dir`'s doc
+/// comment): `$XDG_CONFIG_HOME` when set to an absolute path, otherwise
+/// `~/.config`, joined with `ozzel/config.toml` — the one piece
+/// (`config.toml`) that's specific to *this* caller rather than shared.
+/// Kept as a standalone function (rather than inlined into `config_path`)
+/// purely so tests can exercise the fallback logic without mutating
+/// process-global environment state.
 #[cfg_attr(
     windows,
     allow(dead_code, reason = "only used on the unix config_path path")
@@ -283,10 +285,8 @@ fn unix_config_path(
     xdg_config_home: Option<PathBuf>,
     home_dir: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let base = xdg_config_home
-        .filter(|p| p.is_absolute())
-        .or_else(|| home_dir.map(|home| home.join(".config")))?;
-    Some(base.join("ozzel").join("config.toml"))
+    crate::xdg::unix_ozzel_dir(xdg_config_home, home_dir, ".config")
+        .map(|dir| dir.join("config.toml"))
 }
 
 /// Loads the config file, falling back to defaults when it doesn't exist.
@@ -378,7 +378,8 @@ fn home_dir_for_expansion() -> Option<PathBuf> {
 /// also leaves the path unchanged, since there's nothing to expand it to.
 /// A pure, standalone function (rather than inlined into `parse_config`) so
 /// every case is directly unit-testable without going through TOML at all.
-pub fn expand_tilde(path: &Path, home_dir: Option<&Path>) -> PathBuf {
+/// Private — only `parse_config` (this module) calls it.
+fn expand_tilde(path: &Path, home_dir: Option<&Path>) -> PathBuf {
     let Some(home_dir) = home_dir else {
         return path.to_path_buf();
     };

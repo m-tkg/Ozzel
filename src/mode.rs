@@ -88,6 +88,17 @@ impl SearchDirection {
             SearchDirection::Backward => SearchDirection::Forward,
         }
     }
+
+    /// The `less`-style key that starts a search in this direction — the
+    /// same glyph used as the input line's prompt label (`ui::help_view`/
+    /// `ui::log_view`/`ui::viewer_view`'s search input line) and as the
+    /// prefix on an already-committed search's footer note.
+    pub fn label(self) -> &'static str {
+        match self {
+            SearchDirection::Forward => "/",
+            SearchDirection::Backward => "?",
+        }
+    }
 }
 
 /// `less`-style incremental search state, shared by every full-frame

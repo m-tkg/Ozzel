@@ -207,8 +207,8 @@ pub fn step(search: &mut ViewerSearch, reverse: bool) -> Option<usize> {
 /// notice) when nothing qualifies in that direction. `matches` must be
 /// non-empty — `run` never calls this otherwise. (Moved here from `app.rs`,
 /// unchanged, when the viewer's search machinery became shared with
-/// help/log.)
-pub fn nearest_match(matches: &[usize], from: usize, direction: SearchDirection) -> (usize, bool) {
+/// help/log.) Private — only `run` (this module) calls it.
+fn nearest_match(matches: &[usize], from: usize, direction: SearchDirection) -> (usize, bool) {
     match direction {
         SearchDirection::Forward => match matches.iter().position(|&m| m >= from) {
             Some(i) => (i, false),

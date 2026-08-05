@@ -118,10 +118,11 @@ ozzel update --force  # バージョンが同じでも強制的に再インス�
 | `K` (Shift+k) | 新規ディレクトリ作成（mkdir） |
 | `c` | カーソル位置のファイル/ディレクトリを**同じディレクトリ内**に複製（現在の名前が入力済みのプロンプトで新しい名前を指定。ディレクトリは非同期タスクとして再帰的にコピー） |
 | `y` | カーソル位置のエントリの絶対パスをシステムのクリップボードへコピー（後述） |
+| `Ctrl+K` | 実行中の全バックグラウンドタスク（コピー・移動・削除・zip 圧縮・unzip・Virtual Directory 展開）を一括キャンセル |
 
 `D`/`R` はデフォルトのキーバインドで小文字（`d`/`r`）にも同時に割り当てられています。両方が同じアクションに紐づく「複数キー→1アクション」の実例です（`[bindings]` セクションで独自に増やすこともできます。後述）。
 
-コピー・移動・削除は非同期タスクとして実行され、ログ欄に進捗ゲージが表示されます。実行中も他の操作が可能です。
+コピー・移動・削除は非同期タスクとして実行され、ログ欄に進捗ゲージが表示されます。実行中も他の操作が可能です。`Ctrl+K`（`cancel_tasks`）でいつでも実行中のタスクをまとめてキャンセルできます。個々のタスクを選んでキャンセルするUIはなく、常に「今動いている全部」が対象です。キャンセルされたタスクはログに `cancelled` として記録され、それまでに完了済みの分（ファイルコピー等）はそのまま残ります。実行中のタスクが無い状態で押した場合はログに `no running tasks` とだけ表示されます。
 
 **ログ欄のタイムスタンプ:** ログの各行には記録時刻が `YYYY-MM-dd HH:MM:SS`（例: `2026-08-05 14:03:22`）の形式で先頭に付きます。長いメッセージ（パスを含むエラーなど）は右端で切れずに折り返され、2行目以降はタイムスタンプの幅ぶんだけ字下げされる（タイムスタンプを繰り返し表示しない）ため、メッセージの桁が揃って読みやすくなっています。ログ欄が埋まった場合は、折り返し後の行単位で常に最新の内容が下端に表示されます。
 
@@ -539,7 +540,7 @@ delete = ["d", "S-d"]
 
 ### アクション名一覧（`[keys]` の右辺 / `[bindings]` の左辺に指定できる値）
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `jump_search`, `zip_marked`, `unzip`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `jump_search`, `zip_marked`, `unzip`, `cancel_tasks`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
 
 この一覧に対応する現在の実効キーバインドは、アプリ内のヘルプ画面（`h`/`?`）でいつでも確認できます。
 

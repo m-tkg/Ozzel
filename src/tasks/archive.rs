@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context as _;
 use walkdir::WalkDir;
@@ -21,11 +21,8 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::event::TaskEvent;
-use crate::tasks::{TaskId, Throttle};
+use crate::tasks::{CHUNK_SIZE, PROGRESS_MIN_INTERVAL, TaskId, Throttle, send_log};
 use crate::virtual_dir::{self, ArchiveKind};
-
-const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
-const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
 // ---------------------------------------------------------------------
 // Create
@@ -107,22 +104,20 @@ fn run_zip_inner(
                 Ok(link_target) => {
                     let target_str = link_target.to_string_lossy().into_owned();
                     if let Err(err) = writer.add_symlink(entry.name.clone(), target_str, options) {
-                        let _ = tx.send(TaskEvent::Log {
+                        send_log(
+                            tx,
                             id,
-                            line: format!(
+                            format!(
                                 "{}: could not store symlink ({err}), skipped",
                                 entry.path.display()
                             ),
-                        });
+                        );
                         continue;
                     }
                     zipped += 1;
                 }
                 Err(err) => {
-                    let _ = tx.send(TaskEvent::Log {
-                        id,
-                        line: format!("{}: {err}, skipped", entry.path.display()),
-                    });
+                    send_log(tx, id, format!("{}: {err}, skipped", entry.path.display()));
                     continue;
                 }
             },
@@ -287,20 +282,22 @@ fn run_unzip_inner(
         let display_name = entry.name().to_string();
 
         if !is_valid_utf8_name(entry.name_raw()) {
-            let _ = tx.send(TaskEvent::Log {
+            send_log(
+                tx,
                 id,
-                line: format!("{display_name}: non-UTF-8 name, extracted best-effort"),
-            });
+                format!("{display_name}: non-UTF-8 name, extracted best-effort"),
+            );
         }
 
         // Zip-slip protection: `enclosed_name()` returns `None` for any
         // entry whose path is absolute or normalizes to something outside
         // the archive root (e.g. `../../etc/passwd`).
         let Some(relative) = entry.enclosed_name() else {
-            let _ = tx.send(TaskEvent::Log {
+            send_log(
+                tx,
                 id,
-                line: format!("{display_name}: unsafe path in archive, skipped"),
-            });
+                format!("{display_name}: unsafe path in archive, skipped"),
+            );
             continue;
         };
         let dest_path = dest_dir.join(&relative);
@@ -313,10 +310,11 @@ fn run_unzip_inner(
             // outside `dest_dir`, a second class of zip-slip distinct from
             // the path check above). Logged and skipped rather than
             // silently ignored.
-            let _ = tx.send(TaskEvent::Log {
+            send_log(
+                tx,
                 id,
-                line: format!("{display_name}: symlink entries are not extracted, skipped"),
-            });
+                format!("{display_name}: symlink entries are not extracted, skipped"),
+            );
         } else {
             if let Some(parent) = dest_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -390,23 +388,23 @@ pub fn run_extract(
     inner_targets: Vec<PathBuf>,
     dest_dir: PathBuf,
 ) {
+    let ctx = ExtractCtx {
+        id,
+        tx: &tx,
+        cancel: &cancel,
+        archive_path: &archive_path,
+        inner_targets: &inner_targets,
+        dest_dir: &dest_dir,
+    };
     let result = match virtual_dir::detect_archive_kind(&archive_path) {
-        Some(ArchiveKind::Tar(compression)) => run_tar_extract_inner(
-            id,
-            &tx,
-            &cancel,
-            &archive_path,
-            compression,
-            &inner_targets,
-            &dest_dir,
-        ),
+        Some(ArchiveKind::Tar(compression)) => run_tar_extract_inner(&ctx, compression),
         // `Some(ArchiveKind::Zip)` and, defensively, `None` (can't
         // actually happen — Virtual Directory mode is only ever entered
         // via `App::begin_open`'s `virtual_dir::is_archive_file` check,
         // which already validated the extension) both fall through to the
         // original zip-only path; a `None` archive_path still fails
         // there, cleanly, via `ZipArchive::new`'s own error.
-        _ => run_extract_inner(id, &tx, &cancel, &archive_path, &inner_targets, &dest_dir),
+        _ => run_extract_inner(&ctx),
     };
     let outcome = match result {
         Ok(count) => Ok(format!(
@@ -421,6 +419,21 @@ pub fn run_extract(
     });
 }
 
+/// Parameters shared by the zip and tar-family "Virtual Directory extract"
+/// inner workers (`run_extract_inner`/`run_tar_extract_inner`) — every one
+/// of `run_extract`'s own arguments except the tar-only `compression`,
+/// bundled so neither inner function has to re-thread six-plus separate
+/// parameters (which, for `run_tar_extract_inner` plus its own
+/// `compression`, previously tripped clippy's `too_many_arguments`).
+struct ExtractCtx<'a> {
+    id: TaskId,
+    tx: &'a Sender<TaskEvent>,
+    cancel: &'a Arc<AtomicBool>,
+    archive_path: &'a Path,
+    inner_targets: &'a [PathBuf],
+    dest_dir: &'a Path,
+}
+
 /// One planned extraction step: which archive entry (`index`) lands at
 /// which real `dest` path, and whether it's a directory (just needs
 /// creating) or a file (needs its content copied out).
@@ -430,15 +443,8 @@ struct ExtractPlan {
     is_dir: bool,
 }
 
-fn run_extract_inner(
-    id: TaskId,
-    tx: &Sender<TaskEvent>,
-    cancel: &Arc<AtomicBool>,
-    archive_path: &Path,
-    inner_targets: &[PathBuf],
-    dest_dir: &Path,
-) -> anyhow::Result<usize> {
-    let file = fs::File::open(archive_path)?;
+fn run_extract_inner(ctx: &ExtractCtx) -> anyhow::Result<usize> {
+    let file = fs::File::open(ctx.archive_path)?;
     let mut archive = ZipArchive::new(file)?;
 
     // Every safely-named entry's (enclosed_name, index), read once via the
@@ -456,7 +462,7 @@ fn run_extract_inner(
     }
 
     let mut plan: Vec<ExtractPlan> = Vec::new();
-    for target in inner_targets {
+    for target in ctx.inner_targets {
         let dest_name = target
             .file_name()
             .map(PathBuf::from)
@@ -465,12 +471,12 @@ fn run_extract_inner(
 
         for (name, index) in &safe_entries {
             let dest = if name == target {
-                dest_dir.join(&dest_name)
+                ctx.dest_dir.join(&dest_name)
             } else if let Ok(rel) = name.strip_prefix(target) {
                 if rel.as_os_str().is_empty() {
                     continue; // same entry as the `name == target` case above
                 }
-                dest_dir.join(&dest_name).join(rel)
+                ctx.dest_dir.join(&dest_name).join(rel)
             } else {
                 continue;
             };
@@ -484,10 +490,11 @@ fn run_extract_inner(
         }
 
         if !matched_any {
-            let _ = tx.send(TaskEvent::Log {
-                id,
-                line: format!("{}: not found in archive, skipped", target.display()),
-            });
+            send_log(
+                ctx.tx,
+                ctx.id,
+                format!("{}: not found in archive, skipped", target.display()),
+            );
         }
     }
 
@@ -497,7 +504,7 @@ fn run_extract_inner(
     let mut extracted = 0usize;
 
     for p in &plan {
-        if cancel.load(Ordering::Relaxed) {
+        if ctx.cancel.load(Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
 
@@ -522,8 +529,8 @@ fn run_extract_inner(
 
         done += 1;
         if throttle.allow(Instant::now()) {
-            let _ = tx.send(TaskEvent::Progress {
-                id,
+            let _ = ctx.tx.send(TaskEvent::Progress {
+                id: ctx.id,
                 done,
                 total,
                 detail: p.dest.display().to_string(),
@@ -556,45 +563,41 @@ fn run_extract_inner(
 /// worth doubling the actual extraction's cost just for a progress
 /// percentage. `detail` (the destination path) still updates live, so the
 /// task is visibly progressing even without a percentage.
-#[allow(clippy::too_many_arguments)]
 fn run_tar_extract_inner(
-    id: TaskId,
-    tx: &Sender<TaskEvent>,
-    cancel: &Arc<AtomicBool>,
-    archive_path: &Path,
+    ctx: &ExtractCtx,
     compression: virtual_dir::TarCompression,
-    inner_targets: &[PathBuf],
-    dest_dir: &Path,
 ) -> anyhow::Result<usize> {
-    let mut archive = virtual_dir::open_tar_archive(archive_path, compression)?;
+    let mut archive = virtual_dir::open_tar_archive(ctx.archive_path, compression)?;
     let mut throttle = Throttle::new(PROGRESS_MIN_INTERVAL);
     let mut extracted = 0usize;
     let mut matched_targets: HashSet<usize> = HashSet::new();
 
     for entry in archive
         .entries()
-        .with_context(|| format!("failed to read archive: {}", archive_path.display()))?
+        .with_context(|| format!("failed to read archive: {}", ctx.archive_path.display()))?
     {
-        if cancel.load(Ordering::Relaxed) {
+        if ctx.cancel.load(Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let mut entry = entry
-            .with_context(|| format!("failed to read an entry in {}", archive_path.display()))?;
+        let mut entry = entry.with_context(|| {
+            format!("failed to read an entry in {}", ctx.archive_path.display())
+        })?;
         let entry_type = entry.header().entry_type();
         let raw_path = entry
             .path()
             .with_context(|| {
                 format!(
                     "failed to read an entry's name in {}",
-                    archive_path.display()
+                    ctx.archive_path.display()
                 )
             })?
             .into_owned();
         let Some(path) = virtual_dir::enclosed_tar_path(&raw_path) else {
-            let _ = tx.send(TaskEvent::Log {
-                id,
-                line: format!("{}: unsafe path in archive, skipped", raw_path.display()),
-            });
+            send_log(
+                ctx.tx,
+                ctx.id,
+                format!("{}: unsafe path in archive, skipped", raw_path.display()),
+            );
             continue;
         };
 
@@ -602,17 +605,17 @@ fn run_tar_extract_inner(
         // one, but see the doc comment above for why it can legitimately
         // be more than one.
         let mut dests: Vec<PathBuf> = Vec::new();
-        for (ti, target) in inner_targets.iter().enumerate() {
+        for (ti, target) in ctx.inner_targets.iter().enumerate() {
             let dest_name = target
                 .file_name()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| target.clone());
             let matched = if path == *target {
-                Some(dest_dir.join(&dest_name))
+                Some(ctx.dest_dir.join(&dest_name))
             } else {
                 match path.strip_prefix(target) {
                     Ok(rel) if !rel.as_os_str().is_empty() => {
-                        Some(dest_dir.join(&dest_name).join(rel))
+                        Some(ctx.dest_dir.join(&dest_name).join(rel))
                     }
                     _ => None,
                 }
@@ -633,20 +636,22 @@ fn run_tar_extract_inner(
             continue;
         }
         if entry_type.is_symlink() {
-            let _ = tx.send(TaskEvent::Log {
-                id,
-                line: format!(
+            send_log(
+                ctx.tx,
+                ctx.id,
+                format!(
                     "{}: symlink entries are not extracted, skipped",
                     path.display()
                 ),
-            });
+            );
             continue;
         }
         if !entry_type.is_file() {
-            let _ = tx.send(TaskEvent::Log {
-                id,
-                line: format!("{}: unsupported entry type, skipped", path.display()),
-            });
+            send_log(
+                ctx.tx,
+                ctx.id,
+                format!("{}: unsupported entry type, skipped", path.display()),
+            );
             continue;
         }
 
@@ -664,8 +669,8 @@ fn run_tar_extract_inner(
         extracted += 1;
 
         if throttle.allow(Instant::now()) {
-            let _ = tx.send(TaskEvent::Progress {
-                id,
+            let _ = ctx.tx.send(TaskEvent::Progress {
+                id: ctx.id,
                 done: extracted as u64,
                 total: 0,
                 detail: dests[0].display().to_string(),
@@ -673,12 +678,13 @@ fn run_tar_extract_inner(
         }
     }
 
-    for (ti, target) in inner_targets.iter().enumerate() {
+    for (ti, target) in ctx.inner_targets.iter().enumerate() {
         if !matched_targets.contains(&ti) {
-            let _ = tx.send(TaskEvent::Log {
-                id,
-                line: format!("{}: not found in archive, skipped", target.display()),
-            });
+            send_log(
+                ctx.tx,
+                ctx.id,
+                format!("{}: not found in archive, skipped", target.display()),
+            );
         }
     }
 

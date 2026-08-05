@@ -18,7 +18,10 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::App;
 use crate::help::HelpLine;
-use crate::mode::{LineEditor, Mode, SearchDirection, ViewerSearch};
+#[cfg(test)]
+use crate::mode::SearchDirection;
+use crate::mode::{Mode, ViewerSearch};
+use crate::ui::modal::render_prefixed_input_line;
 use crate::viewer::Matcher;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -75,7 +78,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         input, direction, ..
     } = &search
     {
-        render_search_input_line(frame, rows[1], *direction, input);
+        render_prefixed_input_line(frame, rows[1], direction.label(), input, None);
         return;
     }
 
@@ -88,10 +91,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             wrapped,
             ..
         } => {
-            let prefix = match direction {
-                SearchDirection::Forward => '/',
-                SearchDirection::Backward => '?',
-            };
+            let prefix = direction.label();
             let wrap_note = if *wrapped { "  (search wrapped)" } else { "" };
             format!(
                 "  {prefix}{pattern}  {}/{}{wrap_note}",
@@ -105,31 +105,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         format!(" ozzel keybindings  [{range_text}]{search_note}  /,?:search  q/Esc/h:close");
     let footer_style = Style::default().add_modifier(Modifier::REVERSED);
     frame.render_widget(Paragraph::new(footer).style(footer_style), rows[1]);
-}
-
-/// Mirrors `ui::viewer_view::render_search_input_line` — see its doc
-/// comment; kept as a small private duplicate here for the same reason
-/// `ui::log_view`'s copy is (this footer row's only other dependency on
-/// `viewer_view` is `styled_line`, already reused below).
-fn render_search_input_line(
-    frame: &mut Frame,
-    area: Rect,
-    direction: SearchDirection,
-    input: &LineEditor,
-) {
-    let label = match direction {
-        SearchDirection::Forward => "/",
-        SearchDirection::Backward => "?",
-    };
-    let text = format!("{label}{}", input.value());
-    let style = Style::default().add_modifier(Modifier::REVERSED);
-    frame.render_widget(Paragraph::new(text).style(style), area);
-
-    let col = area.x
-        + unicode_width::UnicodeWidthStr::width(label) as u16
-        + input.cursor_display_col() as u16;
-    let col = col.min(area.x + area.width.saturating_sub(1));
-    frame.set_cursor_position((col, area.y));
 }
 
 /// Builds one rendered `Line` for `line`: `Header`s are bold (never

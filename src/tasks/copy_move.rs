@@ -8,15 +8,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use walkdir::WalkDir;
 
 use crate::event::TaskEvent;
-use crate::tasks::{TaskId, Throttle};
+use crate::tasks::{
+    CHUNK_SIZE, PROGRESS_MIN_INTERVAL, TaskId, Throttle, finish_cancelled, send_log,
+};
 
-const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
-const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 /// Files at or below this size skip the manual read/write loop entirely in
 /// favor of a single `std::fs::copy` call — cheap enough that per-chunk
 /// progress reporting wouldn't be visible anyway (the whole transfer
@@ -408,17 +410,6 @@ fn path_size(path: &Path) -> u64 {
         .filter_map(|e| e.metadata().ok())
         .map(|m| m.len())
         .sum()
-}
-
-fn send_log(tx: &Sender<TaskEvent>, id: TaskId, line: String) {
-    let _ = tx.send(TaskEvent::Log { id, line });
-}
-
-fn finish_cancelled(tx: &Sender<TaskEvent>, id: TaskId) {
-    let _ = tx.send(TaskEvent::Finished {
-        id,
-        result: Err("cancelled".to_string()),
-    });
 }
 
 #[cfg(test)]

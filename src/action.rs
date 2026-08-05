@@ -50,6 +50,10 @@ pub enum Action {
     JumpSearch,
     ZipMarked,
     Unzip,
+    /// Cancels every currently-running background task (copy/move/delete/
+    /// zip/unzip/extract) at once — a single "stop everything" action,
+    /// not per-task selection. See `App::cancel_running_tasks`.
+    CancelTasks,
     HistoryJump,
     /// Per-pane "back" in a browser-style history stack — the reverse of
     /// whatever cwd change was made last (see `App::record_history_if_changed`).
@@ -131,7 +135,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 44] = [
+    pub const ALL: [Action; 45] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -158,6 +162,7 @@ impl Action {
         Action::CopyPath,
         Action::ZipMarked,
         Action::Unzip,
+        Action::CancelTasks,
         Action::Filter,
         Action::ClearFilter,
         Action::JumpSearch,
@@ -186,9 +191,8 @@ impl Action {
                 ActionCategory::Movement
             }
             Mark | MarkAll => ActionCategory::Marks,
-            Rename | Mkdir | Delete | Copy | Move | Duplicate | CopyPath | ZipMarked | Unzip => {
-                ActionCategory::FileOps
-            }
+            Rename | Mkdir | Delete | Copy | Move | Duplicate | CopyPath | ZipMarked | Unzip
+            | CancelTasks => ActionCategory::FileOps,
             Filter | ClearFilter | JumpSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
@@ -228,6 +232,7 @@ impl Action {
             CopyPath => "Copy the cursor entry's absolute path to the clipboard",
             ZipMarked => "Zip marked entries (or the cursor entry)",
             Unzip => "Unzip the cursor .zip file",
+            CancelTasks => "Cancel all running background tasks",
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
             JumpSearch => "Jump the cursor to entries by typed prefix",
@@ -283,6 +288,7 @@ impl Action {
             JumpSearch => "jump_search",
             ZipMarked => "zip_marked",
             Unzip => "unzip",
+            CancelTasks => "cancel_tasks",
             HistoryJump => "history_jump",
             HistoryBack => "history_back",
             HistoryForward => "history_forward",
