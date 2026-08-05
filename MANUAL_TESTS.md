@@ -398,7 +398,37 @@ ln -s does_not_exist dangling_link
 - [ ] `\`（プレフィックスジャンプ）・`f`（絞込）・`Space`（マーク）が `link_to_dir`/`link_to_file.txt` に対しても通常のエントリと同じように機能することを確認する
 - [ ] `[viewers]` に `md = "less {}"` のような設定がある状態で、拡張子のない `link_to_notes`（`notes.md` へのリンク）を開くと、リンク先の拡張子 `md` にフォールバックして `less` が起動することを確認する（環境になければ省略可）
 
-## 24. 回帰確認（総合）
+## 24. Virtual Directory: tar 系アーカイブ（`.tar`/`.tar.gz`/`.tgz`/`.tar.bz2`/`.tbz2`/`.tar.xz`/`.txz`、新規）
+
+準備（システムの `tar` で実際に作る — ozzel は tar の**作成**には対応していないので、展開・閲覧側だけを確認する）:
+
+```sh
+mkdir -p project/src/nested
+echo hello > project/readme.txt
+echo 'fn main() {}' > project/src/main.rs
+echo deep > project/src/nested/deep.txt
+tar -cf project.tar project
+tar -czf project.tar.gz project
+cp project.tar.gz project.tgz
+tar -cjf project.tar.bz2 project   # bzip2 (環境に bzip2/tar が無ければ省略可)
+tar -cJf project.tar.xz project    # xz (環境に xz/tar が無ければ省略可)
+```
+
+- [ ] `project.tar` の上で `Enter`/`o` を押すと、展開せずにその場でディレクトリのように中身（`project/` 以下）が閲覧できることを確認する
+- [ ] `project.tar.gz` と `project.tgz`（同じ内容、拡張子違い）の両方が同じように開けることを確認する（`.tgz` サフィックスの認識確認）
+- [ ] `project.tar.bz2`/`project.tbz2` が開けることを確認する（環境になければ省略可）
+- [ ] `project.tar.xz`/`project.txz` が開けることを確認する（環境になければ省略可）
+- [ ] いずれの形式でも、`src/` のような中間ディレクトリが（tar 側に明示的なディレクトリエントリが無くても）自動的に合成されて表示されることを確認する
+- [ ] `Backspace` でアーカイブ内を1階層ずつ戻れ、ルートで `Backspace` を押すとアーカイブを抜けて実ディレクトリへ戻り、カーソルが元のアーカイブファイルの位置に復元されることを確認する
+- [ ] アーカイブ内のファイル（例: `readme.txt`）で `Enter`/`o` を押すと、組み込みビューアで中身が表示されることを確認する
+- [ ] ペインのヘッダーが `project.tar.gz:/src` のように `アーカイブ名:内部パス` の形式で表示されることを確認する
+- [ ] アーカイブ内で `M`（移動）・`D`（削除）・`R`/`r`（リネーム）・`K`（mkdir）・`c`（複製）・`p`（zip 圧縮）・`e`（エディタ）・`Shift+Enter`（OS既定アプリ）を試すと、いずれもエラーとしてログに表示され実行されない（読み取り専用）ことを確認する
+- [ ] マーク（`Space`）してから `C` を押すと、もう片方のペインの実ディレクトリへ展開されることを確認する（ファイル単体・サブツリーの両方で確認する。展開先の内容が元ファイルと一致することも確認する）
+- [ ] 大きめの `.tar.gz`（数十〜100MB 程度、手元にあれば）を開くと、一覧表示に体感できる時間がかかる場合があることを確認する（クラッシュしないこと。README の「tar 系は逐次読みのため時間がかかることがある」という記載どおりであることの確認 — 環境になければ省略可）
+- [ ] `u`（unzip）キーは `.tar`/`.tar.gz` 等のカーソル上では「selected entry is not a .zip file」等のエラーになり、tar 系の一括展開には対応していないことを確認する（`u` は zip 専用のまま）
+- [ ] `.gz`（`.tar.gz` ではなく単体の gzip ファイル）や、対応していない圧縮方式（zstd 等）の `.tar.*` ファイルは Virtual Directory として認識されず、通常のファイルとして組み込みビューアで開く（バイナリなので16進ダンプ表示）ことを確認する
+
+## 25. 回帰確認（総合）
 
 
 

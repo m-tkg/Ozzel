@@ -987,13 +987,13 @@ impl App {
     /// and `C`/Copy — repurposed as extract — are the two exceptions,
     /// handled separately in `begin_open`/`begin_transfer`): logs a
     /// rejection and returns `true` when the active pane is currently
-    /// browsing inside a `.zip` (Virtual Directory), so the caller can
-    /// bail out early. `label` names the action in the log line (e.g.
-    /// `"rename"`).
+    /// browsing inside an archive (Virtual Directory — zip or tar
+    /// family), so the caller can bail out early. `label` names the
+    /// action in the log line (e.g. `"rename"`).
     fn reject_if_virtual(&mut self, label: &str) -> bool {
         if self.active_pane().is_virtual() {
             self.log_error(format!(
-                "virtual directory (zip) is read-only: {label} is not available here"
+                "virtual directory (archive) is read-only: {label} is not available here"
             ));
             true
         } else {
@@ -1006,21 +1006,22 @@ impl App {
     /// merged): `..`/directories navigate (and get recorded in history
     /// via `navigate`); anything else opens in the built-in viewer.
     ///
-    /// Virtual Directory (browsing a `.zip` as if it were a directory —
-    /// see `virtual_dir`) hooks into exactly this one function, not a
-    /// parallel code path: a `.zip` *file* under the cursor in a real pane
-    /// enters Virtual Directory mode instead of the viewer; a file inside
-    /// an already-virtual pane extracts to memory and opens the viewer
-    /// instead of reading from disk; `..`/directory navigation is
+    /// Virtual Directory (browsing an archive — zip, or the tar family via
+    /// `virtual_dir::ArchiveKind::Tar` — as if it were a directory — see
+    /// `virtual_dir`) hooks into exactly this one function, not a parallel
+    /// code path: a recognized archive *file* under the cursor in a real
+    /// pane enters Virtual Directory mode instead of the viewer; a file
+    /// inside an already-virtual pane extracts to memory and opens the
+    /// viewer instead of reading from disk; `..`/directory navigation is
     /// unmodified — it already goes through `Pane::enter`, which is
     /// itself virtual-aware (see `Pane::virtual_descend`/
     /// `virtual_go_parent`) and never changes `cwd` while virtual, so
     /// `navigate`'s history bookkeeping silently no-ops for every
-    /// archive-internal move (before == after). A `.zip` found *inside*
-    /// an archive is deliberately not recursed into (no nested Virtual
+    /// archive-internal move (before == after). An archive found *inside*
+    /// another one is deliberately not recursed into (no nested Virtual
     /// Directories) — it just opens in the viewer like any other file,
-    /// which for a zip's own binary content means a hex dump; harmless,
-    /// not an error.
+    /// which for a zip/tar's own binary content usually means a hex dump;
+    /// harmless, not an error.
     fn begin_open(&mut self) {
         let pane = self.active_pane();
         let is_virtual = pane.is_virtual();
@@ -1070,7 +1071,7 @@ impl App {
                     self.open_viewer_virtual(&archive_path, &inner_path);
                 }
             }
-            Some(path) if virtual_dir::is_zip_file(&path) => {
+            Some(path) if virtual_dir::is_archive_file(&path) => {
                 self.navigate(move |pane| pane.enter_virtual(path));
             }
             Some(path) => match viewer_cmd {
@@ -1995,9 +1996,9 @@ impl App {
         // extraction of the marked/cursor entries — see `begin_extract`);
         // `M` (Move) has no virtual-mode meaning at all ("move INTO/OUT-as-
         // move" is explicitly rejected) and always bails. Copying/moving
-        // INTO a virtual pane (the *other* pane is the one browsing a
-        // zip) is rejected the same way regardless of direction — there's
-        // no real directory there to write into.
+        // INTO a virtual pane (the *other* pane is the one browsing an
+        // archive) is rejected the same way regardless of direction —
+        // there's no real directory there to write into.
         if self.active_pane().is_virtual() {
             match kind {
                 TransferKind::Copy => self.begin_extract(),
@@ -2008,7 +2009,7 @@ impl App {
             return;
         }
         if self.panes[self.active.other().index()].is_virtual() {
-            self.log_error("cannot copy/move into a virtual directory (zip) pane");
+            self.log_error("cannot copy/move into a virtual directory (archive) pane");
             return;
         }
 

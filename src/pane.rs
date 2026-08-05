@@ -136,7 +136,7 @@ impl Pane {
     /// the current inner level for a virtual one.
     pub fn reload(&mut self) -> Result<()> {
         self.entries = match &self.virtual_dir {
-            Some(vd) => virtual_dir::read_zip_dir_entries(&vd.archive_path, &vd.inner)?,
+            Some(vd) => virtual_dir::read_archive_dir_entries(&vd.archive_path, &vd.inner)?,
             None => read_dir_entries(&self.cwd)?,
         };
         self.clamp_cursor();
@@ -305,7 +305,7 @@ impl Pane {
     /// filter reset — except `cwd` is untouched (see the struct's doc
     /// comment on `virtual_dir`).
     pub fn enter_virtual(&mut self, archive_path: PathBuf) -> Result<()> {
-        let entries = virtual_dir::read_zip_dir_entries(&archive_path, Path::new(""))?;
+        let entries = virtual_dir::read_archive_dir_entries(&archive_path, Path::new(""))?;
         let archive_name = archive_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -333,7 +333,7 @@ impl Pane {
         let Some(vd) = &self.virtual_dir else {
             return Ok(());
         };
-        let entries = virtual_dir::read_zip_dir_entries(&vd.archive_path, &inner_path)?;
+        let entries = virtual_dir::read_archive_dir_entries(&vd.archive_path, &inner_path)?;
         self.virtual_dir.as_mut().unwrap().inner = inner_path;
         self.entries = entries;
         self.cursor = 0;
@@ -369,7 +369,7 @@ impl Pane {
             .unwrap_or_default();
         let new_inner = vd.inner.parent().map(Path::to_path_buf).unwrap_or_default();
 
-        let entries = virtual_dir::read_zip_dir_entries(&vd.archive_path, &new_inner)?;
+        let entries = virtual_dir::read_archive_dir_entries(&vd.archive_path, &new_inner)?;
         self.virtual_dir.as_mut().unwrap().inner = new_inner.clone();
         self.entries = entries;
         self.marks.clear();
