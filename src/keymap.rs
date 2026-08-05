@@ -114,22 +114,25 @@ impl Keymap {
     /// The dyna-filer-style defaults: arrows/PageUp/PageDown/Home/End move
     /// the cursor, `Left`/`Right` additionally jump focus straight to that
     /// pane (ijkl-style `i`/`k`/`j`/`l` are bound the same way, alongside
-    /// the arrows — not instead of them), Tab switches panes, Enter/Backspace
-    /// navigate, Space marks,
-    /// `a` marks all, `s`/`.` cycle sort/hidden, `C`/`M`/`D`(or `d`)/`R`(or
-    /// `r`)/`K` are the copy/move/delete/rename/mkdir commands (`r`/`d` are
-    /// this keymap's showcase of binding more than one combo to the same
-    /// action — `R`/`D` still work too, they're the same key with Shift
-    /// implied), `w` swaps panes, `f`/`/` start an incremental filter (Esc
-    /// clears one that's active), `p` zips the marked-or-cursor selection,
-    /// `u` unzips the file under the cursor, `h`/`?` open the keybinding
-    /// help screen, `S-h` (capital `H`) opens the history jump menu (moved
-    /// off plain `h` to make room for help), `b` opens the bookmark jump
-    /// menu, `B` adds a bookmark, `~` jumps to home (no longer also on
-    /// `S-h`/`H`, which now means history), `:` runs a shell command (TUI
+    /// the arrows — not instead of them), Tab switches panes, `Enter`/`o`
+    /// run `Open` (directory navigates in, recorded in history; anything
+    /// else opens in the built-in viewer — this merges what used to be
+    /// two separate actions, `Enter` and `View`; `x`, `View`'s other old
+    /// key, is unbound now), Backspace navigates to the parent, Space
+    /// marks, `a` marks all, `s`/`.` cycle sort/hidden,
+    /// `C`/`M`/`D`(or `d`)/`R`(or `r`)/`K` are the copy/move/delete/
+    /// rename/mkdir commands (`r`/`d` are this keymap's showcase of
+    /// binding more than one combo to the same action — `R`/`D` still
+    /// work too, they're the same key with Shift implied), `w` swaps
+    /// panes, `f`/`/` start an incremental filter (Esc clears one that's
+    /// active), `p` zips the marked-or-cursor selection, `u` unzips the
+    /// file under the cursor, `h`/`?` open the keybinding help screen,
+    /// `S-h` (capital `H`) opens the history jump menu (moved off plain
+    /// `h` to make room for help), `b` opens the bookmark jump menu, `B`
+    /// adds a bookmark, `~` jumps to home (no longer also on `S-h`/`H`,
+    /// which now means history), `:` runs a shell command (TUI
     /// suspended), `e` opens the cursor file in an editor (suspended, no
-    /// pause), `x`/`o` open the cursor entry in the built-in text viewer,
-    /// `,` opens ozzel's own config file in an editor and reloads it live
+    /// pause), `,` opens ozzel's own config file in an editor and reloads it live
     /// once the editor exits (see `App::begin_edit_config`), and `q`/Ctrl+C
     /// quit. `S-up`/`S-down` jump straight to the top/bottom of the pane
     /// (same as Home/End, kept bound too), and `S-enter` opens the cursor
@@ -158,7 +161,7 @@ impl Keymap {
             ("S-up", Top),
             ("S-down", Bottom),
             ("tab", SwitchPane),
-            ("enter", Enter),
+            ("enter", Open),
             ("S-enter", OpenDefault),
             ("backspace", Parent),
             ("s", CycleSort),
@@ -187,8 +190,7 @@ impl Keymap {
             ("~", GoHome),
             (":", CommandLine),
             ("e", OpenEditor),
-            ("x", View),
-            ("o", View),
+            ("o", Open),
             (",", EditConfig),
             ("q", Quit),
             ("C-c", Quit),
@@ -510,13 +512,30 @@ mod tests {
             Some(Action::OpenEditor)
         );
         assert_eq!(
+            km.resolve(KeyCode::Char('o'), KeyModifiers::NONE),
+            Some(Action::Open)
+        );
+        assert_eq!(
             km.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
-            Some(Action::View)
+            None,
+            "x is freed now that Enter/View merged into Open (bound to Enter/o)"
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_enter_and_o_both_to_open() {
+        // Enter/View merged into a single action, Open, bound to both
+        // Enter and o (x is freed, no longer bound to anything).
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Action::Open)
         );
         assert_eq!(
             km.resolve(KeyCode::Char('o'), KeyModifiers::NONE),
-            Some(Action::View)
+            Some(Action::Open)
         );
+        assert_eq!(km.resolve(KeyCode::Char('x'), KeyModifiers::NONE), None);
     }
 
     #[test]
@@ -590,8 +609,8 @@ mod tests {
     #[test]
     fn open_default_action_is_unbound_by_default_but_rebindable() {
         // OS-default-app opening is still a valid action — it just isn't
-        // on any key out of the box, since `x`/`o` now open the built-in
-        // viewer instead. A user can still rebind it via `[keys]`.
+        // on any key out of the box, since `Enter`/`o` run `Open` (the
+        // built-in viewer) instead. A user can still rebind it via `[keys]`.
         let mut km = Keymap::default_dyna();
         assert_ne!(
             km.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -701,7 +720,7 @@ mod tests {
         );
         assert_eq!(
             km.resolve(KeyCode::Enter, KeyModifiers::NONE),
-            Some(Action::Enter)
+            Some(Action::Open)
         );
     }
 
@@ -726,6 +745,21 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("x".to_string(), "not_a_real_action".to_string());
         assert!(km.merge_overrides(&overrides).is_err());
+    }
+
+    #[test]
+    fn merge_overrides_rejects_the_old_enter_and_view_action_names() {
+        // `enter` and `view` no longer exist as of the merge into `open` —
+        // this is an intentional breaking rename, so the old names must
+        // still be hard errors, not silently ignored.
+        let mut km = Keymap::default_dyna();
+        let mut with_enter = HashMap::new();
+        with_enter.insert("z".to_string(), "enter".to_string());
+        assert!(km.merge_overrides(&with_enter).is_err());
+
+        let mut with_view = HashMap::new();
+        with_view.insert("z".to_string(), "view".to_string());
+        assert!(km.merge_overrides(&with_view).is_err());
     }
 
     #[test]
@@ -784,6 +818,18 @@ mod tests {
         let mut bindings = HashMap::new();
         bindings.insert("not_a_real_action".to_string(), vec!["z".to_string()]);
         assert!(km.apply_bindings(&bindings).is_err());
+    }
+
+    #[test]
+    fn apply_bindings_rejects_the_old_enter_and_view_action_names() {
+        let mut km = Keymap::default_dyna();
+        let mut with_enter = HashMap::new();
+        with_enter.insert("enter".to_string(), vec!["z".to_string()]);
+        assert!(km.apply_bindings(&with_enter).is_err());
+
+        let mut with_view = HashMap::new();
+        with_view.insert("view".to_string(), vec!["z".to_string()]);
+        assert!(km.apply_bindings(&with_view).is_err());
     }
 
     #[test]

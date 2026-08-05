@@ -16,7 +16,11 @@ pub enum Action {
     Top,
     Bottom,
     SwitchPane,
-    Enter,
+    /// Context-dependent: a directory (or `..`) navigates into it (and
+    /// gets recorded in history); anything else opens in the built-in
+    /// viewer. Merges what used to be two separate actions, `Enter` and
+    /// `View` — see `App::begin_open`.
+    Open,
     Parent,
     CycleSort,
     ToggleHidden,
@@ -40,7 +44,6 @@ pub enum Action {
     CommandLine,
     OpenEditor,
     OpenDefault,
-    View,
     FocusLeft,
     FocusRight,
     /// Opens the full-frame keybinding help screen (`Mode::Help`); see
@@ -97,7 +100,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 36] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -107,7 +110,7 @@ impl Action {
         Action::SwitchPane,
         Action::FocusLeft,
         Action::FocusRight,
-        Action::Enter,
+        Action::Open,
         Action::Parent,
         Action::CycleSort,
         Action::ToggleHidden,
@@ -131,7 +134,6 @@ impl Action {
         Action::CommandLine,
         Action::OpenEditor,
         Action::OpenDefault,
-        Action::View,
         Action::Help,
         Action::EditConfig,
         Action::Quit,
@@ -141,14 +143,14 @@ impl Action {
         use Action::*;
         match self {
             CursorUp | CursorDown | PageUp | PageDown | Top | Bottom | SwitchPane | FocusLeft
-            | FocusRight | Enter | Parent | CycleSort | ToggleHidden | SwapPanes | Refresh => {
+            | FocusRight | Open | Parent | CycleSort | ToggleHidden | SwapPanes | Refresh => {
                 ActionCategory::Movement
             }
             Mark | MarkAll => ActionCategory::Marks,
             Rename | Mkdir | Delete | Copy | Move | ZipMarked | Unzip => ActionCategory::FileOps,
             Filter | ClearFilter => ActionCategory::Filter,
             HistoryJump | BookmarkJump | BookmarkAdd | GoHome => ActionCategory::Jumps,
-            CommandLine | OpenEditor | OpenDefault | View | EditConfig => ActionCategory::External,
+            CommandLine | OpenEditor | OpenDefault | EditConfig => ActionCategory::External,
             Help | Quit => ActionCategory::Misc,
         }
     }
@@ -166,7 +168,7 @@ impl Action {
             SwitchPane => "Toggle the active pane",
             FocusLeft => "Focus the left pane",
             FocusRight => "Focus the right pane",
-            Enter => "Open directory, or view file",
+            Open => "Open directory (navigate in), or view file",
             Parent => "Go to the parent directory",
             CycleSort => "Cycle the sort key",
             ToggleHidden => "Toggle hidden files",
@@ -190,7 +192,6 @@ impl Action {
             CommandLine => "Run a shell command (TUI suspended)",
             OpenEditor => "Open the cursor file in an editor",
             OpenDefault => "Open the cursor entry with the OS default app",
-            View => "Open the cursor file in the built-in viewer",
             Help => "Show this help screen",
             EditConfig => "Edit the config file (created from a template if missing)",
             Quit => "Quit ozzel",
@@ -211,7 +212,7 @@ impl Action {
             Top => "top",
             Bottom => "bottom",
             SwitchPane => "switch_pane",
-            Enter => "enter",
+            Open => "open",
             Parent => "parent",
             CycleSort => "cycle_sort",
             ToggleHidden => "toggle_hidden",
@@ -235,7 +236,6 @@ impl Action {
             CommandLine => "command_line",
             OpenEditor => "open_editor",
             OpenDefault => "open_default",
-            View => "view",
             FocusLeft => "focus_left",
             FocusRight => "focus_right",
             Quit => "quit",

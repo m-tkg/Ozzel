@@ -81,19 +81,16 @@ dim_inactive = true
 # 例: "q" 単体での終了を無効化し、誤操作を防ぐ
 # "q" = "none"
 
-# 例: vi 風に j/k でカーソル移動を追加する
-# "j" = "cursor_down"
-# "k" = "cursor_up"
-
-# 例: x/o に元の「OS既定アプリで開く」を戻す（デフォルトでは未割り当て）
+# 例: x に元の「OS既定アプリで開く」を割り当てる（デフォルトでは未割り当て。
+# x はデフォルトで空いているキーです）
 # "x" = "open_default"
 
 # 使用できるアクション名の一覧:
 # cursor_up, cursor_down, focus_left, focus_right, page_up, page_down,
-# top, bottom, switch_pane, enter, parent, cycle_sort, toggle_hidden,
+# top, bottom, switch_pane, open, parent, cycle_sort, toggle_hidden,
 # swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
 # filter, clear_filter, zip_marked, unzip, history_jump, bookmark_jump,
-# bookmark_add, go_home, command_line, open_editor, open_default, view,
+# bookmark_add, go_home, command_line, open_editor, open_default,
 # help, edit_config, quit
 
 # --- キーバインドの上書き（逆向き記法・デフォルトの全キーバインド一覧） ---
@@ -122,7 +119,7 @@ bottom = ["End", "S-Down"]
 switch_pane = ["Tab"]
 focus_left = ["Left", "j"]
 focus_right = ["Right", "l"]
-enter = ["Enter"]
+open = ["Enter", "o"]
 parent = ["Backspace"]
 cycle_sort = ["s"]
 toggle_hidden = ["."]
@@ -146,7 +143,6 @@ go_home = ["~"]
 command_line = [":"]
 open_editor = ["e"]
 open_default = ["S-Enter"]
-view = ["o", "x"]
 edit_config = [","]
 help = ["?", "h"]
 quit = ["C-c", "q"]

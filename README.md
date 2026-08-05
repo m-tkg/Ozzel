@@ -16,7 +16,7 @@
 - ログ欄の各行に記録時刻を表示（長いメッセージは折り返され、継続行は日時分だけ字下げされて桁が揃う）
 - zip 圧縮・展開（zip-slip 対策済み）
 - ディレクトリ履歴・ブックマーク（永続化）
-- 組み込みのビューア（`Enter`/`x`/`o` でファイルを開く。日本語テキストの表示にも対応。`Tab` でテキスト表示と `xxd` 風の16進ダンプ表示を切替可能）
+- 組み込みのビューア（`Enter`/`o` でファイルを開く。日本語テキストの表示にも対応。`Tab` でテキスト表示と `xxd` 風の16進ダンプ表示を切替可能）
 - `:` キーでの外部コマンド起動、`e` キーでのエディタ起動（いずれも TUI を一時退避）
 - カーソル色（アクティブ／非アクティブ双方）を設定でカスタマイズ可能（named color または `#RRGGBB`）
 - 非アクティブ側ペインを薄暗く表示（設定でオフ可能）
@@ -57,7 +57,7 @@ ozzel [左ペインのディレクトリ] [右ペインのディレクトリ]
 | `Home` / `End` | 一覧の先頭・末尾へ移動 |
 | `Shift+↑` / `Shift+↓` | 一覧の先頭・末尾へ移動（`Home`/`End` と同じ動作） |
 | `Tab` | アクティブペインの切替（`←`/`→` と違い、押すたびに反対側へトグル） |
-| `Enter` | ディレクトリなら開く（`..` も含む）。ファイルなら組み込みのテキストビューアで開く |
+| `Enter` / `o` | ディレクトリなら開く（`..` も含む）。ファイルなら組み込みのビューアで開く（1つのアクション `open` に統合されています。後述） |
 | `Backspace` | 親ディレクトリへ移動 |
 | `w` | 左右ペインの入れ替え |
 | `s` | ソートキーの切替（名前 → サイズ → 更新日時 → 拡張子 → 名前…） |
@@ -144,8 +144,8 @@ ozzel [左ペインのディレクトリ] [右ペインのディレクトリ]
 
 | キー | 動作 |
 | --- | --- |
-| `x` / `o` | カーソル位置のファイルを組み込みのビューアで開く（ディレクトリの場合はエラー） |
-| `Enter`（ファイル上） | 同上（`x`/`o` と同じ動作） |
+| `o` | カーソル位置のファイルを組み込みのビューアで開く。ディレクトリの場合はエラーではなくそのディレクトリへ移動する（`Enter` と同じ、1つのアクション `open` に統合されているため） |
+| `Enter`（ファイル上） | 同上（`o` と同じ動作） |
 
 ビューアはフルスクリーン表示（`less` に似た挙動）で、ファイラーの画面全体を一時的に置き換えます。テキスト表示と `xxd` 風の16進ダンプ表示の2モードがあり、`Tab` でいつでも切り替えられます。
 
@@ -167,7 +167,7 @@ ozzel [左ペインのディレクトリ] [右ペインのディレクトリ]
 00000010  48 65 6c 6c 6f 20 77 6f  72 6c 64 21 0a 01 02 03  |Hello world!....|
 ```
 
-OS 既定のアプリでファイル・ディレクトリを開く動作（`open_default` アクション）は、デフォルトで `Shift+Enter` に割り当てられています（他のキーにも `[keys]` で自由に再割り当て可能）。
+OS 既定のアプリでファイル・ディレクトリを開く動作（`open_default` アクション）は、デフォルトで `Shift+Enter` に割り当てられています（他のキーにも `[keys]` で自由に再割り当て可能）。以前 `x` に割り当てられていた「組み込みビューアで開く」動作は `Enter`/`o`（`open` アクション）に統合されたため、`x` はデフォルトで未割り当てになりました。空いているキーとして `[keys]` での再割り当てに使えます（例: `"x" = "open_default"`）。
 
 **`Shift+Enter` に関する重要な注意:** ほとんどのターミナルは、[kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) 対応でない限り、`Shift+Enter` と素の `Enter` を区別して報告できません。`ozzel` は起動時にターミナルが対応しているかを一度だけ問い合わせ（`crossterm::terminal::supports_keyboard_enhancement`）、対応していれば `DISAMBIGUATE_ESCAPE_CODES` フラグを有効化します。対応ターミナル（近年の tmux・kitty・WezTerm など）では `Shift+Enter` が `open_default` として動作しますが、**対応していないターミナルでは `Shift+Enter` は素の `Enter` として届き、組み込みビューアが開きます**（クラッシュや誤動作はしませんが、`open_default` は発火しません）。`:` や `e` で外部コマンド・エディタを起動する際は、このフラグを一時的に解除してから子プロセスに制御を渡し、復帰時に再度有効化します（`vim` などの実行後も `Shift+Enter` の判別が壊れないようにするためです）。
 
@@ -271,7 +271,7 @@ delete = ["d", "S-d"]
 
 ### アクション名一覧（`[keys]` の右辺 / `[bindings]` の左辺に指定できる値）
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `enter`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `filter`, `clear_filter`, `zip_marked`, `unzip`, `history_jump`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `view`, `help`, `edit_config`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `filter`, `clear_filter`, `zip_marked`, `unzip`, `history_jump`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `quit`
 
 この一覧に対応する現在の実効キーバインドは、アプリ内のヘルプ画面（`h`/`?`）でいつでも確認できます。
 

@@ -123,16 +123,16 @@ mod tests {
     fn reflects_a_bindings_override() {
         let mut keymap = Keymap::default_dyna();
         let mut bindings = HashMap::new();
-        bindings.insert("view".to_string(), vec!["v".to_string()]);
+        bindings.insert("open".to_string(), vec!["v".to_string()]);
         keymap.apply_bindings(&bindings).unwrap();
 
         let lines = build_lines(&keymap);
-        let view_row = lines
+        let open_row = lines
             .iter()
-            .find(|l| matches!(l, HelpLine::Binding { action, .. } if *action == "view"));
-        match view_row {
+            .find(|l| matches!(l, HelpLine::Binding { action, .. } if *action == "open"));
+        match open_row {
             Some(HelpLine::Binding { keys, .. }) => assert!(keys.contains('v'), "keys: {keys}"),
-            other => panic!("expected a view binding row, got {other:?}"),
+            other => panic!("expected an open binding row, got {other:?}"),
         }
     }
 

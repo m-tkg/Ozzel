@@ -316,8 +316,8 @@ impl App {
                 self.active = ActivePane::Right;
                 Ok(())
             }
-            Action::Enter => {
-                self.handle_enter();
+            Action::Open => {
+                self.begin_open();
                 Ok(())
             }
             Action::Parent => {
@@ -420,10 +420,6 @@ impl App {
                 self.begin_open_default();
                 Ok(())
             }
-            Action::View => {
-                self.begin_view();
-                Ok(())
-            }
             Action::Help => {
                 self.begin_help();
                 Ok(())
@@ -499,10 +495,12 @@ impl App {
         self.navigate(|pane| pane.jump_to(path));
     }
 
-    /// `Enter`'s dyna-filer behavior: `..`/directories navigate (and get
-    /// recorded in history via `navigate`); anything else opens in the
-    /// built-in text viewer, same as `View`.
-    fn handle_enter(&mut self) {
+    /// `Open`'s dyna-filer behavior (bound to `Enter`/`o` by default, and
+    /// the single action `Enter`/`View` used to be split across before
+    /// they were merged): `..`/directories navigate (and get recorded in
+    /// history via `navigate`); anything else opens in the built-in
+    /// viewer.
+    fn begin_open(&mut self) {
         let pane = self.active_pane();
         // `..`/directories navigate (via `Pane::enter`, which already
         // handles both — and is a safe no-op on an empty pane); anything
@@ -783,21 +781,6 @@ impl App {
             Ok(()) => self.log_info(format!("opened {}", path.display())),
             Err(err) => self.log_error(format!("failed to open {}: {err}", path.display())),
         }
-    }
-
-    /// Only fires on a file (never a directory): opens the built-in
-    /// full-frame text viewer, same target rule as `OpenEditor`.
-    fn begin_view(&mut self) {
-        let pane = self.active_pane();
-        let target = match pane.selected_entry_kind() {
-            Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
-            _ => None,
-        };
-        let Some(path) = target else {
-            self.log_error("cursor is not on a file");
-            return;
-        };
-        self.open_viewer(&path);
     }
 
     /// Loads `path` and switches to `Mode::Viewer`. Binary files no longer
@@ -1754,14 +1737,19 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_directory_navigates_and_records_history() {
+    fn open_on_directory_navigates_and_records_history() {
+        // `open` merges the old Enter/View actions: on a directory it
+        // navigates (the old View action used to error here instead —
+        // "cursor is not on a file" — that behavior is gone now that
+        // there's only one context-dependent action bound to both `Enter`
+        // and `o`).
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "sub");
 
-        app.dispatch(Action::Enter);
+        app.dispatch(Action::Open);
         assert_eq!(app.panes[0].cwd, dir.path().join("sub"));
         assert_eq!(
             app.history.ring(Side::Left).first(),
@@ -1907,7 +1895,7 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         let mut app = test_app(dir.path(), dir.path());
         select_entry_named(&mut app, "sub");
-        app.dispatch(Action::Enter); // history: [sub]
+        app.dispatch(Action::Open); // history: [sub]
         app.dispatch(Action::Parent); // history: [dir, sub]
 
         app.dispatch(Action::HistoryJump);
@@ -2241,14 +2229,14 @@ mod tests {
     }
 
     #[test]
-    fn view_action_opens_the_built_in_viewer_on_a_file() {
+    fn open_action_opens_the_built_in_viewer_on_a_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), "one\ntwo\nthree").unwrap();
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "notes.txt");
 
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
         match &app.mode {
             Mode::Viewer {
                 path,
@@ -2275,14 +2263,14 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_file_opens_the_viewer_instead_of_navigating() {
+    fn open_on_a_file_opens_the_viewer_instead_of_navigating() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "readme.txt");
 
-        app.dispatch(Action::Enter);
+        app.dispatch(Action::Open);
         assert!(matches!(app.mode, Mode::Viewer { .. }));
         assert_eq!(
             app.panes[0].cwd,
@@ -2292,31 +2280,14 @@ mod tests {
     }
 
     #[test]
-    fn view_errors_and_does_not_open_a_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-        let mut app = test_app(dir.path(), dir.path());
-        app.active_pane_mut().reload().unwrap();
-        select_entry_named(&mut app, "sub");
-
-        app.dispatch(Action::View);
-        assert!(matches!(app.mode, Mode::Normal));
-        assert!(
-            app.log
-                .iter()
-                .any(|l| l.is_error && l.message.contains("not on a file"))
-        );
-    }
-
-    #[test]
-    fn view_opens_a_binary_file_directly_in_hex_mode() {
+    fn open_opens_a_binary_file_directly_in_hex_mode() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("bin.dat"), [b'a', 0u8, b'b']).unwrap();
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "bin.dat");
 
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
         assert_eq!(view_mode_of(&app), ViewMode::Hex);
     }
 
@@ -2327,7 +2298,7 @@ mod tests {
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "notes.txt");
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
         assert_eq!(view_mode_of(&app), ViewMode::Text);
 
         app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
@@ -2350,7 +2321,7 @@ mod tests {
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "bytes.dat");
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
         assert_eq!(view_mode_of(&app), ViewMode::Hex);
 
         app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
@@ -2371,7 +2342,7 @@ mod tests {
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "lines.txt");
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
 
         // Up from the very top stays at 0.
         app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::NONE));
@@ -2403,7 +2374,7 @@ mod tests {
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "many.txt");
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
 
         app.handle_event(AppEvent::Input(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(
@@ -2422,7 +2393,7 @@ mod tests {
         let mut app = test_app(dir.path(), dir.path());
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "wide.txt");
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
 
         // Left at the start must not underflow (saturating_sub).
         app.handle_event(AppEvent::Input(KeyCode::Left, KeyModifiers::NONE));
@@ -2443,12 +2414,12 @@ mod tests {
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "a.txt");
 
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
         assert!(matches!(app.mode, Mode::Viewer { .. }));
         app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::Normal));
 
-        app.dispatch(Action::View);
+        app.dispatch(Action::Open);
         assert!(matches!(app.mode, Mode::Viewer { .. }));
         app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.mode, Mode::Normal));
