@@ -1855,6 +1855,11 @@ impl App {
     /// `tasks::copy_move::run_duplicate`); see `spawn_transfer` for the
     /// completion story.
     fn spawn_duplicate(&mut self, source: PathBuf, dest: PathBuf) {
+        self.log_info(format!(
+            "duplicate: {} -> {}",
+            source.display(),
+            dest.display()
+        ));
         let desc = format!("duplicate {} to {}", source.display(), dest.display());
         self.tasks.spawn(desc, move |id, tx, cancel| {
             copy_move::run_duplicate(id, tx, cancel, source, dest);
@@ -2058,11 +2063,27 @@ impl App {
     /// `tasks::copy_move`); `dispatch`/`execute_pending` return immediately,
     /// and completion arrives later as a `TaskEvent::Finished` drained by
     /// `drain_tasks`.
+    ///
+    /// Logs one `{verb}: {src} -> {dest}` line per source *before*
+    /// spawning — enumerated up front (rather than per-file as the task
+    /// itself progresses) so the log is an atomic, complete record of
+    /// exactly what was asked for at the moment the operation started,
+    /// never a partial list if something in the batch later fails or gets
+    /// cancelled mid-flight. For a large batch this can add many lines to
+    /// the (capacity-capped) log — intentional; `L` opens the full
+    /// scrollable log view for exactly this case.
     fn spawn_transfer(&mut self, kind: TransferKind, sources: Vec<PathBuf>, dest_dir: PathBuf) {
         let verb = match kind {
             TransferKind::Copy => "copy",
             TransferKind::Move => "move",
         };
+        for src in &sources {
+            let dest = src
+                .file_name()
+                .map(|name| dest_dir.join(name))
+                .unwrap_or_else(|| dest_dir.clone());
+            self.log_info(format!("{verb}: {} -> {}", src.display(), dest.display()));
+        }
         let desc = format!("{verb} {} item(s) to {}", sources.len(), dest_dir.display());
         self.tasks.spawn(desc, move |id, tx, cancel| match kind {
             TransferKind::Copy => copy_move::run_copy(id, tx, cancel, sources, dest_dir),
@@ -2082,6 +2103,9 @@ impl App {
         let anchor = self.active_pane().anchor_above(&targets);
         let pane = self.active;
         let behavior = self.config.delete_behavior;
+        for target in &targets {
+            self.log_info(format!("delete: {}", target.display()));
+        }
         let desc = format!("delete {} item(s)", targets.len());
         let id = self.tasks.spawn(desc, move |id, tx, cancel| {
             delete_task::run_delete(id, tx, cancel, targets, behavior);
@@ -2364,6 +2388,9 @@ impl App {
     /// `tasks::archive::run_zip`); see `spawn_transfer` for the completion
     /// story.
     fn spawn_zip(&mut self, targets: Vec<PathBuf>, archive_path: PathBuf) {
+        for target in &targets {
+            self.log_info(format!("zip: {}", target.display()));
+        }
         let desc = format!(
             "zip {} item(s) to {}",
             targets.len(),
@@ -2411,6 +2438,11 @@ impl App {
     /// `tasks::archive::run_unzip`); see `spawn_transfer` for the
     /// completion story.
     fn spawn_unzip(&mut self, archive_path: PathBuf, dest_dir: PathBuf) {
+        self.log_info(format!(
+            "unzip: {} -> {}",
+            archive_path.display(),
+            dest_dir.display()
+        ));
         let desc = format!("unzip {} to {}", archive_path.display(), dest_dir.display());
         self.tasks.spawn(desc, move |id, tx, cancel| {
             archive::run_unzip(id, tx, cancel, archive_path, dest_dir);
@@ -2475,6 +2507,18 @@ impl App {
         inner_targets: Vec<PathBuf>,
         dest_dir: PathBuf,
     ) {
+        for target in &inner_targets {
+            let dest = target
+                .file_name()
+                .map(|name| dest_dir.join(name))
+                .unwrap_or_else(|| dest_dir.clone());
+            self.log_info(format!(
+                "extract: {}{} -> {}",
+                archive_path.display(),
+                virtual_dir::inner_display(target),
+                dest.display()
+            ));
+        }
         let desc = format!(
             "extract {} item(s) to {}",
             inner_targets.len(),
@@ -2818,6 +2862,38 @@ mod tests {
     }
 
     #[test]
+    fn delete_logs_every_target_path_up_front() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"c").unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Permanent,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        app.dispatch(Action::MarkAll);
+
+        app.dispatch(Action::Delete);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let expected = format!("delete: {}", dir.path().join(name).display());
+            assert!(
+                app.log.iter().any(|l| l.message == expected),
+                "missing log line {expected:?}; log: {:?}",
+                app.log
+            );
+        }
+    }
+
+    #[test]
     fn delete_middle_entry_moves_cursor_to_the_entry_above() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
@@ -3090,6 +3166,43 @@ mod tests {
 
         wait_for_tasks_done(&mut app);
         assert!(right.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn copy_logs_every_source_and_destination_path_up_front() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(left.path().join("b.txt"), b"b").unwrap();
+        std::fs::write(left.path().join("c.txt"), b"c").unwrap();
+
+        let mut app = App::new(
+            left.path().to_path_buf(),
+            right.path().to_path_buf(),
+            Config {
+                confirm_operations: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        app.dispatch(Action::MarkAll);
+
+        app.dispatch(Action::Copy);
+        wait_for_tasks_done(&mut app);
+
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let expected = format!(
+                "copy: {} -> {}",
+                left.path().join(name).display(),
+                right.path().join(name).display()
+            );
+            assert!(
+                app.log.iter().any(|l| l.message == expected),
+                "missing log line {expected:?}; log: {:?}",
+                app.log
+            );
+        }
     }
 
     #[test]

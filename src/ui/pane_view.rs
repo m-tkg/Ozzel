@@ -15,11 +15,20 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::PaneLayout;
+use crate::color::dim_color;
 use crate::entry::EntryKind;
 #[cfg(test)]
 use crate::entry::FsEntry;
 use crate::pane::{Pane, VisibleItem};
 use crate::virtual_dir;
+
+/// How much the inactive pane's cursor row background darkens toward
+/// black when the pane is dimmed (`dim_inactive`, default on) — see
+/// `dim_color`. `0.5` came out of eyeballing it in a real terminal
+/// (tmux): perceptibly, unambiguously darker than the active pane's
+/// cursor at every named/hex color tried, without going so dark the row
+/// stops reading as "this is still the cursor."
+const INACTIVE_CURSOR_DIM_FACTOR: f32 = 0.5;
 
 const MARK_COL_WIDTH: usize = 1;
 const SIZE_COL_WIDTH: usize = 9;
@@ -69,8 +78,19 @@ pub fn render(
     // — it's still locatable since it's the only row with a background
     // fill at all, just a dimmed one.
     let dim = !active && colors.dim_inactive;
+    // When the pane is actually dimmed, the cursor row's background is
+    // pre-darkened *here* (an approximate-RGB scale toward black — see
+    // `dim_color`) rather than left at `cursor_inactive`'s full
+    // brightness and handed to the terminal's SGR "dim" attribute the way
+    // every other dimmed row is (`row_style`'s `Modifier::DIM`, still
+    // used for everything else): most terminals barely apply "dim" to a
+    // *background* color at all, which is exactly why the previous
+    // approach left the inactive cursor looking just as bright as the
+    // active one.
     let cursor_color = if active {
         colors.cursor
+    } else if dim {
+        dim_color(colors.cursor_inactive, INACTIVE_CURSOR_DIM_FACTOR)
     } else {
         colors.cursor_inactive
     };
@@ -181,13 +201,20 @@ pub fn render(
 /// out too much against a dimmed pane) — it's still locatable since it's
 /// the only row keeping a background fill at all, dimmed or not.
 ///
-/// The cursor row drops `BOLD` when dimmed rather than combining it with
-/// `DIM`: in the ANSI/VT100 model both attributes share the same terminal
+/// The cursor row's own darkening is carried entirely by `cursor_color`
+/// (already pre-darkened by the caller, `render`, via `dim_color` when
+/// `dim` is true) rather than by adding `Modifier::DIM` here the way
+/// every other dimmed row does: SGR "dim"/faint barely affects — often
+/// doesn't affect at all — a terminal's *background* color, which is
+/// exactly what made an "inactive but dimmed" cursor look just as bright
+/// as the active one before. `BOLD` (the cursor row's undimmed weight)
+/// drops out when dimmed rather than combining with the (no longer used
+/// here) `DIM`: in the ANSI/VT100 model both share the same terminal
 /// "intensity" slot (SGR 1 = bold, SGR 2 = faint, mutually exclusive, not
 /// independently stackable bits the way ratatui's `Modifier` bitflags
 /// suggest) — asking for both at once is at the mercy of which one a given
-/// terminal happens to apply last, which is exactly the ambiguity a
-/// deliberate "dim" request shouldn't be subject to.
+/// terminal happens to apply last, an ambiguity worth avoiding regardless
+/// of which one is actually driving the dimming now.
 /// `type_color` (directory/hidden/executable — see `entry_type_color`) is
 /// only ever applied to a row that's neither the cursor row nor marked:
 /// the cursor row keeps its fixed bg+black fg regardless (a colored fg
@@ -205,9 +232,11 @@ fn row_style(
     type_color: Option<Color>,
 ) -> Style {
     if is_cursor {
+        // `cursor_color` already carries the darkening (see `render`) —
+        // no `Modifier::DIM` here, just drop the undimmed weight.
         let base = Style::default().bg(cursor_color).fg(Color::Black);
         if dim {
-            base.add_modifier(Modifier::DIM)
+            base
         } else {
             base.add_modifier(Modifier::BOLD)
         }
@@ -507,16 +536,44 @@ mod tests {
     #[test]
     fn cursor_row_style_dims_when_pane_is_dimmed() {
         // The bug-fix under test: the inactive pane's cursor row must dim
-        // along with the rest of the pane, not stay exempt.
-        let style = row_style(true, false, true, Color::White, None);
-        assert!(style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(style.bg, Some(Color::White));
+        // along with the rest of the pane, not stay exempt. Unlike every
+        // other row, the darkening isn't `Modifier::DIM` here — SGR
+        // "dim"/faint barely affects a terminal's *background* color, so
+        // the row would look just as bright otherwise. `row_style` trusts
+        // `cursor_color` to already be pre-darkened by the caller (see
+        // `render`'s `dim_color` call and
+        // `cursor_row_style_background_is_actually_darker_not_just_dim_flagged`
+        // below for that half of the fix) — its own job here is just to
+        // drop `Modifier::DIM`/`BOLD` for this row, since applying `DIM`
+        // on top would be redundant with (and fight) the already-darker
+        // color.
+        let style = row_style(true, false, true, Color::Rgb(128, 128, 128), None);
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(style.bg, Some(Color::Rgb(128, 128, 128)));
         assert_eq!(style.fg, Some(Color::Black));
         // BOLD and DIM share the same ANSI "intensity" slot on a real
         // terminal (SGR 1 vs SGR 2, mutually exclusive) — asking for both
-        // is unreliable, so the dimmed cursor row must drop BOLD rather
-        // than combine it with DIM.
+        // is unreliable, so the dimmed cursor row must drop BOLD too.
         assert!(!style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn cursor_row_style_background_is_actually_darker_not_just_dim_flagged() {
+        // The other half of the fix, at the `render`-level call site
+        // rather than `row_style` itself: when the pane is dimmed, the
+        // color `render` computes and passes in as `cursor_color` must
+        // already be `dim_color(cursor_inactive, ...)`, genuinely darker
+        // RGB — not the configured `cursor_inactive` at full brightness
+        // relying on a `DIM` modifier that terminals mostly ignore for
+        // backgrounds. This directly exercises `dim_color` the same way
+        // `render` does, rather than re-deriving the expected value.
+        let cursor_inactive = Color::White;
+        let dimmed = dim_color(cursor_inactive, INACTIVE_CURSOR_DIM_FACTOR);
+        assert_ne!(
+            dimmed, cursor_inactive,
+            "the dimmed cursor color must differ from the configured one"
+        );
+        assert_eq!(dimmed, Color::Rgb(128, 128, 128));
     }
 
     #[test]
@@ -852,6 +909,66 @@ mod tests {
                 colors
             ),
             Some(Color::Blue)
+        );
+    }
+
+    #[test]
+    fn render_inactive_dimmed_cursor_row_background_is_darker_than_active() {
+        // End-to-end through the real `render` call site (not just the
+        // pure `row_style`/`dim_color` units above): the actual rendered
+        // cell's background color for the inactive pane's cursor row must
+        // come out darker than the active pane's, given the same
+        // `cursor`/`cursor_inactive` configured color.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        pane.cursor = 0; // the ".." row — always present, simplest to target
+
+        let colors = PaneColors {
+            cursor: Color::White,
+            cursor_inactive: Color::White,
+            dim_inactive: true,
+            directory: Color::Cyan,
+            hidden: Color::Red,
+            executable: Color::Yellow,
+        };
+
+        let render_cursor_bg = |active: bool| {
+            // Wide enough that the header (cwd path) never needs the
+            // second-line wrap (see `wrap_header_lines`) regardless of how
+            // long the tempdir's own path happens to be on this machine —
+            // otherwise the cursor row wouldn't reliably be at a fixed
+            // row index.
+            let backend = TestBackend::new(200, 6);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(frame, frame.area(), &pane, active, colors, false);
+                })
+                .unwrap();
+            // Row 0 is the top border; the cursor (".." ) row is the first
+            // content row, row 1. Column 1 is just inside the left border.
+            terminal.backend().buffer()[(1, 1)].bg
+        };
+
+        let active_bg = render_cursor_bg(true);
+        let inactive_bg = render_cursor_bg(false);
+        assert_eq!(
+            active_bg,
+            Color::White,
+            "active pane's cursor keeps the configured color at full brightness"
+        );
+        assert_eq!(
+            inactive_bg,
+            dim_color(Color::White, INACTIVE_CURSOR_DIM_FACTOR),
+            "inactive+dimmed pane's cursor background must be the darkened color"
+        );
+        assert_ne!(
+            active_bg, inactive_bg,
+            "the inactive cursor row must render genuinely darker, not identically bright"
         );
     }
 }
