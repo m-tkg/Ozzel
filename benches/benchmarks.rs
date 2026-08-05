@@ -49,6 +49,30 @@ fn bench_pane_visible_entries(c: &mut Criterion) {
     group.finish();
 }
 
+/// Phase 1's cache-hit path: the `Pane` (and its `visible_entries` cache)
+/// is built once *outside* `b.iter`, so every timed iteration is a pure
+/// cache hit — an `Rc` refcount bump plus rebuilding the small `Vec<VisibleItem>`
+/// wrapper, never a re-filter/re-sort. Companion to
+/// `bench_pane_visible_entries` above, which stays a cold-cache (`Pane::new`
+/// every iteration) measurement on purpose so the miss path's own cost
+/// (now alloc-free per comparison, see `FsEntry::name_lower`/`ext_lower`)
+/// stays visible too.
+fn bench_pane_visible_entries_cached(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pane_visible_entries_cached");
+    group.sample_size(20);
+
+    for &count in &[1_000usize, 10_000usize] {
+        let dir = make_dir_with_files(count);
+        let pane = Pane::new(dir.path().to_path_buf()).unwrap();
+
+        let id = BenchmarkId::new(format!("{count}_files"), "cache_hit");
+        group.bench_with_input(id, &(), |b, ()| {
+            b.iter(|| std::hint::black_box(pane.visible_entries().len()));
+        });
+    }
+    group.finish();
+}
+
 // --- ui::log_view::wrap_log_lines ------------------------------------------
 
 fn make_log_lines(count: usize) -> Vec<LogLine> {
@@ -161,6 +185,7 @@ fn bench_archive_listing(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_pane_visible_entries,
+    bench_pane_visible_entries_cached,
     bench_wrap_log_lines,
     bench_archive_listing
 );

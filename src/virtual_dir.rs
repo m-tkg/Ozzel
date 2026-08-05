@@ -345,9 +345,12 @@ fn group_children(raw: Vec<RawEntry>, inner: &Path) -> Vec<FsEntry> {
             } else {
                 inner.join(&name)
             };
+            let (name_lower, ext_lower) = crate::entry::lower_keys(&name);
             FsEntry {
                 is_hidden: name.starts_with('.'),
                 name,
+                name_lower,
+                ext_lower,
                 path,
                 kind: child.kind,
                 size: child.size,

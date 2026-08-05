@@ -436,20 +436,61 @@ fn write_cwd_file(path: &Path, cwd: &Path) -> io::Result<()> {
     std::fs::write(path, cwd.display().to_string())
 }
 
+/// Poll timeout used while at least one background task is running — kept
+/// at the tight interval so a running copy/move/delete's status-bar gauge
+/// keeps refreshing promptly. See `App::needs_redraw`'s doc comment for how
+/// the loop below makes sure a redraw actually happens every iteration
+/// while this applies, even on a poll that times out with nothing to
+/// report.
+const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Poll timeout used the rest of the time (no task running) — long enough
+/// that an idle session barely wakes the CPU, short enough to stay well
+/// under human-noticeable. Safe to lengthen independently of input
+/// latency: a keypress reaches `handle_event` the moment crossterm reports
+/// it (`event::poll` returns as soon as *something* arrives, well before
+/// `timeout` elapses) — this constant only bounds how long a poll blocks
+/// with *nothing* to report.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
     keyboard_enhancement: bool,
 ) -> anyhow::Result<()> {
     loop {
-        terminal.draw(|frame| ui::draw(frame, &mut *app))?;
+        // Gated on the dirty flag rather than drawn unconditionally every
+        // iteration (Phase 1 hot-path fix): `ui::draw` used to run on every
+        // poll timeout too, even though `AppEvent::Tick` is a no-op and
+        // nothing about the frame could possibly have changed. See
+        // `App::needs_redraw`'s doc comment for exactly what sets/clears
+        // this.
+        if app.needs_redraw {
+            terminal.draw(|frame| ui::draw(frame, &mut *app))?;
+            app.needs_redraw = false;
+        }
 
         // Drain background-task progress/log/finish events before the next
         // terminal poll, so a running copy/move/delete's gauge and log
         // lines update promptly instead of waiting behind a keystroke.
         app.drain_tasks();
 
-        let event = event::read_event(Duration::from_millis(50))?;
+        // A running task's gauge (elapsed time, done/total) needs to keep
+        // refreshing every iteration even on an iteration where no new
+        // `TaskEvent` happened to arrive — `drain_tasks`/`handle_event`
+        // alone only mark a redraw dirty when an event was actually
+        // processed, which isn't guaranteed every single iteration while a
+        // task is merely running in the background.
+        let task_running = !app.tasks.running.is_empty();
+        if task_running {
+            app.needs_redraw = true;
+        }
+
+        let poll_interval = if task_running {
+            ACTIVE_POLL_INTERVAL
+        } else {
+            IDLE_POLL_INTERVAL
+        };
+        let event = event::read_event(poll_interval)?;
         app.handle_event(event);
 
         // `:` and `e` queue a suspend request rather than running the
@@ -469,6 +510,12 @@ fn run(
             }
             app.drain_tasks();
             app.refresh_panes();
+            // The terminal was just handed back from the suspended child
+            // (alternate screen re-entered, raw mode restored) — the frame
+            // drawn before the suspend is stale regardless of whether any
+            // `App` state above actually changed, so this must force a
+            // redraw unconditionally.
+            app.needs_redraw = true;
 
             // `,` (edit_config) queues this alongside the suspend request
             // itself; reload only after the editor has actually exited, so

@@ -43,9 +43,15 @@ impl FilterSpec {
         })
     }
 
-    pub fn matches(&self, name: &str) -> bool {
+    /// `name_lower` must be `name.to_lowercase()` — callers with a
+    /// precomputed lowercase key (`FsEntry::name_lower`) pass it straight
+    /// through so substring matching never re-allocates it per call; the
+    /// regex path always matches against the original-case `name` instead
+    /// (`FilterKind::Regex` is deliberately case-sensitive, see `parse`'s
+    /// doc comment).
+    pub fn matches(&self, name: &str, name_lower: &str) -> bool {
         match &self.kind {
-            FilterKind::Substring(needle) => name.to_lowercase().contains(needle.as_str()),
+            FilterKind::Substring(needle) => name_lower.contains(needle.as_str()),
             FilterKind::Regex(re) => re.is_match(name),
             FilterKind::Invalid(_) => false,
         }
@@ -66,6 +72,12 @@ impl FilterSpec {
 mod tests {
     use super::*;
 
+    /// Calls `matches` with `name`'s lowercase computed on the fly, since
+    /// the tests below aren't exercising `FsEntry::name_lower` itself.
+    fn m(spec: &FilterSpec, name: &str) -> bool {
+        spec.matches(name, &name.to_lowercase())
+    }
+
     #[test]
     fn empty_input_means_no_filter() {
         assert!(FilterSpec::parse("").is_none());
@@ -74,34 +86,34 @@ mod tests {
     #[test]
     fn substring_is_case_insensitive() {
         let spec = FilterSpec::parse("Report").unwrap();
-        assert!(spec.matches("annual_report.txt"));
-        assert!(spec.matches("REPORT.CSV"));
-        assert!(!spec.matches("summary.txt"));
+        assert!(m(&spec, "annual_report.txt"));
+        assert!(m(&spec, "REPORT.CSV"));
+        assert!(!m(&spec, "summary.txt"));
     }
 
     #[test]
     fn substring_matches_japanese_text() {
         let spec = FilterSpec::parse("日本語").unwrap();
-        assert!(spec.matches("日本語ファイル名.txt"));
-        assert!(!spec.matches("english.txt"));
+        assert!(m(&spec, "日本語ファイル名.txt"));
+        assert!(!m(&spec, "english.txt"));
     }
 
     #[test]
     fn re_prefix_compiles_a_case_sensitive_regex() {
         let spec = FilterSpec::parse("re:^IMG_[0-9]+\\.jpg$").unwrap();
-        assert!(spec.matches("IMG_1234.jpg"));
+        assert!(m(&spec, "IMG_1234.jpg"));
         assert!(
-            !spec.matches("img_1234.jpg"),
+            !m(&spec, "img_1234.jpg"),
             "regex mode is case-sensitive as written"
         );
-        assert!(!spec.matches("IMG_1234.jpeg"));
+        assert!(!m(&spec, "IMG_1234.jpeg"));
     }
 
     #[test]
     fn invalid_regex_matches_nothing_but_reports_an_error() {
         let spec = FilterSpec::parse("re:(unclosed").unwrap();
-        assert!(!spec.matches("anything"));
-        assert!(!spec.matches(""));
+        assert!(!m(&spec, "anything"));
+        assert!(!m(&spec, ""));
         assert!(spec.error().is_some());
     }
 

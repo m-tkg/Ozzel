@@ -187,6 +187,20 @@ pub struct App {
     /// as `pane_layout`, so `ui::log_view::render_full` (a different
     /// module) can write it directly every frame.
     pub log_view_width: u16,
+    /// Whether `main.rs`'s loop should call `terminal.draw` this
+    /// iteration — the dirty flag behind Phase 1's "only redraw when
+    /// something changed" performance fix. Starts `true` (the first frame
+    /// always needs drawing) and is set back to `true` by `handle_event`
+    /// for anything but a bare `Tick` (see its doc comment — deliberately
+    /// coarse: any real input/task/resize event just marks the whole frame
+    /// dirty rather than tracking exactly what changed), by `main.rs`'s
+    /// loop itself while any task is running (so the status bar's
+    /// running-task gauge keeps updating even between task events), and
+    /// after resuming from a suspended external command (the terminal was
+    /// just handed back, and the old frame is stale regardless of whether
+    /// `App` state changed). `main.rs` is the only reader; it flips this
+    /// back to `false` immediately after each draw.
+    pub needs_redraw: bool,
 }
 
 /// `App::log_view_width`'s pre-first-frame fallback — an unremarkable
@@ -368,6 +382,7 @@ impl App {
             pending_delete_anchor: HashMap::new(),
             settings_config_path: None,
             log_view_width: DEFAULT_LOG_VIEW_WIDTH,
+            needs_redraw: true,
         })
     }
 
@@ -506,6 +521,14 @@ impl App {
     /// directly (they never look at the keymap). `Task` events update
     /// running-task state and the log; `Tick` is a no-op.
     pub fn handle_event(&mut self, event: AppEvent) {
+        // Deliberately coarse — see `needs_redraw`'s doc comment: anything
+        // but a bare `Tick` (a poll timeout with nothing to report) marks
+        // the whole frame dirty, rather than tracking exactly which part
+        // of the UI a given event actually touched. Over-drawing is
+        // harmless; under-drawing is a bug.
+        if !matches!(event, AppEvent::Tick) {
+            self.needs_redraw = true;
+        }
         match event {
             AppEvent::Input(code, modifiers) => match &self.mode {
                 Mode::Normal => {
@@ -526,6 +549,11 @@ impl App {
             },
             AppEvent::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             AppEvent::Task(task_event) => self.handle_task_event(task_event),
+            // No app state to update — `needs_redraw` (set above) is the
+            // entire point of this variant; the next draw picks up the
+            // terminal's new size on its own (see `AppEvent::Resize`'s doc
+            // comment).
+            AppEvent::Resize => {}
             AppEvent::Tick => {}
         }
     }
@@ -1047,9 +1075,10 @@ impl App {
         // already handles both, and is a safe no-op on an empty pane);
         // anything else (file, file-symlink, dangling symlink) opens
         // instead.
-        let selected_kind = pane.selected_entry_kind();
-        let open_path = match pane.selected_entry_is_dir_like() {
-            Some(false) => pane.selected_entry_path(),
+        let selected = pane.selected_entry();
+        let selected_kind = selected.map(|e| e.kind);
+        let open_path = match selected.map(|e| e.is_dir_like()) {
+            Some(false) => selected.map(|e| e.path.clone()),
             _ => None,
         };
         let archive_path = pane.virtual_dir.as_ref().map(|vd| vd.archive_path.clone());
@@ -1247,8 +1276,9 @@ impl App {
         let pane = self.active_pane();
         // Same navigate-vs-open split as `begin_open`: a directory-symlink
         // is "not a file" here too, just like a real directory.
-        let target = match pane.selected_entry_is_dir_like() {
-            Some(false) => pane.selected_entry_path(),
+        let selected = pane.selected_entry();
+        let target = match selected.map(|e| e.is_dir_like()) {
+            Some(false) => selected.map(|e| e.path.clone()),
             _ => None,
         };
         let Some(path) = target else {
@@ -1927,14 +1957,12 @@ impl App {
         if self.reject_if_virtual("duplicate") {
             return;
         }
-        let Some(name) = self.active_pane().selected_entry_name() else {
+        let Some(selected) = self.active_pane().selected_entry() else {
             self.log_error("no entry selected to duplicate");
             return;
         };
-        let Some(source) = self.active_pane().selected_entry_path() else {
-            self.log_error("no entry selected to duplicate");
-            return;
-        };
+        let name = selected.name.clone();
+        let source = selected.path.clone();
         self.mode = Mode::Prompt {
             kind: PromptKind::Duplicate { source },
             input: LineEditor::from_str(&name),
