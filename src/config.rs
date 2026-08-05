@@ -44,6 +44,14 @@ fn default_dim_inactive() -> bool {
     true
 }
 
+/// Copy/Move confirm before spawning by default — same "ask before doing
+/// something that touches the filesystem" posture as Delete. A top-level
+/// `confirm_operations = false` skips that confirm when there's no
+/// collision (a collision always confirms regardless of this setting).
+fn default_confirm_operations() -> bool {
+    true
+}
+
 fn deserialize_color<'de, D>(deserializer: D) -> std::result::Result<Color, D::Error>
 where
     D: Deserializer<'de>,
@@ -83,17 +91,46 @@ impl Default for ColorsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub delete_behavior: DeleteBehavior,
-    /// Directory `GoHome` (`~`/`H`) jumps to; falls back to the OS home
+    /// Directory `GoHome` (`~`) jumps to; falls back to the OS home
     /// directory when unset.
     pub home: Option<PathBuf>,
     /// Editor command `OpenEditor` (`e`) runs; falls back to `$EDITOR`.
     pub editor: Option<String>,
+    /// Whether Copy/Move show a confirm dialog before spawning when there's
+    /// no filename collision (a collision always confirms regardless).
+    /// Kept top-level next to `delete_behavior` rather than under a
+    /// separate `[behavior]` section, so existing configs with
+    /// `delete_behavior` at the top level keep working unchanged.
+    #[serde(default = "default_confirm_operations")]
+    pub confirm_operations: bool,
+    /// `combo -> action_name`; `"none"` unbinds. Applied to the default
+    /// keymap first (see `App::new`).
     pub keys: HashMap<String, String>,
+    /// `action_name -> [combo, ...]`; the inverted, ergonomic form for
+    /// binding several keys to one action at once (e.g.
+    /// `rename = ["r", "S-r"]`). Applied *after* `[keys]`, so a combo
+    /// listed here wins if both sections mention it. There's no `"none"`
+    /// here — unbinding stays `[keys]`'s job.
+    pub bindings: HashMap<String, Vec<String>>,
     pub colors: ColorsConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            delete_behavior: DeleteBehavior::default(),
+            home: None,
+            editor: None,
+            confirm_operations: default_confirm_operations(),
+            keys: HashMap::new(),
+            bindings: HashMap::new(),
+            colors: ColorsConfig::default(),
+        }
+    }
 }
 
 /// Path to the config file, if this platform has a resolvable config dir.
@@ -173,6 +210,44 @@ mod tests {
         assert_eq!(config.colors.cursor, Color::Rgb(0x90, 0xEE, 0x90));
         assert_eq!(config.colors.cursor_inactive, Color::White);
         assert!(config.colors.dim_inactive);
+        assert!(config.confirm_operations);
+        assert!(config.bindings.is_empty());
+    }
+
+    #[test]
+    fn confirm_operations_can_be_set_to_false() {
+        let config: Config = toml::from_str("confirm_operations = false").unwrap();
+        assert!(!config.confirm_operations);
+    }
+
+    #[test]
+    fn confirm_operations_absent_defaults_to_true() {
+        let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
+        assert!(config.confirm_operations);
+    }
+
+    #[test]
+    fn bindings_section_parses_action_to_key_array() {
+        let toml_text = r#"
+            [bindings]
+            rename = ["r", "S-r"]
+            quit = ["q", "C-c"]
+        "#;
+        let config: Config = toml::from_str(toml_text).unwrap();
+        assert_eq!(
+            config.bindings.get("rename"),
+            Some(&vec!["r".to_string(), "S-r".to_string()])
+        );
+        assert_eq!(
+            config.bindings.get("quit"),
+            Some(&vec!["q".to_string(), "C-c".to_string()])
+        );
+    }
+
+    #[test]
+    fn bindings_section_absent_is_empty() {
+        let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
+        assert!(config.bindings.is_empty());
     }
 
     #[test]

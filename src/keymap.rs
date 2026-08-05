@@ -114,12 +114,17 @@ impl Keymap {
     /// The dyna-filer-style defaults: arrows/PageUp/PageDown/Home/End move
     /// the cursor, `Left`/`Right` additionally jump focus straight to that
     /// pane, Tab switches panes, Enter/Backspace navigate, Space marks,
-    /// `a` marks all, `s`/`.` cycle sort/hidden, `C`/`M`/`D`/`R`/`K` are the
-    /// copy/move/delete/rename/mkdir commands, `w` swaps panes, `f`/`/`
-    /// start an incremental filter (Esc clears one that's active), `p`
-    /// zips the marked-or-cursor selection, `u` unzips the file under the
-    /// cursor, `h`/`b` open the history/bookmark jump menus, `B` adds a
-    /// bookmark, `~`/`H` jump to home, `:` runs a shell command (TUI
+    /// `a` marks all, `s`/`.` cycle sort/hidden, `C`/`M`/`D`(or `d`)/`R`(or
+    /// `r`)/`K` are the copy/move/delete/rename/mkdir commands (`r`/`d` are
+    /// this keymap's showcase of binding more than one combo to the same
+    /// action — `R`/`D` still work too, they're the same key with Shift
+    /// implied), `w` swaps panes, `f`/`/` start an incremental filter (Esc
+    /// clears one that's active), `p` zips the marked-or-cursor selection,
+    /// `u` unzips the file under the cursor, `h`/`?` open the keybinding
+    /// help screen, `S-h` (capital `H`) opens the history jump menu (moved
+    /// off plain `h` to make room for help), `b` opens the bookmark jump
+    /// menu, `B` adds a bookmark, `~` jumps to home (no longer also on
+    /// `S-h`/`H`, which now means history), `:` runs a shell command (TUI
     /// suspended), `e` opens the cursor file in an editor (suspended, no
     /// pause), `x`/`o` open the cursor entry in the built-in text viewer,
     /// and `q`/Ctrl+C quit. `S-up`/`S-down` jump straight to the top/bottom
@@ -154,8 +159,10 @@ impl Keymap {
             ("C-r", Refresh),
             ("space", Mark),
             ("a", MarkAll),
+            ("r", Rename),
             ("R", Rename),
             ("K", Mkdir),
+            ("d", Delete),
             ("D", Delete),
             ("C", Copy),
             ("M", Move),
@@ -164,11 +171,12 @@ impl Keymap {
             ("esc", ClearFilter),
             ("p", ZipMarked),
             ("u", Unzip),
-            ("h", HistoryJump),
+            ("h", Help),
+            ("?", Help),
+            ("H", HistoryJump),
             ("b", BookmarkJump),
             ("B", BookmarkAdd),
             ("~", GoHome),
-            ("H", GoHome),
             (":", CommandLine),
             ("e", OpenEditor),
             ("x", View),
@@ -204,8 +212,85 @@ impl Keymap {
         Ok(())
     }
 
+    /// Applies a config `[bindings]` table (action name -> array of key
+    /// combos) on top of whatever `[keys]`/the defaults produced: every
+    /// combo listed gets bound to that action, overriding whatever it
+    /// previously held. There's no `"none"` sentinel here — unlike
+    /// `[keys]`, `[bindings]`'s values are key combos, not action names, so
+    /// unbinding a key stays `[keys]`'s job. `App::new` applies this
+    /// strictly after `merge_overrides`, so `[bindings]` wins on any
+    /// combo both sections happen to mention.
+    pub fn apply_bindings(
+        &mut self,
+        bindings: &HashMap<String, Vec<String>>,
+    ) -> Result<(), KeymapError> {
+        for (action_str, combos) in bindings {
+            let action = parse_action(action_str)?;
+            for combo_str in combos {
+                let combo = KeyCombo::parse(combo_str)?;
+                self.bindings.insert(combo, action);
+            }
+        }
+        Ok(())
+    }
+
     pub fn resolve(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         self.bindings.get(&KeyCombo::new(code, modifiers)).copied()
+    }
+
+    /// Every key combo currently bound to `action`, formatted for display
+    /// (see `format_combo`) and sorted for a deterministic order. Used only
+    /// by the help screen (`crate::help`) — never round-tripped back
+    /// through `KeyCombo::parse`.
+    pub fn combos_for(&self, action: Action) -> Vec<String> {
+        let mut combos: Vec<String> = self
+            .bindings
+            .iter()
+            .filter(|(_, a)| **a == action)
+            .map(|(combo, _)| format_combo(combo))
+            .collect();
+        combos.sort();
+        combos
+    }
+}
+
+/// Formats a combo back into (approximately) the same notation
+/// `KeyCombo::parse` accepts — e.g. `Char('r')`+`NONE` -> `"r"`,
+/// `Char('R')`+`SHIFT` -> `"R"` (no redundant `S-`, since Shift is implied
+/// for any uppercase letter), `Enter`+`SHIFT` -> `"S-Enter"`. Display-only.
+fn format_combo(combo: &KeyCombo) -> String {
+    let implied_shift = matches!(combo.code, KeyCode::Char(c) if c.is_ascii_uppercase());
+    let mut prefix = String::new();
+    if combo.modifiers.contains(KeyModifiers::CONTROL) {
+        prefix.push_str("C-");
+    }
+    if combo.modifiers.contains(KeyModifiers::ALT) {
+        prefix.push_str("A-");
+    }
+    if combo.modifiers.contains(KeyModifiers::SHIFT) && !implied_shift {
+        prefix.push_str("S-");
+    }
+    format!("{prefix}{}", format_key_code(combo.code))
+}
+
+fn format_key_code(code: KeyCode) -> String {
+    match code {
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
+        KeyCode::Delete => "Delete".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -338,10 +423,8 @@ mod tests {
     #[test]
     fn default_keymap_binds_history_bookmark_home_and_external_keys() {
         let km = Keymap::default_dyna();
-        assert_eq!(
-            km.resolve(KeyCode::Char('h'), KeyModifiers::NONE),
-            Some(Action::HistoryJump)
-        );
+        // `h` moved to Help (see the dedicated test below); history is now
+        // on `S-h` (capital `H`) only.
         assert_eq!(
             km.resolve(KeyCode::Char('b'), KeyModifiers::NONE),
             Some(Action::BookmarkJump)
@@ -352,10 +435,6 @@ mod tests {
         );
         assert_eq!(
             km.resolve(KeyCode::Char('~'), KeyModifiers::NONE),
-            Some(Action::GoHome)
-        );
-        assert_eq!(
-            km.resolve(KeyCode::Char('H'), KeyModifiers::SHIFT),
             Some(Action::GoHome)
         );
         assert_eq!(
@@ -373,6 +452,65 @@ mod tests {
         assert_eq!(
             km.resolve(KeyCode::Char('o'), KeyModifiers::NONE),
             Some(Action::View)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_r_and_shift_r_both_to_rename() {
+        // The showcase multi-binding pair: `r` and `R`/`S-r` (the same real
+        // keypress) both resolve to Rename.
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('r'), KeyModifiers::NONE),
+            Some(Action::Rename)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            Some(Action::Rename)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_d_and_shift_d_both_to_delete() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('d'), KeyModifiers::NONE),
+            Some(Action::Delete)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('D'), KeyModifiers::SHIFT),
+            Some(Action::Delete)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_h_and_question_mark_to_help_and_shift_h_to_history() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('h'), KeyModifiers::NONE),
+            Some(Action::Help)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('?'), KeyModifiers::NONE),
+            Some(Action::Help)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('H'), KeyModifiers::SHIFT),
+            Some(Action::HistoryJump)
+        );
+    }
+
+    #[test]
+    fn default_keymap_go_home_is_bound_only_to_tilde() {
+        // `H`/`S-h` moved to HistoryJump; GoHome no longer has a second key.
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('~'), KeyModifiers::NONE),
+            Some(Action::GoHome)
+        );
+        assert_ne!(
+            km.resolve(KeyCode::Char('H'), KeyModifiers::SHIFT),
+            Some(Action::GoHome)
         );
     }
 
@@ -468,5 +606,93 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("x".to_string(), "not_a_real_action".to_string());
         assert!(km.merge_overrides(&overrides).is_err());
+    }
+
+    #[test]
+    fn apply_bindings_binds_every_listed_combo_to_the_action() {
+        let mut km = Keymap::default_dyna();
+        let mut bindings = HashMap::new();
+        bindings.insert("quit".to_string(), vec!["z".to_string(), "S-z".to_string()]);
+        km.apply_bindings(&bindings).unwrap();
+
+        assert_eq!(
+            km.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+            Some(Action::Quit)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('z'), KeyModifiers::SHIFT),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn apply_bindings_overrides_whatever_the_combo_previously_held() {
+        let mut km = Keymap::default_dyna();
+        // "q" defaults to Quit; rebind it via [bindings] to Copy.
+        let mut bindings = HashMap::new();
+        bindings.insert("copy".to_string(), vec!["q".to_string()]);
+        km.apply_bindings(&bindings).unwrap();
+
+        assert_eq!(
+            km.resolve(KeyCode::Char('q'), KeyModifiers::NONE),
+            Some(Action::Copy)
+        );
+    }
+
+    #[test]
+    fn apply_bindings_is_applied_after_keys_and_wins_on_overlap() {
+        // Mirrors App::new's actual order: [keys] first, then [bindings].
+        let mut km = Keymap::default_dyna();
+        let mut keys = HashMap::new();
+        keys.insert("z".to_string(), "quit".to_string());
+        km.merge_overrides(&keys).unwrap();
+
+        let mut bindings = HashMap::new();
+        bindings.insert("copy".to_string(), vec!["z".to_string()]);
+        km.apply_bindings(&bindings).unwrap();
+
+        assert_eq!(
+            km.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+            Some(Action::Copy),
+            "[bindings] must win over [keys] on the same combo"
+        );
+    }
+
+    #[test]
+    fn apply_bindings_rejects_unknown_action_name() {
+        let mut km = Keymap::default_dyna();
+        let mut bindings = HashMap::new();
+        bindings.insert("not_a_real_action".to_string(), vec!["z".to_string()]);
+        assert!(km.apply_bindings(&bindings).is_err());
+    }
+
+    #[test]
+    fn apply_bindings_rejects_a_bad_combo() {
+        let mut km = Keymap::default_dyna();
+        let mut bindings = HashMap::new();
+        bindings.insert("quit".to_string(), vec!["not-a-combo".to_string()]);
+        assert!(km.apply_bindings(&bindings).is_err());
+    }
+
+    #[test]
+    fn combos_for_lists_every_key_bound_to_an_action_sorted() {
+        let km = Keymap::default_dyna();
+        let combos = km.combos_for(Action::Rename);
+        assert_eq!(combos, vec!["R".to_string(), "r".to_string()]);
+    }
+
+    #[test]
+    fn combos_for_an_unbound_action_is_empty() {
+        let mut km = Keymap::default_dyna();
+        let mut overrides = HashMap::new();
+        overrides.insert("g".to_string(), "open_default".to_string());
+        km.merge_overrides(&overrides).unwrap();
+        // OpenDefault is bound to S-enter by default; unbind that too so it
+        // ends up with zero combos for this test.
+        let mut unbind = HashMap::new();
+        unbind.insert("S-enter".to_string(), "none".to_string());
+        unbind.insert("g".to_string(), "none".to_string());
+        km.merge_overrides(&unbind).unwrap();
+        assert!(km.combos_for(Action::OpenDefault).is_empty());
     }
 }

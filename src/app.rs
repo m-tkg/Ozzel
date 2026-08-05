@@ -111,6 +111,11 @@ impl App {
         keymap
             .merge_overrides(&config.keys)
             .context("invalid [keys] entry in config")?;
+        // Applied after [keys] so [bindings] wins on any combo both
+        // sections happen to mention (see `Keymap::apply_bindings`).
+        keymap
+            .apply_bindings(&config.bindings)
+            .context("invalid [bindings] entry in config")?;
         let (tx, task_rx) = mpsc::channel();
 
         Ok(Self {
@@ -227,6 +232,7 @@ impl App {
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
                 Mode::Viewer { .. } => self.handle_viewer_key(code),
+                Mode::Help { .. } => self.handle_help_key(code),
             },
             AppEvent::Task(task_event) => self.handle_task_event(task_event),
             AppEvent::Tick => {}
@@ -380,6 +386,10 @@ impl App {
             }
             Action::View => {
                 self.begin_view();
+                Ok(())
+            }
+            Action::Help => {
+                self.begin_help();
                 Ok(())
             }
             Action::Quit => {
@@ -721,6 +731,39 @@ impl App {
         }
     }
 
+    fn begin_help(&mut self) {
+        self.mode = Mode::Help { scroll: 0 };
+    }
+
+    /// Fixed keys for `Mode::Help`; never consults the keymap (it would be
+    /// circular — this screen exists to document the keymap). `q`/Esc/`h`
+    /// close back to Normal; everything else scrolls the same way the
+    /// viewer's text mode does. The listing is rebuilt from `self.keymap`
+    /// on every keypress (cheap — a few dozen actions) rather than cached
+    /// on `Mode::Help`, so it can never go stale relative to the keymap.
+    fn handle_help_key(&mut self, code: KeyCode) {
+        if matches!(code, KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h')) {
+            self.mode = Mode::Normal;
+            return;
+        }
+
+        let max_scroll = crate::help::build_lines(&self.keymap)
+            .len()
+            .saturating_sub(1);
+        let Mode::Help { scroll } = &mut self.mode else {
+            return;
+        };
+        match code {
+            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down => *scroll = (*scroll + 1).min(max_scroll),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(VIEWER_PAGE_SIZE),
+            KeyCode::PageDown => *scroll = (*scroll + VIEWER_PAGE_SIZE).min(max_scroll),
+            KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => *scroll = max_scroll,
+            _ => {}
+        }
+    }
+
     fn begin_rename(&mut self) {
         match self.active_pane().selected_entry_name() {
             Some(name) => {
@@ -746,6 +789,12 @@ impl App {
         };
     }
 
+    /// Copy/Move always confirm by default (`config.confirm_operations`);
+    /// with it set to `false`, a transfer with no filename collision skips
+    /// straight to `spawn_transfer` — but a collision *always* confirms
+    /// regardless, and when both apply it's a single combined dialog
+    /// (`Copy 3 item(s) -> /dest? (2 will be overwritten) (y/n)`) rather
+    /// than two sequential ones.
     fn begin_transfer(&mut self, kind: TransferKind) {
         let sources = self.active_pane().marked_or_cursor();
         if sources.is_empty() {
@@ -759,19 +808,33 @@ impl App {
         }
 
         let collisions = copy_move::find_collisions(&sources, &dest_dir);
-        if collisions.is_empty() {
+        if collisions.is_empty() && !self.config.confirm_operations {
             self.spawn_transfer(kind, sources, dest_dir);
-        } else {
-            let message = format!("Overwrite {} existing item(s)? (y/n)", collisions.len());
-            self.mode = Mode::Confirm {
-                message,
-                on_yes: PendingOp::Overwrite {
-                    kind,
-                    sources,
-                    dest_dir,
-                },
-            };
+            return;
         }
+
+        let verb = match kind {
+            TransferKind::Copy => "Copy",
+            TransferKind::Move => "Move",
+        };
+        let mut message = format!(
+            "{verb} {} item(s) -> {}?",
+            sources.len(),
+            dest_dir.display()
+        );
+        if !collisions.is_empty() {
+            message.push_str(&format!(" ({} will be overwritten)", collisions.len()));
+        }
+        message.push_str(" (y/n)");
+
+        self.mode = Mode::Confirm {
+            message,
+            on_yes: PendingOp::Overwrite {
+                kind,
+                sources,
+                dest_dir,
+            },
+        };
     }
 
     /// Hands the actual copy/move off to a background task (see
@@ -1278,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_action_spawns_a_background_task_that_copies_to_the_other_pane() {
+    fn copy_action_confirms_by_default_then_spawns_a_background_task() {
         let left = tempfile::tempdir().unwrap();
         let right = tempfile::tempdir().unwrap();
         std::fs::write(left.path().join("a.txt"), b"hi").unwrap();
@@ -1288,18 +1351,144 @@ mod tests {
         select_entry_named(&mut app, "a.txt");
 
         app.dispatch(Action::Copy);
+        match &app.mode {
+            Mode::Confirm { message, .. } => {
+                assert!(message.starts_with("Copy 1 item(s)"), "message: {message}");
+                assert!(
+                    message.contains(&right.path().display().to_string()),
+                    "message: {message}"
+                );
+                assert!(
+                    !message.contains("overwritten"),
+                    "no collision => no overwrite note; message: {message}"
+                );
+            }
+            other => {
+                panic!("confirm_operations defaults to true, expected Mode::Confirm, got {other:?}")
+            }
+        }
         assert!(
-            matches!(app.mode, Mode::Normal),
-            "no collision => no prompt"
+            app.tasks.running.is_empty(),
+            "must not spawn before confirmation"
         );
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
             !app.tasks.running.is_empty(),
-            "copy should be running in the background"
+            "copy should now be running in the background"
         );
 
         wait_for_tasks_done(&mut app);
         assert!(right.path().join("a.txt").exists());
         assert!(left.path().join("a.txt").exists(), "copy keeps the source");
+    }
+
+    #[test]
+    fn copy_confirm_declined_does_not_spawn_or_copy() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a.txt"), b"hi").unwrap();
+
+        let mut app = test_app(left.path(), right.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "a.txt");
+
+        app.dispatch(Action::Copy);
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.tasks.running.is_empty());
+        assert!(!right.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn move_action_also_confirms_by_default() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a.txt"), b"hi").unwrap();
+
+        let mut app = test_app(left.path(), right.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "a.txt");
+
+        app.dispatch(Action::Move);
+        match &app.mode {
+            Mode::Confirm { message, .. } => {
+                assert!(message.starts_with("Move 1 item(s)"), "message: {message}")
+            }
+            other => panic!("expected Mode::Confirm, got {other:?}"),
+        }
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+        assert!(right.path().join("a.txt").exists());
+        assert!(
+            !left.path().join("a.txt").exists(),
+            "move removes the source"
+        );
+    }
+
+    #[test]
+    fn copy_skips_confirm_when_confirm_operations_false_and_no_collision() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a.txt"), b"hi").unwrap();
+
+        let mut app = App::new(
+            left.path().to_path_buf(),
+            right.path().to_path_buf(),
+            Config {
+                confirm_operations: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "a.txt");
+
+        app.dispatch(Action::Copy);
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "confirm_operations=false + no collision => no prompt"
+        );
+        assert!(!app.tasks.running.is_empty());
+
+        wait_for_tasks_done(&mut app);
+        assert!(right.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn copy_collision_still_confirms_when_confirm_operations_false_with_a_combined_message() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("a.txt"), b"new").unwrap();
+        std::fs::write(right.path().join("a.txt"), b"existing").unwrap();
+
+        let mut app = App::new(
+            left.path().to_path_buf(),
+            right.path().to_path_buf(),
+            Config {
+                confirm_operations: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "a.txt");
+
+        app.dispatch(Action::Copy);
+        match &app.mode {
+            Mode::Confirm { message, .. } => {
+                assert!(
+                    message.contains("1 will be overwritten"),
+                    "collision must always confirm even with confirm_operations=false; message: {message}"
+                );
+            }
+            other => panic!("expected Mode::Confirm, got {other:?}"),
+        }
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+        assert_eq!(std::fs::read(right.path().join("a.txt")).unwrap(), b"new");
     }
 
     #[test]
@@ -1341,6 +1530,7 @@ mod tests {
         app.active_pane_mut().reload().unwrap();
         select_entry_named(&mut app, "a.txt");
         app.dispatch(Action::Copy);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(app.tasks.running.len(), 1);
 
         // A second, independent transfer spawned while the first is (very
@@ -1349,6 +1539,7 @@ mod tests {
         app.panes[0].reload().unwrap();
         select_entry_named(&mut app, "b.txt");
         app.dispatch(Action::Copy);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
 
         wait_for_tasks_done(&mut app);
         assert!(right.path().join("a.txt").exists());
@@ -1906,5 +2097,141 @@ mod tests {
             Mode::Viewer { view_mode, .. } => *view_mode,
             other => panic!("expected Mode::Viewer, got {other:?}"),
         }
+    }
+
+    fn help_scroll_of(app: &App) -> usize {
+        match &app.mode {
+            Mode::Help { scroll } => *scroll,
+            other => panic!("expected Mode::Help, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_action_opens_the_help_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::Help);
+        assert!(matches!(app.mode, Mode::Help { scroll: 0 }));
+    }
+
+    #[test]
+    fn h_and_question_mark_both_open_help_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.handle_event(AppEvent::Input(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Help { .. }));
+        app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Help { .. }));
+    }
+
+    #[test]
+    fn shift_h_opens_history_jump_and_h_no_longer_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        // No history recorded yet, so History still logs its usual error —
+        // the point here is just that `S-h` reaches HistoryJump, not `h`.
+        app.handle_event(AppEvent::Input(KeyCode::Char('H'), KeyModifiers::SHIFT));
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.contains("no history")),
+            "S-h must resolve to HistoryJump: {:?}",
+            app.log
+        );
+        assert!(!matches!(app.mode, Mode::Help { .. }));
+    }
+
+    #[test]
+    fn go_home_end_to_end_is_bound_only_to_tilde() {
+        let start = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            start.path().to_path_buf(),
+            start.path().to_path_buf(),
+            Config {
+                home: Some(home.path().to_path_buf()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        // `S-h`/`H` no longer reaches GoHome (it's HistoryJump now); the
+        // pane must not have moved.
+        app.handle_event(AppEvent::Input(KeyCode::Char('H'), KeyModifiers::SHIFT));
+        assert_eq!(app.panes[0].cwd, start.path());
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('~'), KeyModifiers::NONE));
+        assert_eq!(app.panes[0].cwd, home.path());
+    }
+
+    #[test]
+    fn help_screen_scroll_clamps_and_closes_with_q_esc_or_h() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.dispatch(Action::Help);
+        let max_scroll = crate::help::build_lines(&app.keymap)
+            .len()
+            .saturating_sub(1);
+        assert!(max_scroll > 0, "the listing must have more than one line");
+
+        // Up from the top stays at 0.
+        app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(help_scroll_of(&app), 0);
+
+        app.handle_event(AppEvent::Input(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(help_scroll_of(&app), max_scroll);
+        // One more Down past the end doesn't overshoot.
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(help_scroll_of(&app), max_scroll);
+
+        app.handle_event(AppEvent::Input(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(help_scroll_of(&app), 0);
+
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        app.dispatch(Action::Help);
+        app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        app.dispatch(Action::Help);
+        app.handle_event(AppEvent::Input(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn help_listing_reflects_a_keys_override_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                keys: {
+                    let mut keys = std::collections::HashMap::new();
+                    keys.insert("z".to_string(), "quit".to_string());
+                    keys
+                },
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        let lines = crate::help::build_lines(&app.keymap);
+        let quit_row = lines.iter().find(
+            |l| matches!(l, crate::help::HelpLine::Binding { action, .. } if *action == "quit"),
+        );
+        match quit_row {
+            Some(crate::help::HelpLine::Binding { keys, .. }) => {
+                assert!(keys.contains('z'), "keys: {keys}")
+            }
+            other => panic!("expected a quit binding row, got {other:?}"),
+        }
+
+        app.dispatch(Action::Help);
+        assert!(matches!(app.mode, Mode::Help { .. }));
     }
 }

@@ -63,6 +63,11 @@ pub enum PendingOp {
     Delete {
         targets: Vec<PathBuf>,
     },
+    /// A confirmed Copy/Move ready to spawn. Despite the name, this covers
+    /// both cases that lead to a confirm dialog: an actual filename
+    /// collision, and (when `config.confirm_operations` is true, the
+    /// default) a plain transfer with no collision at all — the confirm
+    /// message itself distinguishes the two (see `App::begin_transfer`).
     Overwrite {
         kind: TransferKind,
         sources: Vec<PathBuf>,
@@ -131,6 +136,16 @@ pub enum Mode {
         h_scroll: usize,
         /// The file was larger than the viewer's size cap and got cut off.
         truncated: bool,
+    },
+    /// The full-frame keybinding help screen (`h`/`?`). Fixed keys only
+    /// (see `App::handle_help_key`): Up/Down/PageUp/PageDown/Home/End
+    /// (`g`/`G` too) scroll, `q`/Esc/`h` closes back to the filer. The
+    /// listing itself (`crate::help::build_lines`) is computed on demand
+    /// from the live `Keymap`, never stored here, so it always reflects
+    /// the current effective bindings.
+    Help {
+        /// Index of the first visible line.
+        scroll: usize,
     },
 }
 

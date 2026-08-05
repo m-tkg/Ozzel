@@ -17,13 +17,20 @@
 delete_behavior = "trash"
 
 # --- ホームディレクトリ ------------------------------------------------
-# `~` / `H` キーで移動する先。省略時は OS のホームディレクトリが使われます。
+# `~` キーで移動する先。省略時は OS のホームディレクトリが使われます。
 # home = "/Users/you/projects"
 
 # --- エディタ -----------------------------------------------------------
 # `e` キーで開くエディタコマンド。省略時は環境変数 $EDITOR が使われ、
 # それも未設定の場合はエラーになります。
 # editor = "vim"
+
+# --- コピー・移動の確認 -------------------------------------------------
+# デフォルト true: 削除と同様、コピー・移動も実行前に確認ダイアログを
+# 表示します（`Copy 3 item(s) -> /dest? (y/n)`）。false にすると、
+# 上書き衝突がない限り確認なしで即実行します（衝突がある場合は
+# false でも常に確認ダイアログが出ます — 無条件でスキップはされません）。
+# confirm_operations = false
 
 # --- 色 -------------------------------------------------------------------
 [colors]
@@ -75,4 +82,18 @@ dim_inactive = true
 # top, bottom, switch_pane, enter, parent, cycle_sort, toggle_hidden,
 # swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
 # filter, clear_filter, zip_marked, unzip, history_jump, bookmark_jump,
-# bookmark_add, go_home, command_line, open_editor, open_default, view, quit
+# bookmark_add, go_home, command_line, open_editor, open_default, view,
+# help, quit
+
+# --- キーバインドの上書き（逆向き記法） ---------------------------------
+# [keys] とは逆に、左辺がアクション名、右辺がキーの組み合わせの配列です。
+# 1つのアクションに複数のキーをまとめて割り当てたいときに便利です。
+# [keys] より後に適用されるため、両方が同じキーに言及した場合は
+# こちらが勝ちます。"none"（割り当て解除）はここにはありません —
+# 解除は引き続き [keys] 側で行ってください。
+[bindings]
+# 例: rename に r と Shift+r の両方を割り当てる（実はデフォルトと同じ内容）
+# rename = ["r", "S-r"]
+
+# 例: quit に q・Ctrl+C に加えて Ctrl+q も割り当てる
+# quit = ["q", "C-c", "C-q"]

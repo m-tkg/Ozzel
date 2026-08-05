@@ -3,6 +3,7 @@
 //! prompt line in `Mode::Prompt`, with a centered confirm box drawn on top
 //! in `Mode::Confirm`).
 
+mod help_view;
 mod log_view;
 mod modal;
 mod pane_view;
@@ -24,6 +25,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // the normal layout is computed.
     if matches!(app.mode, Mode::Viewer { .. }) {
         viewer_view::render(frame, area, &app.mode);
+        return;
+    }
+    if matches!(app.mode, Mode::Help { .. }) {
+        help_view::render(frame, area, &app.mode, &app.keymap);
         return;
     }
 
@@ -83,7 +88,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
             modal::render_confirm(frame, area, message);
         }
         Mode::Normal => render_status_bar(frame, rows[2], app),
-        Mode::Viewer { .. } => unreachable!("handled by the full-frame takeover return above"),
+        Mode::Viewer { .. } | Mode::Help { .. } => {
+            unreachable!("handled by the full-frame takeover return above")
+        }
     }
 }
 
@@ -109,7 +116,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let status = Paragraph::new(format!(
-        " {}{}  |  q:quit  ←→/Tab:switch  Space:mark  C/M/D/R/K  h:hist  b:bkmk  ~:home  ::cmd  e:edit  x:view",
+        " {}{}  |  q:quit  ←→/Tab:switch  Space:mark  C/M/D/R/K  h:help  S-h:hist  b:bkmk  ~:home  ::cmd  e:edit  x:view",
         info,
         pane.cwd.display()
     ))

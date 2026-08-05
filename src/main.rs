@@ -6,6 +6,7 @@ mod entry;
 mod event;
 mod external;
 mod filter;
+mod help;
 mod keymap;
 mod mode;
 mod ops;
