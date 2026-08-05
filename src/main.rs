@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
@@ -39,6 +39,11 @@ use ratatui::crossterm::terminal::{
 };
 
 use app::App;
+
+/// Repository URL used by both `cargo install --git` (the actual update
+/// mechanism) and the raw-content fetch that checks the remote version
+/// first — see `self_update`.
+const REPO_URL: &str = "https://github.com/m-tkg/Ozzel";
 
 /// Whether the kitty keyboard-enhancement flags are currently pushed onto
 /// the terminal. Shared (rather than a field on `TerminalGuard`) because
@@ -91,10 +96,28 @@ fn mouse_capture_needs_sync(active: bool, wanted: bool) -> bool {
     active != wanted
 }
 
-/// ozzel: a two-pane TUI file manager.
+// `command` is a bare `Option<Subcommand>` living alongside the positional
+// `left_dir`/`right_dir` args (rather than the more common "everything is
+// a subcommand" shape) so that the plain, no-subcommand invocation —
+// `ozzel`, `ozzel <left> <right>`, `ozzel --cwd-file f` — keeps working
+// exactly as before; clap resolves the ambiguity between a subcommand name
+// and a same-named positional value by matching the subcommand first (see
+// `Command`'s comment for what that means for a directory literally named
+// `update`). A plain (non-doc) comment on purpose: a doc comment here
+// would leak this implementation rationale into `ozzel --help`'s output.
 #[derive(Parser, Debug)]
-#[command(name = "ozzel", version, about = "Two-pane TUI file manager")]
+#[command(
+    name = "ozzel",
+    version,
+    about = "Two-pane TUI file manager",
+    after_help = "\
+`ozzel update` takes priority over a directory literally named `update`
+in the current directory — pass `./update` (or an absolute path) to open
+such a directory instead."
+)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Starting directory for the left pane (defaults to the current directory)
     left_dir: Option<PathBuf>,
     /// Starting directory for the right pane (defaults to the current directory)
@@ -106,6 +129,25 @@ struct Cli {
     /// is absent, nothing is ever written, regardless of that setting.
     #[arg(long)]
     cwd_file: Option<PathBuf>,
+}
+
+// A `command` token consumes what would otherwise be `left_dir`'s
+// positional slot — see `Cli`'s comment above — which is why `ozzel
+// update` always means "run the update subcommand," never "open a
+// directory named `update`" (use `./update` for that). Plain comment for
+// the same --help-leakage reason as `Cli`'s.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Update ozzel to the latest version on GitHub (`cargo install --git`)
+    #[command(after_help = "\
+GitHub の main ブランチの版と比較し、新しければ
+`cargo install --git https://github.com/m-tkg/Ozzel --force` を実行する。
+ビルドに1〜2分かかる。cargo が必要。")]
+    Update {
+        /// Reinstall even if the remote version matches the current one
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Restores the terminal (raw mode + alternate screen, plus the kitty
@@ -257,6 +299,14 @@ fn resolve_startup_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Handled before anything else touches the filesystem/terminal: no
+    // config load, no panic hook, no `TerminalGuard` — `update` is a
+    // plain one-shot CLI action, not a TUI session.
+    if let Some(Command::Update { force }) = cli.command {
+        return self_update(force);
+    }
+
     let left = resolve_startup_dir(cli.left_dir)?;
     let right = resolve_startup_dir(cli.right_dir)?;
     // Loaded (and, on a malformed file, rejected) before we ever touch the
@@ -311,6 +361,78 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Fetches `Cargo.toml`'s `package.version` from the `main` branch on
+/// GitHub, `None` on any failure (network error, non-200, unparsable TOML,
+/// missing field) — deliberately not `Result`: every caller (`self_update`)
+/// treats "couldn't check" as just another reason to proceed with the
+/// install rather than a distinct error to report, most notably before the
+/// GitHub repository has even been made public (a 404, in practice).
+fn fetch_remote_version() -> Option<String> {
+    let url = "https://raw.githubusercontent.com/m-tkg/Ozzel/main/Cargo.toml";
+    let body = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    let parsed: toml::Value = toml::from_str(&body).ok()?;
+    Some(parsed.get("package")?.get("version")?.as_str()?.to_string())
+}
+
+/// What `self_update` should do given the remote version check's outcome —
+/// pulled out as a pure enum/fn pair (rather than left inline as match arms
+/// returning early) so the equal/newer/unknown × `--force` decision matrix
+/// is directly unit-testable without a network call.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateDecision {
+    /// Remote version matches the running binary's and `--force` wasn't
+    /// given — nothing to do.
+    AlreadyLatest,
+    /// Proceed with `cargo install --git`: either the remote is a
+    /// different version, `--force` was given, or the remote version
+    /// couldn't be determined at all (missing repo, network error, ...).
+    Install,
+}
+
+fn decide_update(current: &str, remote: Option<&str>, force: bool) -> UpdateDecision {
+    match remote {
+        Some(remote) if remote == current && !force => UpdateDecision::AlreadyLatest,
+        _ => UpdateDecision::Install,
+    }
+}
+
+/// Updates ozzel in place via `cargo install --git`, mirroring the sibling
+/// `llmeter` project's `self_update`. Runs before any terminal setup (see
+/// `main`), so it's plain stdout/stderr the whole way — never touches the
+/// TUI machinery at all.
+fn self_update(force: bool) -> anyhow::Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("現在のバージョン: {current}");
+
+    let remote = fetch_remote_version();
+    match decide_update(current, remote.as_deref(), force) {
+        UpdateDecision::AlreadyLatest => {
+            let remote = remote.expect("AlreadyLatest implies a known remote version");
+            println!("最新版です（{remote}）。--force で強制再インストールできる。");
+            return Ok(());
+        }
+        UpdateDecision::Install => match &remote {
+            Some(remote) => println!("リモートのバージョン: {remote}。更新する。"),
+            None => println!("リモートのバージョン確認に失敗。そのまま再インストールする。"),
+        },
+    }
+
+    let status = std::process::Command::new("cargo")
+        .args(["install", "--git", REPO_URL, "--force"])
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("更新完了。"),
+        Ok(s) => bail!("cargo install が失敗した (exit: {s})"),
+        Err(e) => bail!("cargo を実行できない: {e}（cargo のインストールが必要）"),
+    }
     Ok(())
 }
 
@@ -554,5 +676,117 @@ mod tests {
         std::fs::write(&out, "stale").unwrap();
         write_cwd_file(&out, Path::new("/fresh")).unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "/fresh");
+    }
+
+    // --- `ozzel update` version-compare decision -----------------------
+
+    #[test]
+    fn decide_update_same_version_without_force_is_already_latest() {
+        assert_eq!(
+            decide_update("1.2.3", Some("1.2.3"), false),
+            UpdateDecision::AlreadyLatest
+        );
+    }
+
+    #[test]
+    fn decide_update_same_version_with_force_installs_anyway() {
+        assert_eq!(
+            decide_update("1.2.3", Some("1.2.3"), true),
+            UpdateDecision::Install
+        );
+    }
+
+    #[test]
+    fn decide_update_newer_remote_version_installs() {
+        assert_eq!(
+            decide_update("1.2.3", Some("1.3.0"), false),
+            UpdateDecision::Install
+        );
+    }
+
+    #[test]
+    fn decide_update_newer_remote_version_installs_with_force_too() {
+        assert_eq!(
+            decide_update("1.2.3", Some("1.3.0"), true),
+            UpdateDecision::Install
+        );
+    }
+
+    #[test]
+    fn decide_update_unknown_remote_version_always_installs() {
+        // Most notably: the GitHub repo not existing/being public yet, per
+        // `fetch_remote_version`'s doc comment — a failed version check is
+        // never a reason to refuse to proceed.
+        assert_eq!(decide_update("1.2.3", None, false), UpdateDecision::Install);
+        assert_eq!(decide_update("1.2.3", None, true), UpdateDecision::Install);
+    }
+
+    // --- CLI parsing: optional subcommand alongside positional dirs ----
+    //
+    // `Cli` mixes a `#[command(subcommand)] command: Option<Command>` field
+    // with the pre-existing positional `left_dir`/`right_dir` args (see the
+    // comment above the `Cli` struct) specifically so `ozzel update` keeps
+    // working as a real subcommand *and* `ozzel`, `ozzel <left> <right>`,
+    // `ozzel --cwd-file f` all keep meaning exactly what they meant before
+    // this round. These tests exercise `Cli::try_parse_from` directly —
+    // no process spawn, no network.
+
+    #[test]
+    fn cli_parses_update_as_a_subcommand_not_a_left_dir() {
+        let cli = Cli::try_parse_from(["ozzel", "update"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update { force: false })
+        ));
+        assert_eq!(cli.left_dir, None);
+    }
+
+    #[test]
+    fn cli_parses_update_dash_dash_force() {
+        let cli = Cli::try_parse_from(["ozzel", "update", "--force"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Update { force: true })));
+    }
+
+    #[test]
+    fn cli_with_no_arguments_has_no_subcommand_and_no_dirs() {
+        let cli = Cli::try_parse_from(["ozzel"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.left_dir, None);
+        assert_eq!(cli.right_dir, None);
+    }
+
+    #[test]
+    fn cli_parses_two_positional_directories_with_no_subcommand() {
+        let cli = Cli::try_parse_from(["ozzel", ".", ".."]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.left_dir, Some(PathBuf::from(".")));
+        assert_eq!(cli.right_dir, Some(PathBuf::from("..")));
+    }
+
+    #[test]
+    fn cli_parses_cwd_file_alone_with_no_positional_directories() {
+        let cli = Cli::try_parse_from(["ozzel", "--cwd-file", "/tmp/f"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.left_dir, None);
+        assert_eq!(cli.cwd_file, Some(PathBuf::from("/tmp/f")));
+    }
+
+    #[test]
+    fn cli_parses_cwd_file_combined_with_positional_directories() {
+        let cli = Cli::try_parse_from(["ozzel", "left", "right", "--cwd-file", "/tmp/f"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.left_dir, Some(PathBuf::from("left")));
+        assert_eq!(cli.right_dir, Some(PathBuf::from("right")));
+        assert_eq!(cli.cwd_file, Some(PathBuf::from("/tmp/f")));
+    }
+
+    #[test]
+    fn cli_parses_a_dot_slash_prefixed_update_directory_as_a_positional_arg() {
+        // The documented escape hatch for a real directory named `update`:
+        // prefixing it means it no longer matches the subcommand token
+        // literally, so it's just an ordinary positional path.
+        let cli = Cli::try_parse_from(["ozzel", "./update"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.left_dir, Some(PathBuf::from("./update")));
     }
 }

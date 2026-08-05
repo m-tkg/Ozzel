@@ -2,7 +2,7 @@
 name = "ozzel"
 version = "0.1.0"
 edition = "2024"
-description = "A dyna-filer-inspired two-pane TUI file manager"
+description = "A two-pane TUI file manager"
 license = "MIT"
 repository = "https://github.com/m-tkg/Ozzel"
 readme = "README.md"
@@ -24,6 +24,7 @@ toml = "1.1.4"
 trash = "5.2.6"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.0"
+ureq = { version = "2", features = ["tls"] }
 walkdir = "2.5.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
