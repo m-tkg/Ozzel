@@ -119,7 +119,7 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ColorsConfig {
     #[serde(
         deserialize_with = "deserialize_color",
@@ -176,7 +176,7 @@ impl Default for ColorsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub delete_behavior: DeleteBehavior,
     /// Directory `GoHome` (`~`) jumps to; falls back to the OS home
@@ -307,8 +307,37 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
-    toml::from_str(&text)
-        .with_context(|| format!("failed to parse config file: {}", path.display()))
+    parse_config(&text).with_context(|| format!("failed to parse config file: {}", path.display()))
+}
+
+/// `toml::from_str`, with one addition: `Config`/`ColorsConfig`'s
+/// `deny_unknown_fields` turns a stray key into a hard parse error rather
+/// than the pre-`deny_unknown_fields` behavior of silently dropping it —
+/// which is exactly what used to happen to, say, an `md = "..."` line left
+/// at the top level after uncommenting it but forgetting to also uncomment
+/// its `[viewers]` header above it: the key parses fine as *some* TOML,
+/// serde just has nowhere to put it, and nothing ever told the user why
+/// their setting had no effect. serde/toml's own "unknown field `md`,
+/// expected one of `...`" message already names the offending key and
+/// lists the valid ones, which covers a plain typo — but it has no way to
+/// know *why* an otherwise-plausible-looking key ended up unknown, so this
+/// appends one generic (not `[viewers]`-specific) extra line pointing at
+/// the most common cause.
+fn parse_config(text: &str) -> Result<Config> {
+    match toml::from_str::<Config>(text) {
+        Ok(config) => Ok(config),
+        Err(err) => {
+            let is_unknown_field = err.message().contains("unknown field");
+            let mut error = anyhow::Error::new(err);
+            if is_unknown_field {
+                error = error.context(
+                    "unknown key — did you forget to uncomment a section header \
+                     (e.g. [viewers], [colors], [keys], [bindings])?",
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Ensures `path`'s parent directories and the file itself exist, writing
@@ -580,6 +609,40 @@ mod tests {
         let bad = "delete_behavior = [not valid";
         let result: Result<Config, _> = toml::from_str(bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_a_hard_error_naming_the_key() {
+        // The reported bug: a `[viewers]` entry left uncommented while its
+        // `[viewers]` section header stayed commented out lands at the top
+        // level, where it used to be silently dropped instead of erroring.
+        let err = parse_config("md = \"mdviewer {}\"").unwrap_err();
+        let chain = format!("{err:?}");
+        assert!(chain.contains("md"), "chain: {chain}");
+        assert!(
+            chain.contains("unknown field"),
+            "chain should surface serde's own message too: {chain}"
+        );
+        // The generic hint (not [viewers]-specific) is the outermost,
+        // Display-visible message.
+        assert!(err.to_string().contains("section header"), "{err}");
+    }
+
+    #[test]
+    fn unknown_key_inside_colors_is_a_hard_error_naming_the_key() {
+        let err = parse_config("[colors]\nfoo = \"bar\"").unwrap_err();
+        let chain = format!("{err:?}");
+        assert!(chain.contains("foo"), "chain: {chain}");
+        assert!(chain.contains("unknown field"), "chain: {chain}");
+    }
+
+    #[test]
+    fn an_ordinary_typo_error_does_not_get_the_unknown_key_hint() {
+        // The hint is specifically about a key that's unknown at its
+        // current nesting level — an invalid enum variant is a different
+        // mistake and shouldn't be told to go look for a section header.
+        let err = parse_config("delete_behavior = \"bogus\"").unwrap_err();
+        assert!(!err.to_string().contains("section header"), "{err}");
     }
 
     #[test]

@@ -2979,6 +2979,44 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_unknown_top_level_key_keeps_the_old_config_and_logs() {
+        // Regression test for the reported bug: a `[viewers]` entry left
+        // uncommented while its section header stayed commented out used
+        // to be silently dropped by serde's default behavior. With
+        // `deny_unknown_fields` this must now be treated exactly like any
+        // other malformed reload — old config/keymap untouched, error
+        // logged — never applied half-parsed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Permanent,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "md = \"mdviewer {}\"").unwrap();
+        app.reload_config_from(&config_path);
+
+        assert_eq!(
+            app.config.delete_behavior,
+            crate::config::DeleteBehavior::Permanent,
+            "an unknown-key parse error must leave the old config completely untouched"
+        );
+        assert!(app.config.viewers.is_empty());
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.starts_with("config reload failed")),
+            "log: {:?}",
+            app.log
+        );
+    }
+
+    #[test]
     fn reload_config_bad_keys_entry_keeps_the_old_keymap_and_logs() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = test_app(dir.path(), dir.path());
