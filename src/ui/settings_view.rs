@@ -6,19 +6,46 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{List, ListItem, Paragraph};
+use ratatui::widgets::{Block, List, ListItem, Paragraph};
 
 use crate::app::App;
 use crate::mode::{Mode, SettingsEditor, SettingsScreen, TextField};
 use crate::settings::{self, Category};
 use crate::ui::text;
 
+// raspi-config (whiptail/newt) palette: blue backdrop, light-gray dialog
+// body with black text, red selection bar. Fixed on purpose — the point is
+// that the settings screen looks unmistakably different from file panes.
+fn backdrop_style() -> Style {
+    Style::default().fg(Color::White).bg(Color::Blue)
+}
+
+fn dialog_style() -> Style {
+    Style::default().fg(Color::Black).bg(Color::Gray)
+}
+
+fn selected_style() -> Style {
+    Style::default().fg(Color::White).bg(Color::Red)
+}
+
+fn title_style() -> Style {
+    Style::default()
+        .fg(Color::Red)
+        .bg(Color::Gray)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn fill(frame: &mut Frame, area: Rect, style: Style) {
+    frame.render_widget(Block::default().style(style), area);
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let Mode::Settings { screen } = &app.mode else {
         return;
     };
+    fill(frame, area, backdrop_style());
     // Copied/cloned out of `screen` (ending its borrow of `app.mode`) before
     // any call below, so `render_items` is free to borrow `app` mutably
     // (it may populate `App::settings_keybinding_lines_cache`).
@@ -40,43 +67,43 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// Splits `area` into a title row, a body (the list/editor), and a footer
 /// hint row — every settings sub-screen uses this same three-row shape.
-fn frame_rows(area: Rect) -> std::rc::Rc<[Rect]> {
-    Layout::default()
+/// Also paints the body row in the dialog color so every sub-screen gets
+/// the same gray "dialog" panel regardless of how many rows it draws.
+fn frame_rows(frame: &mut Frame, area: Rect) -> std::rc::Rc<[Rect]> {
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
-        .split(area)
+        .split(area);
+    fill(frame, rows[1], dialog_style());
+    rows
 }
 
 fn render_title(frame: &mut Frame, area: Rect, text: &str) {
-    frame.render_widget(
-        Paragraph::new(text.to_string())
-            .style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(text.to_string()).style(title_style()), area);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(
-        Paragraph::new(text.to_string()).style(Style::default().add_modifier(Modifier::REVERSED)),
+        Paragraph::new(text.to_string()).style(backdrop_style().add_modifier(Modifier::BOLD)),
         area,
     );
 }
 
 fn list_item(text: String, selected: bool) -> ListItem<'static> {
     let style = if selected {
-        Style::default().add_modifier(Modifier::REVERSED)
+        selected_style()
     } else {
-        Style::default()
+        dialog_style()
     };
     ListItem::new(Line::styled(text, style))
 }
 
 fn render_categories(frame: &mut Frame, area: Rect, cursor: usize) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     render_title(frame, rows[0], " ozzel settings");
     let items: Vec<ListItem> = Category::ALL
         .iter()
@@ -114,7 +141,7 @@ pub(super) fn windowed_range(total: usize, cursor: usize, height: usize) -> std:
 /// `settings::combos_for` (a full keymap scan) for all of `Action::ALL`
 /// every frame, not just the ~20 rows a normal terminal actually shows.
 fn render_items(frame: &mut Frame, area: Rect, app: &mut App, category: Category, cursor: usize) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     render_title(frame, rows[0], &format!(" {}", category.label()));
 
     let total = match category {
@@ -230,7 +257,7 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &App, editor: &SettingsEdit
 }
 
 fn render_delete_behavior(frame: &mut Frame, area: Rect, cursor: usize) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     render_title(frame, rows[0], " delete_behavior");
     let items = vec![
         list_item(" trash".to_string(), cursor == 0),
@@ -248,7 +275,7 @@ fn render_color(
     editing_hex: bool,
     hex_input: &crate::mode::LineEditor,
 ) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     render_title(frame, rows[0], &format!(" {key}"));
 
     let mut items: Vec<ListItem> = settings::COLOR_PALETTE
@@ -258,9 +285,9 @@ fn render_color(
             let swatch = Style::default().bg(*color);
             let mut spans = vec![ratatui::text::Span::styled("  ", swatch)];
             let label_style = if i == cursor {
-                Style::default().add_modifier(Modifier::REVERSED)
+                selected_style()
             } else {
-                Style::default()
+                dialog_style()
             };
             spans.push(ratatui::text::Span::styled(format!(" {name}"), label_style));
             ListItem::new(Line::from(spans))
@@ -269,9 +296,9 @@ fn render_color(
 
     let hex_slot = settings::COLOR_PALETTE.len();
     let hex_style = if cursor == hex_slot {
-        Style::default().add_modifier(Modifier::REVERSED)
+        selected_style()
     } else {
-        Style::default()
+        dialog_style()
     };
     let hex_text = if editing_hex {
         format!(" custom: #{}", hex_input.value())
@@ -295,13 +322,16 @@ fn render_color(
 }
 
 fn render_text(frame: &mut Frame, area: Rect, field: TextField, input: &crate::mode::LineEditor) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     let label = match field {
         TextField::Home => "home",
         TextField::Editor => "editor",
     };
     render_title(frame, rows[0], &format!(" {label}"));
-    frame.render_widget(Paragraph::new(format!(" {}", input.value())), rows[1]);
+    frame.render_widget(
+        Paragraph::new(format!(" {}", input.value())).style(dialog_style()),
+        rows[1],
+    );
     let col = rows[1].x + 1 + input.cursor_display_col() as u16;
     frame.set_cursor_position((
         col.min(rows[1].x + rows[1].width.saturating_sub(1)),
@@ -318,7 +348,7 @@ fn render_viewer_entry(
     command: &crate::mode::LineEditor,
     editing_extension: bool,
 ) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     let title = if old_extension.is_some() {
         " edit viewer entry"
     } else {
@@ -332,18 +362,18 @@ fn render_viewer_entry(
         .split(rows[1]);
 
     let ext_style = if editing_extension {
-        Style::default().add_modifier(Modifier::REVERSED)
+        selected_style()
     } else {
-        Style::default()
+        dialog_style()
     };
     frame.render_widget(
         Paragraph::new(format!(" extension: {}", extension.value())).style(ext_style),
         body[0],
     );
     let cmd_style = if !editing_extension {
-        Style::default().add_modifier(Modifier::REVERSED)
+        selected_style()
     } else {
-        Style::default()
+        dialog_style()
     };
     frame.render_widget(
         Paragraph::new(format!(" command:   {}", command.value())).style(cmd_style),
@@ -374,7 +404,7 @@ fn render_keybinding(
     action: crate::action::Action,
     cursor: usize,
 ) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     render_title(
         frame,
         rows[0],
@@ -382,7 +412,9 @@ fn render_keybinding(
     );
     let combos = settings::combos_for(&app.keymap, action);
     let items: Vec<ListItem> = if combos.is_empty() {
-        vec![ListItem::new(" (no combo bound)".to_string())]
+        vec![ListItem::new(
+            Line::styled(" (no combo bound)".to_string(), dialog_style()),
+        )]
     } else {
         combos
             .iter()
@@ -395,14 +427,14 @@ fn render_keybinding(
 }
 
 fn render_keybinding_capture(frame: &mut Frame, area: Rect, action: crate::action::Action) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     render_title(
         frame,
         rows[0],
         &format!(" {} — capturing", action.config_name()),
     );
     frame.render_widget(
-        Paragraph::new(" Press any key to bind it to this action..."),
+        Paragraph::new(" Press any key to bind it to this action...").style(dialog_style()),
         rows[1],
     );
     render_footer(frame, rows[2], " Esc:cancel");
@@ -415,7 +447,7 @@ fn render_keybinding_confirm(
     combo: &crate::keymap::KeyCombo,
     conflict: Option<crate::action::Action>,
 ) {
-    let rows = frame_rows(area);
+    let rows = frame_rows(frame, area);
     render_title(frame, rows[0], " confirm binding");
     let combo_text = settings::format_combo(combo);
     let body = match conflict {
@@ -426,7 +458,7 @@ fn render_keybinding_confirm(
         ),
         None => format!(" Bind \"{combo_text}\" to {}?", action.config_name()),
     };
-    frame.render_widget(Paragraph::new(body), rows[1]);
+    frame.render_widget(Paragraph::new(body).style(dialog_style()), rows[1]);
     render_footer(frame, rows[2], " y/Enter:confirm  n/Esc:cancel");
 }
 
