@@ -147,10 +147,11 @@ impl Keymap {
     /// persisted MRU menu), `c` duplicates the cursor entry under a new
     /// name in the same directory, `y` copies its absolute path to the
     /// clipboard, `S-l` (capital `L`) opens the full in-memory log,
-    /// `S-f` (capital `F`) opens the function-list command palette, and
+    /// `S-f` (capital `F`) opens the function-list command palette,
     /// `\` opens prefix-jump search (pure cursor movement to the first
     /// visible entry starting with what's typed — distinct from `f`/`/`'s
-    /// filter, which hides non-matching entries).
+    /// filter, which hides non-matching entries), and `S-s` (capital `S`)
+    /// opens the settings screen (`crate::settings`).
     pub fn defaults() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -207,6 +208,7 @@ impl Keymap {
             (",", EditConfig),
             ("L", ShowLog),
             ("F", FunctionList),
+            ("S", Settings),
             ("q", Quit),
             ("C-c", Quit),
         ];
@@ -359,8 +361,12 @@ fn quote_toml_string(s: &str) -> String {
 /// Formats a combo back into (approximately) the same notation
 /// `KeyCombo::parse` accepts — e.g. `Char('r')`+`NONE` -> `"r"`,
 /// `Char('R')`+`SHIFT` -> `"R"` (no redundant `S-`, since Shift is implied
-/// for any uppercase letter), `Enter`+`SHIFT` -> `"S-Enter"`. Display-only.
-fn format_combo(combo: &KeyCombo) -> String {
+/// for any uppercase letter), `Enter`+`SHIFT` -> `"S-Enter"`. Display-only
+/// in `crate::help`; `pub(crate)` (rather than private) so
+/// `crate::settings`'s keybinding editor can reuse it too, both to show a
+/// just-captured combo back to the user and to write it into
+/// `[bindings]`/`[keys]` via `to_bindings_toml`-adjacent logic.
+pub(crate) fn format_combo(combo: &KeyCombo) -> String {
     let implied_shift = matches!(combo.code, KeyCode::Char(c) if c.is_ascii_uppercase());
     let mut prefix = String::new();
     if combo.modifiers.contains(KeyModifiers::CONTROL) {

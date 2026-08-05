@@ -12,6 +12,7 @@ mod help_view;
 mod log_view;
 mod modal;
 mod pane_view;
+mod settings_view;
 mod viewer_view;
 
 use ratatui::Frame;
@@ -46,6 +47,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Mode::Log { scroll_from_bottom } = &app.mode {
         log_view::render_full(frame, area, app, *scroll_from_bottom);
+        return;
+    }
+    if matches!(app.mode, Mode::Settings { .. }) {
+        settings_view::render(frame, area, app);
         return;
     }
 
@@ -123,7 +128,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             function_list_view::render(frame, area, &app.mode);
         }
         Mode::Normal => render_status_bar(frame, rows[2], app),
-        Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } => {
+        Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } | Mode::Settings { .. } => {
             unreachable!("handled by the full-frame takeover return above")
         }
     }

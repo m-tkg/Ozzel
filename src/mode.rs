@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::action::Action;
+use crate::keymap::KeyCombo;
+use crate::settings::Category;
+
 /// What a `Mode::Prompt` is collecting text for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptKind {
@@ -268,6 +272,94 @@ pub enum Mode {
     /// relative to whatever the current `input` matches.
     FunctionList {
         input: LineEditor,
+        cursor: usize,
+    },
+    /// The full-frame settings screen (`S`/`S-s`): raspi-config-style
+    /// category -> item -> editor navigation, see `crate::settings` for
+    /// the category/item catalog and persistence, `App::handle_settings_key`
+    /// for the actual key-dispatch/transitions this only stores the result
+    /// of.
+    Settings {
+        screen: SettingsScreen,
+    },
+}
+
+/// Which level of the settings screen is showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsScreen {
+    /// The category menu (`Category::ALL`); `cursor` indexes into it.
+    Categories { cursor: usize },
+    /// The item list within one category. `cursor` indexes into: that
+    /// category's fixed `settings::BEHAVIOR_ITEMS`/`COLOR_ITEMS`/
+    /// `STARTUP_ITEMS` array (`Behavior`/`Colors`/`Startup`), the config's
+    /// current `[viewers]` extensions sorted plus one synthetic
+    /// "+ add new" slot at the end (`Viewers`), or `Action::ALL`
+    /// (`Keybindings`).
+    Items { category: Category, cursor: usize },
+    /// A per-item editor is active on top of the item list it was opened
+    /// from (`category`/`item_cursor`, restored on Esc/commit).
+    Editor {
+        category: Category,
+        item_cursor: usize,
+        editor: SettingsEditor,
+    },
+}
+
+/// Which top-level (`home`/`editor`) or `[viewers]`-entry text field a
+/// `SettingsEditor::Text`/`ViewerEntry` is collecting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextField {
+    Home,
+    Editor,
+}
+
+/// State for whichever per-item editor is currently open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsEditor {
+    /// `delete_behavior`'s two-way select: `cursor` 0 = trash, 1 = permanent.
+    DeleteBehavior { cursor: usize },
+    /// A curated named-color palette (`settings::COLOR_PALETTE`) plus one
+    /// synthetic "custom hex" slot at the end (index
+    /// `COLOR_PALETTE.len()`); `cursor` indexes across both. `editing_hex`
+    /// is true once Enter has been pressed on the hex slot, at which point
+    /// `hex_input` holds what's being typed (prefilled with the item's
+    /// current value's hex form when there's no exact palette match).
+    Color {
+        key: &'static str,
+        cursor: usize,
+        editing_hex: bool,
+        hex_input: LineEditor,
+    },
+    /// `home`/`editor` (top-level optional text settings).
+    Text { field: TextField, input: LineEditor },
+    /// Adding (`old_extension: None`) or editing/renaming
+    /// (`old_extension: Some(...)`) one `[viewers]` entry — two stacked
+    /// fields, `Tab` swaps which one `editing_extension` says has focus.
+    ViewerEntry {
+        old_extension: Option<String>,
+        extension: LineEditor,
+        command: LineEditor,
+        editing_extension: bool,
+    },
+    /// One action's bound-combo list (`settings::combos_for`); `cursor`
+    /// indexes into it. `a` starts a capture (-> `KeybindingCapture`), `d`
+    /// removes the combo at `cursor`.
+    Keybinding { action: Action, cursor: usize },
+    /// Mid-capture: the very next keypress becomes the new combo, except
+    /// `Esc`, which is reserved to cancel back to `Keybinding` instead of
+    /// ever being capturable itself. `cursor` is carried through purely so
+    /// canceling restores the exact `Keybinding { action, cursor }` this
+    /// capture was started from.
+    KeybindingCapture { action: Action, cursor: usize },
+    /// Confirming a just-captured combo before it's written — a plain
+    /// bind when `conflict` is `None`, a steal offer (naming the losing
+    /// action) when it's `Some`. `Enter`/`y` confirms, `Esc`/`n` cancels
+    /// back to `Keybinding` without writing anything. `cursor`, same
+    /// reason as `KeybindingCapture`'s.
+    KeybindingConfirm {
+        action: Action,
+        combo: KeyCombo,
+        conflict: Option<Action>,
         cursor: usize,
     },
 }
