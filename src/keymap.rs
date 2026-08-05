@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde::de::IntoDeserializer;
 use thiserror::Error;
 
-use crate::action::Action;
+use crate::action::{Action, ActionCategory};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum KeymapError {
@@ -242,9 +242,12 @@ impl Keymap {
     }
 
     /// Every key combo currently bound to `action`, formatted for display
-    /// (see `format_combo`) and sorted for a deterministic order. Used only
-    /// by the help screen (`crate::help`) — never round-tripped back
-    /// through `KeyCombo::parse`.
+    /// (see `format_combo`) and sorted for a deterministic order. Each
+    /// string round-trips through `KeyCombo::parse` back to the exact same
+    /// combo (guarded by
+    /// `to_bindings_toml_round_trips_through_apply_bindings_to_the_default_keymap`
+    /// below) — used both by the help screen (`crate::help`) and by
+    /// `to_bindings_toml`'s generated `[bindings]` section.
     pub fn combos_for(&self, action: Action) -> Vec<String> {
         let mut combos: Vec<String> = self
             .bindings
@@ -254,6 +257,58 @@ impl Keymap {
             .collect();
         combos.sort();
         combos
+    }
+
+    /// Every action with at least one combo currently bound, paired with
+    /// those combos, in the same category-then-`Action::ALL` order the
+    /// help screen (`crate::help::build_lines`) and `to_bindings_toml`
+    /// both use — a single source of truth so the two can never drift
+    /// apart from each other independently.
+    pub fn ordered_bindings(&self) -> Vec<(Action, Vec<String>)> {
+        let mut out = Vec::new();
+        for category in ActionCategory::ALL {
+            for action in Action::ALL {
+                if action.category() != category {
+                    continue;
+                }
+                let combos = self.combos_for(action);
+                if !combos.is_empty() {
+                    out.push((action, combos));
+                }
+            }
+        }
+        out
+    }
+
+    /// Serializes every currently-bound action as a `[bindings]` TOML
+    /// section — one `action_name = ["combo", ...]` line per action, in
+    /// `ordered_bindings`'s order. Used to (re)generate the full default
+    /// keymap listing embedded in `examples/config.toml` (and therefore
+    /// the `,` first-run template, via `include_str!`) — see
+    /// `config::tests` for the test that keeps the checked-in file from
+    /// drifting out of sync with this. Not called from any runtime code
+    /// path (ozzel never regenerates its own config file's contents) —
+    /// only from that drift-prevention test and, manually, from a
+    /// throwaway `#[test]` printing its output whenever `examples/
+    /// config.toml`'s `[bindings]` block needs hand-regenerating.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "only called from config.rs's drift-prevention test"
+        )
+    )]
+    pub fn to_bindings_toml(&self) -> String {
+        let mut out = String::from("[bindings]\n");
+        for (action, combos) in self.ordered_bindings() {
+            let quoted = combos
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("{} = [{quoted}]\n", action.config_name()));
+        }
+        out
     }
 }
 
@@ -706,5 +761,69 @@ mod tests {
         unbind.insert("g".to_string(), "none".to_string());
         km.merge_overrides(&unbind).unwrap();
         assert!(km.combos_for(Action::OpenDefault).is_empty());
+    }
+
+    #[test]
+    fn ordered_bindings_lists_every_bound_action_in_category_then_all_order() {
+        let km = Keymap::default_dyna();
+        let ordered = km.ordered_bindings();
+
+        // Every action with at least one combo bound must appear exactly
+        // once; an action's position must match its place in `Action::ALL`
+        // filtered by `ActionCategory::ALL`'s order (movement first, ...).
+        let positions: HashMap<Action, usize> = ordered
+            .iter()
+            .enumerate()
+            .map(|(i, (action, _))| (*action, i))
+            .collect();
+        assert!(
+            positions[&Action::CursorUp] < positions[&Action::Mark],
+            "Movement actions must come before Marks"
+        );
+        assert!(
+            positions[&Action::Mark] < positions[&Action::Rename],
+            "Marks must come before File operations"
+        );
+        // FocusLeft/FocusRight are bound (Left/Right by default) and share
+        // Movement's category, so it's a real check that no bound action
+        // is silently dropped from the listing.
+        assert!(positions.contains_key(&Action::FocusLeft));
+        // OpenDefault (S-enter only) must be listed too.
+        assert!(positions.contains_key(&Action::OpenDefault));
+    }
+
+    #[test]
+    fn to_bindings_toml_starts_with_the_bindings_header() {
+        let km = Keymap::default_dyna();
+        assert!(km.to_bindings_toml().starts_with("[bindings]\n"));
+    }
+
+    #[test]
+    fn to_bindings_toml_round_trips_through_apply_bindings_to_the_default_keymap() {
+        // The whole point of the generator: parsing its own output back
+        // through `apply_bindings` on an *empty* keymap (no compiled-in
+        // defaults at all) must reconstruct exactly the same bindings map
+        // `default_dyna` builds from source — proving every emitted combo
+        // string is faithful to `KeyCombo::parse`, not just readable.
+        #[derive(Deserialize)]
+        struct BindingsOnly {
+            bindings: HashMap<String, Vec<String>>,
+        }
+
+        let default_km = Keymap::default_dyna();
+        let toml_text = default_km.to_bindings_toml();
+
+        let parsed: BindingsOnly = toml::from_str(&toml_text)
+            .unwrap_or_else(|e| panic!("generated TOML must parse: {e}\n---\n{toml_text}"));
+
+        let mut rebuilt = Keymap {
+            bindings: HashMap::new(),
+        };
+        rebuilt.apply_bindings(&parsed.bindings).unwrap();
+
+        assert_eq!(
+            rebuilt.bindings, default_km.bindings,
+            "generated [bindings] TOML must reconstruct the default keymap exactly"
+        );
     }
 }

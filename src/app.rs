@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::Context as _;
+use chrono::{DateTime, Local};
 use directories::BaseDirs;
 
 use crate::action::Action;
@@ -70,6 +71,11 @@ impl From<ActivePane> for Side {
 pub struct LogLine {
     pub message: String,
     pub is_error: bool,
+    /// When this line was appended (local time), captured once by
+    /// `App::log_push` — never recomputed at render time, so the log
+    /// area's rendering stays a pure function of already-stored data (see
+    /// `ui::log_view::format_timestamp_prefix`).
+    pub timestamp: DateTime<Local>,
 }
 
 pub struct App {
@@ -109,6 +115,22 @@ pub struct App {
     /// folding it into `ExternalRequest` itself, since every other
     /// external command has nothing to do afterward.
     pub pending_config_reload: bool,
+}
+
+/// Appends one `LogLine` (capacity-capped, timestamped `Local::now()`) to
+/// `log` directly. A free function rather than an `&mut self` method so it
+/// can be called from inside a loop that already holds a `&mut self.panes`
+/// borrow (see `App::reload_both`) — `App::log_push` is a thin wrapper
+/// around this for the common case where no such conflict exists.
+fn push_log_line(log: &mut VecDeque<LogLine>, message: String, is_error: bool) {
+    if log.len() >= LOG_CAPACITY {
+        log.pop_front();
+    }
+    log.push_back(LogLine {
+        message,
+        is_error,
+        timestamp: Local::now(),
+    });
 }
 
 /// Builds a `Keymap` from `config`: the compiled-in defaults, with `[keys]`
@@ -159,10 +181,7 @@ impl App {
     }
 
     fn log_push(&mut self, message: String, is_error: bool) {
-        if self.log.len() >= LOG_CAPACITY {
-            self.log.pop_front();
-        }
-        self.log.push_back(LogLine { message, is_error });
+        push_log_line(&mut self.log, message, is_error);
     }
 
     pub fn log_info(&mut self, message: impl Into<String>) {
@@ -188,10 +207,12 @@ impl App {
     fn reload_both(&mut self) {
         for pane in &mut self.panes {
             if let Err(err) = pane.reload_preserving_cursor() {
-                self.log.push_back(LogLine {
-                    message: err.to_string(),
-                    is_error: true,
-                });
+                // Can't call `self.log_error` here: `pane` already holds a
+                // `&mut self.panes` borrow, and a `&mut self` method call
+                // would conflict with it even though `log` is a disjoint
+                // field — so this goes through the free function instead,
+                // borrowing only `self.log` directly.
+                push_log_line(&mut self.log, err.to_string(), true);
             }
         }
     }

@@ -233,6 +233,37 @@ mod tests {
     }
 
     #[test]
+    fn example_config_bindings_section_matches_the_generated_defaults() {
+        // examples/config.toml's [bindings] block is meant to be the exact,
+        // hand-committed output of `Keymap::to_bindings_toml()` (see its
+        // doc comment) — this guards against it ever drifting from
+        // whatever `Keymap::default_dyna()` actually builds, comparing
+        // parsed maps (not raw text) so comments/whitespace/line-order in
+        // the checked-in file are free to differ.
+        #[derive(Deserialize)]
+        struct BindingsOnly {
+            bindings: HashMap<String, Vec<String>>,
+        }
+
+        let text =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/config.toml"))
+                .expect("examples/config.toml must exist");
+        let from_file: BindingsOnly =
+            toml::from_str(&text).expect("examples/config.toml must parse");
+
+        let generated_text = crate::keymap::Keymap::default_dyna().to_bindings_toml();
+        let generated: BindingsOnly = toml::from_str(&generated_text)
+            .expect("Keymap::to_bindings_toml()'s own output must parse");
+
+        assert_eq!(
+            from_file.bindings, generated.bindings,
+            "examples/config.toml's [bindings] section has drifted from \
+             Keymap::default_dyna() — regenerate it from \
+             Keymap::default_dyna().to_bindings_toml()'s real output"
+        );
+    }
+
+    #[test]
     fn defaults_are_trash_and_empty_keys() {
         let config = Config::default();
         assert_eq!(config.delete_behavior, DeleteBehavior::Trash);

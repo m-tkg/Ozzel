@@ -2,11 +2,17 @@
 //! reserving one row per currently-running background task for a progress
 //! gauge (`desc [####----] 43% current_file`).
 //!
-//! Long lines wrap across multiple rows (width-aware, grapheme-safe —
-//! see `wrap_to_width`) rather than getting clipped at the right edge, and
-//! the *newest* wrapped rows stay bottom-anchored even when that means an
-//! older line's wrapped continuation scrolls off the top first.
+//! Every log line is prefixed with the compact local timestamp it was
+//! appended at (`MM-dd HH:MM:SS `, captured once by `App::log_push` — see
+//! `format_timestamp_prefix`), and long lines wrap across multiple rows
+//! (width-aware, grapheme-safe — see `wrap_to_width`) rather than getting
+//! clipped at the right edge. A wrapped line's continuation rows hang-
+//! indent by the timestamp prefix's width instead of repeating it, so the
+//! message column stays aligned under the first row's. The *newest*
+//! wrapped rows stay bottom-anchored even when that means an older line's
+//! wrapped continuation scrolls off the top first.
 
+use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -17,6 +23,16 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, LogLine};
 use crate::tasks::RunningTask;
+
+/// `strftime`-style format for a log line's timestamp prefix: 2-digit
+/// month/day/hour/minute/second, fixed punctuation, always exactly
+/// `TIMESTAMP_PREFIX_WIDTH` display columns wide (ASCII-only, so char
+/// count and display width are the same).
+const TIMESTAMP_FORMAT: &str = "%m-%d %H:%M:%S ";
+/// Display width of `TIMESTAMP_FORMAT`'s output (e.g. `"08-05 14:03:22 "`)
+/// — doubles as the hang-indent width for a wrapped line's continuation
+/// rows, so the message column lines up under the first row's.
+const TIMESTAMP_PREFIX_WIDTH: usize = 15;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().title("Log").borders(Borders::ALL);
@@ -55,10 +71,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
 /// `available_rows` is a display-row budget (post gauge-row subtraction),
 /// not a `LogLine` count — a single long log line can expand into several
-/// wrapped rows. Every log line is wrapped to `area.width` first (see
-/// `wrap_log_lines`), then only the last `available_rows` wrapped rows are
-/// kept, so the newest content always stays visible even if that cuts an
-/// older line's wrapped continuation off the top.
+/// wrapped rows. Every log line is timestamp-prefixed and wrapped to
+/// `area.width` first (see `wrap_log_lines`), then only the last
+/// `available_rows` wrapped rows are kept, so the newest content always
+/// stays visible even if that cuts an older line's wrapped continuation
+/// off the top.
 fn render_log_lines(frame: &mut Frame, area: Rect, app: &App, available_rows: usize) {
     let wrapped = wrap_log_lines(app.log.iter(), area.width as usize);
     let start = wrapped.len().saturating_sub(available_rows);
@@ -77,18 +94,42 @@ fn render_log_lines(frame: &mut Frame, area: Rect, app: &App, available_rows: us
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Wraps every log line to `width` display columns (see `wrap_to_width`),
-/// flattening the result into `(display_row_text, is_error)` pairs in
-/// original order — `is_error` is carried onto every wrapped row of an
-/// error line, so a wrapped error message stays red top to bottom.
+/// Formats `timestamp` as the fixed-width prefix every log row gets (see
+/// `TIMESTAMP_FORMAT`). Takes the timestamp as a plain value rather than
+/// calling `Local::now()` itself, so it stays a pure, directly-testable
+/// function — the actual "when" is captured once, at append time, by
+/// `App::log_push`.
+fn format_timestamp_prefix(timestamp: DateTime<Local>) -> String {
+    timestamp.format(TIMESTAMP_FORMAT).to_string()
+}
+
+/// Wraps every log line to `width` display columns — the *message* portion
+/// wraps against `width` minus the timestamp prefix's width (see
+/// `wrap_to_width`), and the result is flattened into
+/// `(display_row_text, is_error)` pairs in original order. The first
+/// wrapped row of each line gets the real timestamp prefix; continuation
+/// rows get a blank hang-indent of the same width instead, so the message
+/// column stays aligned without repeating the timestamp. `is_error` is
+/// carried onto every wrapped row of an error line, so a wrapped error
+/// message stays red top to bottom.
 fn wrap_log_lines<'a>(log: impl Iterator<Item = &'a LogLine>, width: usize) -> Vec<(String, bool)> {
     if width == 0 {
         return Vec::new();
     }
-    log.flat_map(|line| {
-        wrap_to_width(&line.message, width)
+    let message_width = width.saturating_sub(TIMESTAMP_PREFIX_WIDTH);
+    let hang_indent = " ".repeat(TIMESTAMP_PREFIX_WIDTH);
+
+    log.flat_map(move |line| {
+        let prefix = format_timestamp_prefix(line.timestamp);
+        let is_error = line.is_error;
+        let hang_indent = hang_indent.clone();
+        wrap_to_width(&line.message, message_width)
             .into_iter()
-            .map(|row| (row, line.is_error))
+            .enumerate()
+            .map(move |(i, row)| {
+                let indent = if i == 0 { &prefix } else { &hang_indent };
+                (format!("{indent}{row}"), is_error)
+            })
     })
     .collect()
 }
@@ -142,11 +183,21 @@ fn render_gauge(frame: &mut Frame, area: Rect, task: &RunningTask) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    /// A fixed local timestamp for every test `LogLine` below — the exact
+    /// value doesn't matter to most of these tests (they're about wrapping
+    /// and bottom-anchoring, not the clock), so using one constant keeps
+    /// expected strings easy to build via `format_timestamp_prefix` itself.
+    fn test_timestamp() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap()
+    }
 
     fn log_line(message: &str, is_error: bool) -> LogLine {
         LogLine {
             message: message.to_string(),
             is_error,
+            timestamp: test_timestamp(),
         }
     }
 
@@ -193,16 +244,65 @@ mod tests {
     }
 
     #[test]
+    fn format_timestamp_prefix_is_a_fixed_width_mm_dd_hh_mm_ss() {
+        let prefix = format_timestamp_prefix(test_timestamp());
+        assert_eq!(prefix, "01-02 03:04:05 ");
+        assert_eq!(
+            UnicodeWidthStr::width(prefix.as_str()),
+            TIMESTAMP_PREFIX_WIDTH
+        );
+    }
+
+    #[test]
+    fn wrap_log_lines_prefixes_the_first_row_with_the_timestamp() {
+        let lines = [log_line("hello", false)];
+        let wrapped = wrap_log_lines(lines.iter(), 40);
+        assert_eq!(wrapped, vec![("01-02 03:04:05 hello".to_string(), false)]);
+    }
+
+    #[test]
+    fn wrap_log_lines_hang_indents_continuation_rows_instead_of_repeating_the_timestamp() {
+        // message_width = 30 - 15 = 15; a message longer than that must
+        // wrap, and only the first row may carry the real timestamp.
+        let long_message = "abcdefghijklmnopqrstuvwxyz"; // 26 chars
+        let lines = [log_line(long_message, false)];
+        let wrapped = wrap_log_lines(lines.iter(), 30);
+
+        assert!(wrapped.len() > 1, "must wrap into more than one row");
+        let prefix = format_timestamp_prefix(test_timestamp());
+        assert!(wrapped[0].0.starts_with(&prefix), "row 0: {:?}", wrapped[0]);
+        let hang_indent = " ".repeat(TIMESTAMP_PREFIX_WIDTH);
+        for (text, _) in &wrapped[1..] {
+            assert!(
+                text.starts_with(&hang_indent),
+                "continuation row must hang-indent by the prefix width, not repeat the timestamp: {text:?}"
+            );
+            assert!(
+                !text.starts_with(&prefix),
+                "must not repeat the timestamp: {text:?}"
+            );
+        }
+        // The message column (everything after each row's fixed-width
+        // indent) must concatenate back to the original text exactly.
+        let message_parts: String = wrapped
+            .iter()
+            .map(|(text, _)| &text[TIMESTAMP_PREFIX_WIDTH..])
+            .collect();
+        assert_eq!(message_parts, long_message);
+    }
+
+    #[test]
     fn wrap_log_lines_flattens_in_order_and_carries_is_error_per_row() {
         let lines = [
             log_line("short one", false),
             log_line("this is a longer error line", true),
         ];
-        let wrapped = wrap_log_lines(lines.iter(), 10);
+        // message_width = 30 - 15 = 15.
+        let wrapped = wrap_log_lines(lines.iter(), 30);
 
         // "short one" (9 cols) fits in one row; the error line (28 chars)
         // must wrap into multiple rows, every one still flagged is_error.
-        assert_eq!(wrapped[0], ("short one".to_string(), false));
+        assert_eq!(wrapped[0], ("01-02 03:04:05 short one".to_string(), false));
         assert!(wrapped.len() > 2, "the long line must wrap into >1 row");
         assert!(
             wrapped[1..].iter().all(|(_, is_error)| *is_error),
@@ -231,7 +331,12 @@ mod tests {
         let available_rows = 2;
         let start = wrapped.len().saturating_sub(available_rows);
         let tail: Vec<&str> = wrapped[start..].iter().map(|(t, _)| t.as_str()).collect();
-        assert_eq!(tail, vec!["line 4", "line 5"], "must keep the newest rows");
+        let prefix = format_timestamp_prefix(test_timestamp());
+        assert_eq!(
+            tail,
+            vec![format!("{prefix}line 4"), format!("{prefix}line 5")],
+            "must keep the newest rows"
+        );
     }
 
     #[test]

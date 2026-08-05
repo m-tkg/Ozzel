@@ -88,17 +88,59 @@ dim_inactive = true
 # swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
 # filter, clear_filter, zip_marked, unzip, history_jump, bookmark_jump,
 # bookmark_add, go_home, command_line, open_editor, open_default, view,
-# help, quit
+# help, edit_config, quit
 
-# --- キーバインドの上書き（逆向き記法） ---------------------------------
+# --- キーバインドの上書き（逆向き記法・デフォルトの全キーバインド一覧） ---
 # [keys] とは逆に、左辺がアクション名、右辺がキーの組み合わせの配列です。
 # 1つのアクションに複数のキーをまとめて割り当てたいときに便利です。
 # [keys] より後に適用されるため、両方が同じキーに言及した場合は
-# こちらが勝ちます。"none"（割り当て解除）はここにはありません —
-# 解除は引き続き [keys] 側で行ってください。
+# こちらが勝ちます。
+#
+# 以下は現在のデフォルトキーバインドをすべて書き出したものです（`ozzel`
+# を再ビルドせずとも、ここを直接編集するだけで全キーバインドを見渡して
+# 変更できるようにするためのものです）。すべて有効な行なので、そのまま
+# 起動しても動作は今までどおり変わりません。
+#
+# 重要: この [bindings] は「追加・上書き」専用です。行を削除しても
+# そのキーの割り当ては消えません（コード側のデフォルトが引き続き効きます）。
+# 特定のキーを本当に無効化したい場合は、この行を消すのではなく、上の
+# [keys] セクションで "そのキー" = "none" を指定してください
+# （例: "q" = "none"）。
 [bindings]
-# 例: rename に r と Shift+r の両方を割り当てる（実はデフォルトと同じ内容）
-# rename = ["r", "S-r"]
-
-# 例: quit に q・Ctrl+C に加えて Ctrl+q も割り当てる
-# quit = ["q", "C-c", "C-q"]
+cursor_up = ["Up"]
+cursor_down = ["Down"]
+page_up = ["PageUp"]
+page_down = ["PageDown"]
+top = ["Home", "S-Up"]
+bottom = ["End", "S-Down"]
+switch_pane = ["Tab"]
+focus_left = ["Left"]
+focus_right = ["Right"]
+enter = ["Enter"]
+parent = ["Backspace"]
+cycle_sort = ["s"]
+toggle_hidden = ["."]
+swap_panes = ["w"]
+refresh = ["C-r"]
+mark = ["Space"]
+mark_all = ["a"]
+rename = ["R", "r"]
+mkdir = ["K"]
+delete = ["D", "d"]
+copy = ["C"]
+move = ["M"]
+zip_marked = ["p"]
+unzip = ["u"]
+filter = ["/", "f"]
+clear_filter = ["Esc"]
+history_jump = ["H"]
+bookmark_jump = ["b"]
+bookmark_add = ["B"]
+go_home = ["~"]
+command_line = [":"]
+open_editor = ["e"]
+open_default = ["S-Enter"]
+view = ["o", "x"]
+edit_config = [","]
+help = ["?", "h"]
+quit = ["C-c", "q"]

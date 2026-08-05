@@ -5,7 +5,7 @@
 //! `ui::help_view` (for rendering), so both always agree on the exact line
 //! count.
 
-use crate::action::{Action, ActionCategory};
+use crate::action::ActionCategory;
 use crate::keymap::Keymap;
 
 /// One renderable row of the help screen.
@@ -39,32 +39,29 @@ const FIXED_KEY_LINES: &[&str] = &[
 /// Builds the full listing: every bound action grouped by category (skipping
 /// actions with zero combos bound, e.g. after a `[keys]` "none" unbind),
 /// then a static section of fixed keys that live outside the keymap
-/// entirely.
+/// entirely. Driven by `Keymap::ordered_bindings` — the same source
+/// `Keymap::to_bindings_toml` uses — so this screen's grouping/order can
+/// never drift from the generated `[bindings]` TOML's.
 pub fn build_lines(keymap: &Keymap) -> Vec<HelpLine> {
     let mut lines = Vec::new();
+    let mut current_category: Option<ActionCategory> = None;
 
-    for category in ActionCategory::ALL {
-        let rows: Vec<HelpLine> = Action::ALL
-            .into_iter()
-            .filter(|action| action.category() == category)
-            .filter_map(|action| {
-                let keys = keymap.combos_for(action);
-                if keys.is_empty() {
-                    return None;
-                }
-                Some(HelpLine::Binding {
-                    keys: keys.join(", "),
-                    action: action.config_name(),
-                    description: action.description(),
-                })
-            })
-            .collect();
-
-        if rows.is_empty() {
-            continue;
+    for (action, keys) in keymap.ordered_bindings() {
+        let category = action.category();
+        if current_category != Some(category) {
+            if current_category.is_some() {
+                lines.push(HelpLine::Blank);
+            }
+            lines.push(HelpLine::Header(category.label().to_string()));
+            current_category = Some(category);
         }
-        lines.push(HelpLine::Header(category.label().to_string()));
-        lines.extend(rows);
+        lines.push(HelpLine::Binding {
+            keys: keys.join(", "),
+            action: action.config_name(),
+            description: action.description(),
+        });
+    }
+    if current_category.is_some() {
         lines.push(HelpLine::Blank);
     }
 
