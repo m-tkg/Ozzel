@@ -12,8 +12,10 @@ use crate::mode::ViewMode;
 
 /// Files larger than this are read only up to the cap; the viewer shows a
 /// "truncated" note in its footer in that case rather than silently
-/// pretending the file ends there.
-const SIZE_CAP: u64 = 10 * 1024 * 1024; // 10 MiB
+/// pretending the file ends there. `pub` so `virtual_dir::extract_single_to_memory`
+/// (a virtual-directory file open) can honor the exact same cap without
+/// this module needing to know anything about zip archives.
+pub const SIZE_CAP: u64 = 10 * 1024 * 1024; // 10 MiB
 /// How many leading bytes are sniffed for a NUL byte to decide "this looks
 /// like a binary file" and therefore should default to opening in hex mode.
 const BINARY_SNIFF_LEN: usize = 8 * 1024; // 8 KiB
@@ -50,6 +52,17 @@ impl std::fmt::Display for LoadError {
 /// viewer can show either representation and toggle between them with Tab.
 pub fn load(path: &Path) -> Result<LoadedFile, LoadError> {
     let (bytes, truncated) = read_capped(path)?;
+    Ok(load_bytes(bytes, truncated))
+}
+
+/// The non-fs half of `load`: builds a `LoadedFile` from bytes already
+/// read from wherever (a plain file for `load`, or a zip entry extracted
+/// to memory for a virtual-directory file open — see
+/// `virtual_dir::extract_single_to_memory`) plus whether the caller
+/// already truncated them at some size cap. Infallible — sniffing/
+/// decoding bytes that are already in hand can't fail the way reading
+/// from disk can.
+pub fn load_bytes(bytes: Vec<u8>, truncated: bool) -> LoadedFile {
     let initial_mode = if looks_binary(&bytes) {
         ViewMode::Hex
     } else {
@@ -57,12 +70,12 @@ pub fn load(path: &Path) -> Result<LoadedFile, LoadError> {
     };
     let text = String::from_utf8_lossy(&bytes);
     let lines = text.lines().map(expand_tabs).collect();
-    Ok(LoadedFile {
+    LoadedFile {
         lines,
         bytes,
         initial_mode,
         truncated,
-    })
+    }
 }
 
 fn read_capped(path: &Path) -> Result<(Vec<u8>, bool), LoadError> {

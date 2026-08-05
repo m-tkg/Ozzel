@@ -27,6 +27,7 @@ use crate::persist::{Bookmarks, History, Side};
 use crate::tasks::delete as delete_task;
 use crate::tasks::{TaskManager, archive, copy_move};
 use crate::viewer;
+use crate::virtual_dir;
 
 /// Log lines are capped so a long session's log can't grow without bound.
 const LOG_CAPACITY: usize = 500;
@@ -168,14 +169,33 @@ pub struct PaneLayout {
 }
 
 /// Which pane a left-button drag is constrained to, and the drag's own
-/// running state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// running state. Marking is a *toggle* per row (already-marked -> off,
+/// unmarked -> on), so — unlike a simple "set every swept row to marked"
+/// scheme — this has to track exactly which rows this drag gesture has
+/// already toggled, to guard against re-toggling the same row twice when
+/// the pointer sweeps back over it (see `App::handle_mouse_left_drag`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DragState {
     pub pane: ActivePane,
     /// The entry index (into `visible_entries()`) the drag started on —
-    /// marking is applied to every row between this and the current one,
-    /// inclusive, each time the pointer moves to a new row.
+    /// its toggle is deliberately deferred until the drag is *confirmed*
+    /// (the first `Drag`/movement event arrives), so a plain click that
+    /// never moves the pointer never toggles anything (see
+    /// `App::handle_mouse_left_down`'s doc comment).
     pub origin_index: usize,
+    /// `false` until the first `Drag` event after mouse-down; flips the
+    /// origin row from "pending" to "actually toggled" exactly once.
+    started: bool,
+    /// The row processed by the most recent `Drag` event (or
+    /// `origin_index` before the drag has started) — each new event
+    /// toggles the *range* between this and the current row (covering any
+    /// rows a fast pointer movement jumped over between two events), not
+    /// just the single current row.
+    last_row: usize,
+    /// Every row index this drag gesture has already toggled — checked
+    /// before toggling so re-sweeping over an already-visited row is a
+    /// no-op instead of flipping it back.
+    visited: std::collections::HashSet<usize>,
 }
 
 /// Maps a click/drag/wheel screen coordinate to an entry index (into
@@ -193,6 +213,21 @@ fn hit_test_row(layout: &PaneLayout, x: u16, y: u16) -> Option<usize> {
         return None;
     }
     Some(layout.start + (y - area.y) as usize)
+}
+
+/// Looks up `path`'s extension (lowercased, dot stripped — matching the
+/// documented `[viewers]` key format) in `viewers`, returning the command
+/// template to run instead of the built-in viewer. `None` for a path with
+/// no extension, or one whose extension has no configured entry — either
+/// way `App::begin_open` falls back to the built-in viewer. A free
+/// function (rather than a method) purely so it's directly unit-testable
+/// without constructing an `App`.
+fn extension_viewer_command(
+    viewers: &std::collections::HashMap<String, String>,
+    path: &Path,
+) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    viewers.get(&ext).cloned()
 }
 
 /// Appends one `LogLine` (capacity-capped, timestamped `Local::now()`) to
@@ -469,44 +504,71 @@ impl App {
             return;
         }
         self.last_click = Some((pane, row, now));
-        // Arms a *potential* drag, but doesn't mark anything yet: a plain
-        // click (mouse-down immediately followed by mouse-up, no `Drag`
-        // events in between) must only move the cursor, never mark — only
-        // `handle_mouse_left_drag`, once an actual `Drag` event proves the
-        // pointer moved while the button was held, marks the origin row
-        // (as part of its lo..=hi sweep, which includes `origin_index`
-        // even when the drag hasn't left that row yet).
+        // Arms a *potential* drag, but doesn't toggle anything yet: a
+        // plain click (mouse-down immediately followed by mouse-up, no
+        // `Drag` events in between) must only move the cursor, never
+        // toggle a mark — only `handle_mouse_left_drag`, once an actual
+        // `Drag` event proves the pointer moved while the button was
+        // held, toggles the origin row (`started` flips to `true` on that
+        // first event, and the origin row is included in its sweep).
         self.drag = Some(DragState {
             pane,
             origin_index: row,
+            started: false,
+            last_row: row,
+            visited: std::collections::HashSet::new(),
         });
     }
 
-    /// Left-button drag: extends the range-mark from the drag's origin row
-    /// to whatever row the pointer is over now, but *only* while the
-    /// pointer stays within the pane the drag started in — crossing into
-    /// the other pane, or off the entry rows entirely, is simply ignored
-    /// (the mark stops growing, but nothing already marked is undone, and
-    /// focus never changes mid-drag).
+    /// Left-button drag: toggles the mark on every row the pointer sweeps
+    /// over since the last `Drag` event (covering multi-row jumps between
+    /// events, not just the single row each event happens to land on),
+    /// but *only* while the pointer stays within the pane the drag started
+    /// in — crossing into the other pane, or off the entry rows entirely,
+    /// simply stops the sweep from growing (focus never changes
+    /// mid-drag, and nothing already toggled is undone by leaving). Each
+    /// row is toggled *at most once* per drag gesture (`DragState::visited`
+    /// guards this), so sweeping back and forth over the same row doesn't
+    /// flip it repeatedly — this is what makes "drag to deselect" a
+    /// well-defined, idempotent operation rather than something that
+    /// depends on exactly how many `Drag` events the terminal happened to
+    /// send.
     fn handle_mouse_left_drag(&mut self, ev: MouseEvent) {
-        let Some(drag) = self.drag else { return };
-        let Some(layout) = self.pane_layout_for(drag.pane) else {
+        let Some(drag) = &self.drag else { return };
+        let pane = drag.pane;
+        let started = drag.started;
+        let sweep_from = if started {
+            drag.last_row
+        } else {
+            drag.origin_index
+        };
+
+        let Some(layout) = self.pane_layout_for(pane) else {
             return;
         };
         let Some(row) = hit_test_row(layout, ev.column, ev.row) else {
             return;
         };
-        let len = self.panes[drag.pane.index()].visible_entries().len();
+        let len = self.panes[pane.index()].visible_entries().len();
         if row >= len {
             return;
         }
-        let (lo, hi) = if row <= drag.origin_index {
-            (row, drag.origin_index)
+
+        let (lo, hi) = if row <= sweep_from {
+            (row, sweep_from)
         } else {
-            (drag.origin_index, row)
+            (sweep_from, row)
         };
-        for i in lo..=hi {
-            self.panes[drag.pane.index()].mark_index(i, true);
+
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        drag.started = true;
+        drag.last_row = row;
+        let newly_visited: Vec<usize> = (lo..=hi).filter(|i| drag.visited.insert(*i)).collect();
+
+        for i in newly_visited {
+            self.panes[pane.index()].toggle_mark_index(i);
         }
     }
 
@@ -600,10 +662,7 @@ impl App {
                 Ok(())
             }
             Action::Mkdir => {
-                self.mode = Mode::Prompt {
-                    kind: PromptKind::Mkdir,
-                    input: LineEditor::new(),
-                };
+                self.begin_mkdir();
                 Ok(())
             }
             Action::Delete => {
@@ -815,13 +874,49 @@ impl App {
         self.navigate(|pane| pane.jump_to(path));
     }
 
+    /// Guards every action that needs a real filesystem path on the active
+    /// pane and doesn't have virtual-mode semantics of its own (`open`
+    /// and `C`/Copy — repurposed as extract — are the two exceptions,
+    /// handled separately in `begin_open`/`begin_transfer`): logs a
+    /// rejection and returns `true` when the active pane is currently
+    /// browsing inside a `.zip` (Virtual Directory), so the caller can
+    /// bail out early. `label` names the action in the log line (e.g.
+    /// `"rename"`).
+    fn reject_if_virtual(&mut self, label: &str) -> bool {
+        if self.active_pane().is_virtual() {
+            self.log_error(format!(
+                "virtual directory (zip) is read-only: {label} is not available here"
+            ));
+            true
+        } else {
+            false
+        }
+    }
+
     /// `Open`'s dyna-filer behavior (bound to `Enter`/`o` by default, and
     /// the single action `Enter`/`View` used to be split across before
     /// they were merged): `..`/directories navigate (and get recorded in
     /// history via `navigate`); anything else opens in the built-in
     /// viewer.
+    ///
+    /// Virtual Directory (browsing a `.zip` as if it were a directory —
+    /// see `virtual_dir`) hooks into exactly this one function, not a
+    /// parallel code path: a `.zip` *file* under the cursor in a real pane
+    /// enters Virtual Directory mode instead of the viewer; a file inside
+    /// an already-virtual pane extracts to memory and opens the viewer
+    /// instead of reading from disk; `..`/directory navigation is
+    /// unmodified — it already goes through `Pane::enter`, which is
+    /// itself virtual-aware (see `Pane::virtual_descend`/
+    /// `virtual_go_parent`) and never changes `cwd` while virtual, so
+    /// `navigate`'s history bookkeeping silently no-ops for every
+    /// archive-internal move (before == after). A `.zip` found *inside*
+    /// an archive is deliberately not recursed into (no nested Virtual
+    /// Directories) — it just opens in the viewer like any other file,
+    /// which for a zip's own binary content means a hex dump; harmless,
+    /// not an error.
     fn begin_open(&mut self) {
         let pane = self.active_pane();
+        let is_virtual = pane.is_virtual();
         // `..`/directories navigate (via `Pane::enter`, which already
         // handles both — and is a safe no-op on an empty pane); anything
         // else with a real kind (file, symlink) opens instead.
@@ -829,8 +924,46 @@ impl App {
             Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
             _ => None,
         };
+        let archive_path = pane.virtual_dir.as_ref().map(|vd| vd.archive_path.clone());
+        let viewer_cmd = open_path
+            .as_ref()
+            .and_then(|path| extension_viewer_command(&self.config.viewers, path));
+
         match open_path {
-            Some(path) => self.open_viewer(&path),
+            Some(inner_path) if is_virtual => {
+                // External viewers need a real file on disk; a virtual
+                // entry only ever exists as bytes extracted to memory, so
+                // there's nothing to hand an external command — fall back
+                // to the built-in viewer, but only *mention* the fallback
+                // when there actually was a `[viewers]` entry that would
+                // otherwise have applied (silently doing the same thing
+                // as ever for an extension with no entry would just be
+                // noise).
+                if viewer_cmd.is_some() {
+                    self.log_info(format!(
+                        "external viewers don't apply inside archives; opening {} in the built-in viewer",
+                        virtual_dir::inner_display(&inner_path)
+                    ));
+                }
+                if let Some(archive_path) = archive_path {
+                    self.open_viewer_virtual(&archive_path, &inner_path);
+                }
+            }
+            Some(path) if virtual_dir::is_zip_file(&path) => {
+                self.navigate(move |pane| pane.enter_virtual(path));
+            }
+            Some(path) => match viewer_cmd {
+                Some(template) => {
+                    let cwd = self.active_pane().cwd.clone();
+                    let cmdline = external::build_viewer_cmdline(&template, &path);
+                    self.pending_external = Some(ExternalRequest {
+                        cmdline,
+                        cwd,
+                        pause_after: false,
+                    });
+                }
+                None => self.open_viewer(&path),
+            },
             None => self.navigate(|pane| pane.enter()),
         }
     }
@@ -969,6 +1102,9 @@ impl App {
     /// pause — editors already take over the whole screen and hand control
     /// back cleanly on their own.
     fn begin_open_editor(&mut self) {
+        if self.reject_if_virtual("open_editor") {
+            return;
+        }
         let pane = self.active_pane();
         let target = match pane.selected_entry_kind() {
             Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
@@ -1090,6 +1226,9 @@ impl App {
     }
 
     fn begin_open_default(&mut self) {
+        if self.reject_if_virtual("open_default") {
+            return;
+        }
         match self.active_pane().selected_entry_path() {
             Some(path) => self.open_with_default(&path),
             None => self.log_error("no entry selected to open"),
@@ -1121,6 +1260,35 @@ impl App {
                 };
             }
             Err(err) => self.log_error(format!("{}: {err}", path.display())),
+        }
+    }
+
+    /// The Virtual Directory counterpart of `open_viewer`: extracts
+    /// `inner_path` from `archive_path` fully into memory (capped at
+    /// `viewer::SIZE_CAP`, same as any other viewer open) rather than
+    /// reading from a real file path — a genuinely encrypted entry
+    /// surfaces as a plain load error here, same treatment as any other
+    /// unreadable entry.
+    fn open_viewer_virtual(&mut self, archive_path: &Path, inner_path: &Path) {
+        match virtual_dir::extract_single_to_memory(archive_path, inner_path, viewer::SIZE_CAP) {
+            Ok((bytes, truncated)) => {
+                let loaded = viewer::load_bytes(bytes, truncated);
+                let archive_name = archive_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| archive_path.display().to_string());
+                let label = format!("{archive_name}:{}", virtual_dir::inner_display(inner_path));
+                self.mode = Mode::Viewer {
+                    path: PathBuf::from(label),
+                    lines: loaded.lines,
+                    bytes: loaded.bytes,
+                    view_mode: loaded.initial_mode,
+                    scroll: 0,
+                    h_scroll: 0,
+                    truncated: loaded.truncated,
+                };
+            }
+            Err(err) => self.log_error(format!("{}: {err}", inner_path.display())),
         }
     }
 
@@ -1252,11 +1420,21 @@ impl App {
     /// silently ignores it (no reliable way to detect support up front),
     /// so this always logs success rather than trying to guess.
     fn begin_copy_path(&mut self) {
-        let Some(path) = self.active_pane().selected_entry_path() else {
+        let pane = self.active_pane();
+        let Some(path) = pane.selected_entry_path() else {
             self.log_error("no entry selected to copy the path of");
             return;
         };
-        let text = path.to_string_lossy().into_owned();
+        // Non-mutating, so unlike the rename/delete/etc. family this
+        // isn't rejected in a virtual pane — but `path` there is only an
+        // archive-internal path (`Pane::virtual_dir`'s doc comment), not a
+        // real absolute one, so it's formatted the same way the pane
+        // header is (`archive.zip:/inner/path`) rather than misleadingly
+        // presented as a real filesystem path.
+        let text = match &pane.virtual_dir {
+            Some(vd) => format!("{}:{}", vd.archive_name, virtual_dir::inner_display(&path)),
+            None => path.to_string_lossy().into_owned(),
+        };
         self.pending_clipboard = Some(text.clone());
         self.log_info(format!("copied: {text}"));
     }
@@ -1267,6 +1445,9 @@ impl App {
     /// Copy/Move, so a large directory duplicates asynchronously with
     /// progress too.
     fn begin_duplicate(&mut self) {
+        if self.reject_if_virtual("duplicate") {
+            return;
+        }
         let Some(name) = self.active_pane().selected_entry_name() else {
             self.log_error("no entry selected to duplicate");
             return;
@@ -1404,7 +1585,20 @@ impl App {
         *cursor = 0;
     }
 
+    fn begin_mkdir(&mut self) {
+        if self.reject_if_virtual("mkdir") {
+            return;
+        }
+        self.mode = Mode::Prompt {
+            kind: PromptKind::Mkdir,
+            input: LineEditor::new(),
+        };
+    }
+
     fn begin_rename(&mut self) {
+        if self.reject_if_virtual("rename") {
+            return;
+        }
         match self.active_pane().selected_entry_name() {
             Some(name) => {
                 self.mode = Mode::Prompt {
@@ -1417,6 +1611,9 @@ impl App {
     }
 
     fn begin_delete(&mut self) {
+        if self.reject_if_virtual("delete") {
+            return;
+        }
         let targets = self.active_pane().marked_or_cursor();
         if targets.is_empty() {
             self.log_error("no entry selected to delete");
@@ -1436,6 +1633,27 @@ impl App {
     /// (`Copy 3 item(s) -> /dest? (2 will be overwritten) (y/n)`) rather
     /// than two sequential ones.
     fn begin_transfer(&mut self, kind: TransferKind) {
+        // Virtual Directory: `C` (Copy) is repurposed as extract (dyna's
+        // "select + Copy = partial extraction" — see `begin_extract`);
+        // `M` (Move) has no virtual-mode meaning at all ("move INTO/OUT-as-
+        // move" is explicitly rejected) and always bails. Copying/moving
+        // INTO a virtual pane (the *other* pane is the one browsing a
+        // zip) is rejected the same way regardless of direction — there's
+        // no real directory there to write into.
+        if self.active_pane().is_virtual() {
+            match kind {
+                TransferKind::Copy => self.begin_extract(),
+                TransferKind::Move => {
+                    self.reject_if_virtual("move");
+                }
+            }
+            return;
+        }
+        if self.panes[self.active.other().index()].is_virtual() {
+            self.log_error("cannot copy/move into a virtual directory (zip) pane");
+            return;
+        }
+
         let sources = self.active_pane().marked_or_cursor();
         if sources.is_empty() {
             self.log_error("no entry selected");
@@ -1641,6 +1859,9 @@ impl App {
     /// Opens the zip-name prompt for the active pane's marked-or-cursor
     /// selection, pre-filled with `<first-target-stem>.zip`.
     fn begin_zip(&mut self) {
+        if self.reject_if_virtual("zip_marked") {
+            return;
+        }
         let targets = self.active_pane().marked_or_cursor();
         if targets.is_empty() {
             self.log_error("no entry selected to zip");
@@ -1674,6 +1895,9 @@ impl App {
     /// The cursor entry must be a `.zip` file; extracts into the other
     /// pane's cwd, confirming first if any top-level entry would collide.
     fn begin_unzip(&mut self) {
+        if self.reject_if_virtual("unzip") {
+            return;
+        }
         let Some(name) = self.active_pane().selected_entry_name() else {
             self.log_error("no entry selected to unzip");
             return;
@@ -1711,6 +1935,74 @@ impl App {
         });
     }
 
+    /// `C` while the active pane is a Virtual Directory: dyna's "select +
+    /// Copy = partial extraction". `inner_targets` (marks-or-cursor) are
+    /// archive-internal paths, extracted into the *other* pane's real
+    /// cwd — already confirmed by `begin_transfer` to not itself be
+    /// virtual before this is ever called. Same confirm-before-overwrite
+    /// posture as a real Copy/Move (`config.confirm_operations`, always
+    /// confirming on an actual collision).
+    fn begin_extract(&mut self) {
+        let inner_targets = self.active_pane().marked_or_cursor();
+        if inner_targets.is_empty() {
+            self.log_error("no entry selected to extract");
+            return;
+        }
+        let Some(archive_path) = self
+            .active_pane()
+            .virtual_dir
+            .as_ref()
+            .map(|vd| vd.archive_path.clone())
+        else {
+            return; // defensive: begin_transfer already checked is_virtual()
+        };
+        let dest_dir = self.panes[self.active.other().index()].cwd.clone();
+
+        let collisions = archive::extract_collisions(&inner_targets, &dest_dir);
+        if collisions.is_empty() && !self.config.confirm_operations {
+            self.spawn_extract(archive_path, inner_targets, dest_dir);
+            return;
+        }
+
+        let mut message = format!(
+            "Extract {} item(s) -> {}?",
+            inner_targets.len(),
+            dest_dir.display()
+        );
+        if !collisions.is_empty() {
+            message.push_str(&format!(" ({} will be overwritten)", collisions.len()));
+        }
+        message.push_str(" (y/n)");
+
+        self.mode = Mode::Confirm {
+            message,
+            on_yes: PendingOp::Extract {
+                archive_path,
+                inner_targets,
+                dest_dir,
+            },
+        };
+    }
+
+    /// Hands the actual extraction off to a background task (see
+    /// `tasks::archive::run_extract`); see `spawn_transfer` for the
+    /// completion story.
+    fn spawn_extract(
+        &mut self,
+        archive_path: PathBuf,
+        inner_targets: Vec<PathBuf>,
+        dest_dir: PathBuf,
+    ) {
+        let desc = format!(
+            "extract {} item(s) to {}",
+            inner_targets.len(),
+            dest_dir.display()
+        );
+        self.tasks.spawn(desc, move |id, tx, cancel| {
+            archive::run_extract(id, tx, cancel, archive_path, inner_targets, dest_dir);
+        });
+    }
+
     /// Fixed confirmation keys for `Mode::Confirm`; never consults the
     /// keymap. `y`/`Y` executes the pending op, anything else (including
     /// Esc) cancels.
@@ -1743,6 +2035,11 @@ impl App {
                 archive_path,
                 dest_dir,
             } => self.spawn_unzip(archive_path, dest_dir),
+            PendingOp::Extract {
+                archive_path,
+                inner_targets,
+                dest_dir,
+            } => self.spawn_extract(archive_path, inner_targets, dest_dir),
             PendingOp::Quit => self.should_quit = true,
         }
     }
@@ -3571,14 +3868,58 @@ mod tests {
     }
 
     #[test]
-    fn drag_across_multiple_rows_marks_every_row_swept_over() {
+    fn drag_across_multiple_rows_toggles_every_row_swept_over_on() {
+        // Screen rows 2/3/4 map to visible indices 1/2/3 = c_dir/a.txt/b.txt
+        // (index 0 is the ".." row); rows_area starts at screen y=1.
+        let (dir, mut app) = mouse_test_app();
+        click(&mut app, 5, 2); // origin: c_dir, not yet toggled (no drag yet)
+        drag(&mut app, 5, 4); // sweep down through a.txt to b.txt
+        release(&mut app, 5, 4);
+
+        let marks = &app.panes[0].marks;
+        assert_eq!(marks.len(), 3, "marks: {marks:?}");
+        assert!(marks.contains(&dir.path().join("c_dir")));
+        assert!(marks.contains(&dir.path().join("a.txt")));
+        assert!(marks.contains(&dir.path().join("b.txt")));
+    }
+
+    #[test]
+    fn dragging_over_already_marked_rows_toggles_them_back_off() {
         let (_dir, mut app) = mouse_test_app();
-        click(&mut app, 5, 1); // origin: row index 0 (the ".." row's real
-        // sibling, or ".." itself — either way, drag from here)
-        drag(&mut app, 5, 3); // sweep down to row index 2
+        // First gesture: mark c_dir and a.txt.
+        click(&mut app, 5, 2);
+        drag(&mut app, 5, 3);
         release(&mut app, 5, 3);
-        let marked = app.panes[0].marks.len();
-        assert!(marked >= 1, "expected at least one row marked by the drag");
+        assert_eq!(app.panes[0].marks.len(), 2);
+
+        // Second, independent gesture over the exact same rows: toggling
+        // an already-marked row must unmark it — "drag to deselect".
+        click(&mut app, 5, 2);
+        drag(&mut app, 5, 3);
+        release(&mut app, 5, 3);
+
+        assert!(
+            app.panes[0].marks.is_empty(),
+            "marks: {:?}",
+            app.panes[0].marks
+        );
+    }
+
+    #[test]
+    fn revisiting_the_same_row_within_one_drag_does_not_flip_it_back() {
+        let (dir, mut app) = mouse_test_app();
+        click(&mut app, 5, 2); // origin: c_dir (index 1), not toggled yet
+        drag(&mut app, 5, 3); // sweep to a.txt (index 2): toggles c_dir + a.txt ON
+        drag(&mut app, 5, 2); // sweep back over c_dir again: must NOT re-toggle it off
+        release(&mut app, 5, 2);
+
+        let marks = &app.panes[0].marks;
+        assert_eq!(marks.len(), 2, "marks: {marks:?}");
+        assert!(
+            marks.contains(&dir.path().join("c_dir")),
+            "revisiting c_dir mid-drag must not flip it back off"
+        );
+        assert!(marks.contains(&dir.path().join("a.txt")));
     }
 
     #[test]
@@ -3642,5 +3983,360 @@ mod tests {
         });
         assert!(app.panes[1].cursor > 0);
         assert_eq!(app.active, ActivePane::Left);
+    }
+
+    // --- Virtual Directory (browsing a .zip via `open`) -------------------
+
+    fn make_test_archive(dir: &Path) -> PathBuf {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+
+        let archive_path = dir.join("project.zip");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        writer.start_file("readme.txt", options).unwrap();
+        writer.write_all(b"hello from inside the zip").unwrap();
+        writer.start_file("src/main.rs", options).unwrap();
+        writer.write_all(b"fn main() {}").unwrap();
+        writer.finish().unwrap();
+        archive_path
+    }
+
+    /// Moves the cursor onto the visible entry named `name`, panicking if
+    /// it isn't currently visible — used throughout these tests instead of
+    /// hardcoding row indices, which would silently break if sort order
+    /// or the parent-row rule ever changes.
+    fn move_cursor_onto(pane: &mut Pane, name: &str) {
+        let idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == name))
+            .unwrap_or_else(|| panic!("{name} not visible"));
+        pane.cursor = idx;
+    }
+
+    #[test]
+    fn open_on_a_zip_file_enters_virtual_directory_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+
+        app.dispatch(Action::Open);
+
+        let pane = app.active_pane();
+        assert!(pane.is_virtual());
+        assert_eq!(
+            pane.cwd,
+            dir.path(),
+            "cwd must stay the real containing dir"
+        );
+        let names: Vec<String> = pane
+            .visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                crate::pane::VisibleItem::Entry(e) => Some(e.name.clone()),
+                crate::pane::VisibleItem::Parent => None,
+            })
+            .collect();
+        assert!(names.contains(&"readme.txt".to_string()));
+        assert!(names.contains(&"src".to_string()));
+    }
+
+    #[test]
+    fn virtual_directory_navigation_descends_and_exits_with_cursor_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+        assert!(app.active_pane().is_virtual());
+
+        // Descend into "src".
+        move_cursor_onto(app.active_pane_mut(), "src");
+        app.dispatch(Action::Open);
+        assert!(app.active_pane().is_virtual());
+        assert!(
+            app.active_pane().visible_entries().iter().any(
+                |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "main.rs")
+            )
+        );
+
+        // Backspace back up to the archive root.
+        app.dispatch(Action::Parent);
+        assert!(app.active_pane().is_virtual());
+        assert!(app.active_pane().visible_entries().iter().any(
+            |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "readme.txt")
+        ));
+
+        // Backspace again exits Virtual Directory mode, cursor lands back
+        // on the .zip file itself.
+        app.dispatch(Action::Parent);
+        let pane = app.active_pane();
+        assert!(!pane.is_virtual());
+        assert_eq!(pane.cwd, dir.path());
+        match pane.visible_entries().get(pane.cursor) {
+            Some(crate::pane::VisibleItem::Entry(e)) => assert_eq!(e.name, "project.zip"),
+            other => panic!("expected cursor to rest on project.zip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_via_copy_copies_marked_entry_to_the_other_panes_real_cwd() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        make_test_archive(src_dir.path());
+        let mut app = test_app(src_dir.path(), dest_dir.path());
+
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+        assert!(app.active_pane().is_virtual());
+
+        move_cursor_onto(app.active_pane_mut(), "readme.txt");
+        app.config.confirm_operations = false;
+        app.dispatch(Action::Copy);
+        wait_for_tasks_done(&mut app);
+
+        assert_eq!(
+            std::fs::read(dest_dir.path().join("readme.txt")).unwrap(),
+            b"hello from inside the zip"
+        );
+    }
+
+    #[test]
+    fn extract_via_copy_of_a_directory_extracts_the_whole_subtree() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        make_test_archive(src_dir.path());
+        let mut app = test_app(src_dir.path(), dest_dir.path());
+
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+        move_cursor_onto(app.active_pane_mut(), "src");
+        app.config.confirm_operations = false;
+        app.dispatch(Action::Copy);
+        wait_for_tasks_done(&mut app);
+
+        assert_eq!(
+            std::fs::read(dest_dir.path().join("src/main.rs")).unwrap(),
+            b"fn main() {}"
+        );
+    }
+
+    #[test]
+    fn move_is_rejected_inside_a_virtual_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+        move_cursor_onto(app.active_pane_mut(), "readme.txt");
+
+        app.dispatch(Action::Move);
+
+        assert!(app.log.back().unwrap().is_error);
+        assert!(app.tasks.running.is_empty(), "must not have spawned a move");
+    }
+
+    #[test]
+    fn mutating_actions_are_all_rejected_inside_a_virtual_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+
+        for action in [
+            Action::Rename,
+            Action::Mkdir,
+            Action::Delete,
+            Action::Duplicate,
+            Action::ZipMarked,
+            Action::Unzip,
+            Action::OpenEditor,
+            Action::OpenDefault,
+        ] {
+            let mut app = test_app(dir.path(), dir.path());
+            move_cursor_onto(app.active_pane_mut(), "project.zip");
+            app.dispatch(Action::Open);
+            move_cursor_onto(app.active_pane_mut(), "readme.txt");
+
+            app.dispatch(action);
+
+            assert!(
+                app.log.back().unwrap().is_error,
+                "{action:?} must log a rejection in a virtual pane"
+            );
+            assert!(
+                matches!(app.mode, Mode::Normal),
+                "{action:?} must not open a prompt/confirm"
+            );
+        }
+    }
+
+    #[test]
+    fn open_on_a_text_file_inside_a_virtual_directory_opens_the_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+        move_cursor_onto(app.active_pane_mut(), "readme.txt");
+
+        app.dispatch(Action::Open);
+
+        match &app.mode {
+            Mode::Viewer { lines, .. } => {
+                assert_eq!(lines.join("\n"), "hello from inside the zip");
+            }
+            other => panic!("expected Mode::Viewer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_and_sort_work_on_a_virtual_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+        let mut app = test_app(dir.path(), dir.path());
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+
+        app.active_pane_mut()
+            .set_filter(FilterSpec::parse("readme"));
+        let names: Vec<String> = app
+            .active_pane()
+            .visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                crate::pane::VisibleItem::Entry(e) => Some(e.name.clone()),
+                crate::pane::VisibleItem::Parent => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["readme.txt".to_string()]);
+
+        app.active_pane_mut().set_filter(None);
+        app.active_pane_mut().cycle_sort();
+        // Sorting must not panic/crash on a virtual listing; the exact
+        // resulting order isn't the point of this test.
+        assert!(!app.active_pane().visible_entries().is_empty());
+    }
+
+    #[test]
+    fn jump_to_a_bookmark_exits_virtual_directory_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+        let other_dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+        assert!(app.active_pane().is_virtual());
+
+        app.jump_active_pane_to(other_dir.path().to_path_buf());
+
+        assert!(!app.active_pane().is_virtual());
+        assert_eq!(app.active_pane().cwd, other_dir.path());
+    }
+
+    // --- Per-extension external viewers ([viewers]) -----------------------
+
+    #[test]
+    fn extension_viewer_command_matches_case_insensitively_on_a_dotless_key() {
+        let mut viewers = std::collections::HashMap::new();
+        viewers.insert("md".to_string(), "glow {}".to_string());
+
+        assert_eq!(
+            extension_viewer_command(&viewers, Path::new("readme.md")),
+            Some("glow {}".to_string())
+        );
+        assert_eq!(
+            extension_viewer_command(&viewers, Path::new("readme.MD")),
+            Some("glow {}".to_string())
+        );
+        assert_eq!(
+            extension_viewer_command(&viewers, Path::new("readme.txt")),
+            None
+        );
+        assert_eq!(
+            extension_viewer_command(&viewers, Path::new("readme")),
+            None
+        );
+    }
+
+    #[test]
+    fn open_on_a_file_with_a_configured_viewer_queues_an_external_command() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.md"), b"# hi").unwrap();
+        let mut viewers = std::collections::HashMap::new();
+        viewers.insert("md".to_string(), "glow {}".to_string());
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                viewers,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        move_cursor_onto(app.active_pane_mut(), "readme.md");
+
+        app.dispatch(Action::Open);
+
+        let req = app
+            .pending_external
+            .as_ref()
+            .expect("expected a queued external viewer command");
+        assert!(req.cmdline.starts_with("glow "));
+        assert!(req.cmdline.contains("readme.md"));
+        assert!(!req.pause_after);
+        assert_eq!(req.cwd, dir.path());
+        // The built-in viewer must not have opened instead.
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn open_on_a_file_without_a_configured_viewer_falls_back_to_the_built_in_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.txt"), b"hello").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        move_cursor_onto(app.active_pane_mut(), "readme.txt");
+
+        app.dispatch(Action::Open);
+
+        assert!(app.pending_external.is_none());
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+    }
+
+    #[test]
+    fn open_on_an_archived_file_with_a_configured_viewer_falls_back_to_the_built_in_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        make_test_archive(dir.path());
+        let mut viewers = std::collections::HashMap::new();
+        viewers.insert("txt".to_string(), "less {}".to_string());
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                viewers,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        move_cursor_onto(app.active_pane_mut(), "project.zip");
+        app.dispatch(Action::Open);
+        move_cursor_onto(app.active_pane_mut(), "readme.txt");
+
+        app.dispatch(Action::Open);
+
+        assert!(
+            app.pending_external.is_none(),
+            "external viewers must never fire on a virtual (in-archive) entry"
+        );
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+        assert!(
+            app.log
+                .back()
+                .unwrap()
+                .message
+                .contains("don't apply inside archives")
+        );
     }
 }

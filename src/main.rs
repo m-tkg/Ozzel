@@ -16,6 +16,7 @@ mod persist;
 mod tasks;
 mod ui;
 mod viewer;
+mod virtual_dir;
 
 use std::io::{self, Stdout, Write as _};
 use std::panic;

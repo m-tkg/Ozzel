@@ -345,6 +345,172 @@ fn is_valid_utf8_name(name_raw: &[u8]) -> bool {
     std::str::from_utf8(name_raw).is_ok()
 }
 
+// ---------------------------------------------------------------------
+// Extract (Virtual Directory partial extraction — `C` inside a `.zip`)
+// ---------------------------------------------------------------------
+
+/// Top-level destination-name collisions for a Virtual Directory
+/// extraction, for a pre-extract Confirm — pure and archive-I/O-free
+/// (unlike `top_level_collisions`, which has to open the archive to learn
+/// each entry's own top component): `inner_targets` already *are* each
+/// target's own top-level name (its `file_name()`), since extraction
+/// always lands each target directly under `dest_dir` by that name.
+pub fn extract_collisions(inner_targets: &[PathBuf], dest_dir: &Path) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut collisions = Vec::new();
+    for target in inner_targets {
+        let Some(name) = target.file_name() else {
+            continue;
+        };
+        let dest = dest_dir.join(name);
+        if seen.insert(dest.clone()) && dest.exists() {
+            collisions.push(dest);
+        }
+    }
+    collisions
+}
+
+/// Worker entry point for a Virtual Directory extraction; matches the
+/// `TaskManager::spawn` closure signature. `inner_targets` are
+/// archive-internal paths (from the virtual pane's marks-or-cursor) —
+/// each one lands under `dest_dir` by its own `file_name()`, a file
+/// extracted directly or a directory extracted as the whole subtree under
+/// it (matching dyna-filer's "select + Copy = partial extraction").
+pub fn run_extract(
+    id: TaskId,
+    tx: Sender<TaskEvent>,
+    cancel: Arc<AtomicBool>,
+    archive_path: PathBuf,
+    inner_targets: Vec<PathBuf>,
+    dest_dir: PathBuf,
+) {
+    let result = run_extract_inner(id, &tx, &cancel, &archive_path, &inner_targets, &dest_dir);
+    let outcome = match result {
+        Ok(count) => Ok(format!(
+            "extracted {count} file(s) to {}",
+            dest_dir.display()
+        )),
+        Err(err) => Err(err.to_string()),
+    };
+    let _ = tx.send(TaskEvent::Finished {
+        id,
+        result: outcome,
+    });
+}
+
+/// One planned extraction step: which archive entry (`index`) lands at
+/// which real `dest` path, and whether it's a directory (just needs
+/// creating) or a file (needs its content copied out).
+struct ExtractPlan {
+    index: usize,
+    dest: PathBuf,
+    is_dir: bool,
+}
+
+fn run_extract_inner(
+    id: TaskId,
+    tx: &Sender<TaskEvent>,
+    cancel: &Arc<AtomicBool>,
+    archive_path: &Path,
+    inner_targets: &[PathBuf],
+    dest_dir: &Path,
+) -> anyhow::Result<usize> {
+    let file = fs::File::open(archive_path)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    // Every safely-named entry's (enclosed_name, index), read once via the
+    // metadata-only `by_index_raw` (see `virtual_dir::read_zip_dir_entries`'s
+    // doc comment on why: this must work even for a password-protected
+    // archive, since matching *names* against `inner_targets` needs no
+    // decryption — only the later per-file `by_index` read does, and that's
+    // exactly where a "password required" error should surface).
+    let mut safe_entries: Vec<(PathBuf, usize)> = Vec::new();
+    for i in 0..archive.len() {
+        let raw = archive.by_index_raw(i)?;
+        if let Some(name) = raw.enclosed_name() {
+            safe_entries.push((name, i));
+        }
+    }
+
+    let mut plan: Vec<ExtractPlan> = Vec::new();
+    for target in inner_targets {
+        let dest_name = target
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| target.clone());
+        let mut matched_any = false;
+
+        for (name, index) in &safe_entries {
+            let dest = if name == target {
+                dest_dir.join(&dest_name)
+            } else if let Ok(rel) = name.strip_prefix(target) {
+                if rel.as_os_str().is_empty() {
+                    continue; // same entry as the `name == target` case above
+                }
+                dest_dir.join(&dest_name).join(rel)
+            } else {
+                continue;
+            };
+            matched_any = true;
+            let is_dir = archive.by_index_raw(*index)?.is_dir();
+            plan.push(ExtractPlan {
+                index: *index,
+                dest,
+                is_dir,
+            });
+        }
+
+        if !matched_any {
+            let _ = tx.send(TaskEvent::Log {
+                id,
+                line: format!("{}: not found in archive, skipped", target.display()),
+            });
+        }
+    }
+
+    let total = plan.iter().filter(|p| !p.is_dir).count() as u64;
+    let mut throttle = Throttle::new(PROGRESS_MIN_INTERVAL);
+    let mut done = 0u64;
+    let mut extracted = 0usize;
+
+    for p in &plan {
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+
+        if p.is_dir {
+            fs::create_dir_all(&p.dest)?;
+            continue;
+        }
+        if let Some(parent) = p.dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut entry = archive.by_index(p.index)?;
+        let mut out = fs::File::create(&p.dest)?;
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        loop {
+            let n = entry.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+        }
+        extracted += 1;
+
+        done += 1;
+        if throttle.allow(Instant::now()) {
+            let _ = tx.send(TaskEvent::Progress {
+                id,
+                done,
+                total,
+                detail: p.dest.display().to_string(),
+            });
+        }
+    }
+
+    Ok(extracted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +683,150 @@ mod tests {
             }) => assert_eq!(msg, "cancelled"),
             other => panic!("expected Finished(Err(\"cancelled\")), got {other:?}"),
         }
+    }
+
+    fn make_virtual_test_archive() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("project.zip");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        writer.start_file("readme.txt", options).unwrap();
+        writer.write_all(b"hello").unwrap();
+        writer.start_file("src/main.rs", options).unwrap();
+        writer.write_all(b"fn main() {}").unwrap();
+        writer.start_file("src/nested/deep.txt", options).unwrap();
+        writer.write_all(b"deep").unwrap();
+        writer.finish().unwrap();
+        (dir, archive_path)
+    }
+
+    #[test]
+    fn extract_collisions_reports_existing_names_only() {
+        let dest_dir = tempfile::tempdir().unwrap();
+        fs::write(dest_dir.path().join("readme.txt"), b"already here").unwrap();
+
+        let targets = vec![PathBuf::from("readme.txt"), PathBuf::from("src")];
+        let collisions = extract_collisions(&targets, dest_dir.path());
+        assert_eq!(collisions, vec![dest_dir.path().join("readme.txt")]);
+    }
+
+    #[test]
+    fn run_extract_extracts_a_single_file() {
+        let (_dir, archive_path) = make_virtual_test_archive();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let id = TaskId::next();
+        run_extract(
+            id,
+            tx,
+            cancel,
+            archive_path,
+            vec![PathBuf::from("readme.txt")],
+            dest_dir.path().to_path_buf(),
+        );
+
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert_eq!(
+            fs::read(dest_dir.path().join("readme.txt")).unwrap(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn run_extract_extracts_a_whole_subtree_under_its_own_name() {
+        let (_dir, archive_path) = make_virtual_test_archive();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let id = TaskId::next();
+        run_extract(
+            id,
+            tx,
+            cancel,
+            archive_path,
+            vec![PathBuf::from("src")],
+            dest_dir.path().to_path_buf(),
+        );
+
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert_eq!(
+            fs::read(dest_dir.path().join("src/main.rs")).unwrap(),
+            b"fn main() {}"
+        );
+        assert_eq!(
+            fs::read(dest_dir.path().join("src/nested/deep.txt")).unwrap(),
+            b"deep"
+        );
+    }
+
+    #[test]
+    fn run_extract_logs_and_skips_a_target_missing_from_the_archive() {
+        let (_dir, archive_path) = make_virtual_test_archive();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let id = TaskId::next();
+        run_extract(
+            id,
+            tx,
+            cancel,
+            archive_path,
+            vec![PathBuf::from("nope.txt")],
+            dest_dir.path().to_path_buf(),
+        );
+
+        let events = drain(&rx);
+        assert!(events.iter().any(
+            |e| matches!(e, TaskEvent::Log { line, .. } if line.contains("not found in archive"))
+        ));
+    }
+
+    #[test]
+    fn run_extract_rejects_zip_slip_entries_within_the_extracted_subtree() {
+        // A malicious archive whose only entry under the target directory
+        // is a zip-slip path — `enclosed_name()` filters it out of
+        // `safe_entries` entirely, so it must simply never be extracted.
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("evil.zip");
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut writer = ZipWriter::new(file);
+            let options = SimpleFileOptions::default();
+            writer.start_file("safe/../../evil.txt", options).unwrap();
+            writer.write_all(b"pwned").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let id = TaskId::next();
+        run_extract(
+            id,
+            tx,
+            cancel,
+            archive_path,
+            vec![PathBuf::from("safe")],
+            dest_dir.path().to_path_buf(),
+        );
+        let _ = drain(&rx);
+
+        assert!(
+            !dest_dir.path().parent().unwrap().join("evil.txt").exists(),
+            "zip-slip entry must never be written outside dest_dir"
+        );
+        let dest_entries: Vec<_> = fs::read_dir(dest_dir.path()).unwrap().collect();
+        assert!(dest_entries.is_empty());
     }
 }

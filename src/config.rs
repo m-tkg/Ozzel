@@ -224,6 +224,12 @@ pub struct Config {
     /// listed here wins if both sections mention it. There's no `"none"`
     /// here — unbinding stays `[keys]`'s job.
     pub bindings: HashMap<String, Vec<String>>,
+    /// `extension (lowercase, no dot) -> shell command template`; consulted
+    /// by `open` (only) before falling back to the built-in viewer — see
+    /// `App::begin_open`/`external::build_viewer_cmdline` for the `{}`
+    /// substitution rule. Empty by default, meaning every file opens in
+    /// the built-in viewer as before.
+    pub viewers: HashMap<String, String>,
     pub colors: ColorsConfig,
 }
 
@@ -240,6 +246,7 @@ impl Default for Config {
             mouse: default_mouse(),
             keys: HashMap::new(),
             bindings: HashMap::new(),
+            viewers: HashMap::new(),
             colors: ColorsConfig::default(),
         }
     }
@@ -471,6 +478,24 @@ mod tests {
     fn bindings_section_absent_is_empty() {
         let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
         assert!(config.bindings.is_empty());
+    }
+
+    #[test]
+    fn viewers_section_parses_extension_to_command() {
+        let toml_text = r#"
+            [viewers]
+            md = "glow {}"
+            log = "less {}"
+        "#;
+        let config: Config = toml::from_str(toml_text).unwrap();
+        assert_eq!(config.viewers.get("md"), Some(&"glow {}".to_string()));
+        assert_eq!(config.viewers.get("log"), Some(&"less {}".to_string()));
+    }
+
+    #[test]
+    fn viewers_section_absent_is_empty() {
+        let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
+        assert!(config.viewers.is_empty());
     }
 
     #[test]

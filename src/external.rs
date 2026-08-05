@@ -4,7 +4,7 @@
 //! already take over the whole screen and return control cleanly).
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -50,6 +50,21 @@ pub fn shell_quote(s: &str) -> String {
     }
     quoted.push('\'');
     quoted
+}
+
+/// Builds the shell command line for a per-extension external viewer
+/// (`[viewers]`, consulted by `open` — see `App::begin_open`): substitutes
+/// every `{}` in `template` with `path` (shell-quoted), or — when
+/// `template` contains no `{}` at all — appends the quoted path to the
+/// end, so both `"glow {}"` and a bare `"less"` work as configured
+/// commands.
+pub fn build_viewer_cmdline(template: &str, path: &Path) -> String {
+    let quoted = shell_quote(&path.to_string_lossy());
+    if template.contains("{}") {
+        template.replace("{}", &quoted)
+    } else {
+        format!("{template} {quoted}")
+    }
 }
 
 /// Resolves the shell program + args used to run `cmdline` on this
@@ -332,6 +347,30 @@ mod tests {
     #[test]
     fn shell_quote_escapes_embedded_single_quotes() {
         assert_eq!(shell_quote("it's here.txt"), r"'it'\''s here.txt'");
+    }
+
+    #[test]
+    fn build_viewer_cmdline_substitutes_curly_braces() {
+        let cmdline = build_viewer_cmdline("glow {}", Path::new("/tmp/readme.md"));
+        assert_eq!(cmdline, "glow '/tmp/readme.md'");
+    }
+
+    #[test]
+    fn build_viewer_cmdline_substitutes_multiple_curly_braces() {
+        let cmdline = build_viewer_cmdline("cp {} {}.bak", Path::new("/tmp/a.txt"));
+        assert_eq!(cmdline, "cp '/tmp/a.txt' '/tmp/a.txt'.bak");
+    }
+
+    #[test]
+    fn build_viewer_cmdline_appends_the_path_when_there_is_no_curly_braces() {
+        let cmdline = build_viewer_cmdline("less", Path::new("/tmp/readme.md"));
+        assert_eq!(cmdline, "less '/tmp/readme.md'");
+    }
+
+    #[test]
+    fn build_viewer_cmdline_quotes_a_path_with_spaces() {
+        let cmdline = build_viewer_cmdline("open {}", Path::new("/tmp/my file.jpg"));
+        assert_eq!(cmdline, "open '/tmp/my file.jpg'");
     }
 
     #[test]

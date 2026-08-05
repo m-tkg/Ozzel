@@ -19,6 +19,7 @@ use crate::entry::EntryKind;
 #[cfg(test)]
 use crate::entry::FsEntry;
 use crate::pane::{Pane, VisibleItem};
+use crate::virtual_dir;
 
 const MARK_COL_WIDTH: usize = 1;
 const SIZE_COL_WIDTH: usize = 9;
@@ -89,7 +90,10 @@ pub fn render(
     // (see `wrap_header_lines`'s doc comment for the full policy,
     // including the last-resort left-truncation case).
     let title_budget = (area.width.saturating_sub(2) as usize).max(1); // account for the two border corners
-    let mut title_source = pane.cwd.display().to_string();
+    let mut title_source = match &pane.virtual_dir {
+        Some(vd) => virtual_dir::header_label(vd),
+        None => pane.cwd.display().to_string(),
+    };
     if let Some(filter) = &pane.filter {
         title_source.push_str(&format!(" [flt: {}]", filter.raw));
     }

@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use crate::entry::{EntryKind, FsEntry, read_dir_entries};
 use crate::filter::FilterSpec;
+use crate::virtual_dir::{self, VirtualDir};
 
 /// How many rows a PageUp/PageDown jumps. Phase 2+ may make this track the
 /// actual rendered viewport height; a fixed constant is enough for MVP
@@ -77,6 +78,15 @@ pub struct Pane {
     /// every *new* cwd change (going somewhere new invalidates "forward",
     /// same as a real browser).
     pub forward: Vec<PathBuf>,
+    /// `Some` when this pane is browsing inside a `.zip` archive as a
+    /// Virtual Directory (dyna-filer's feature of the same name) instead
+    /// of a real directory — see `virtual_dir`'s module doc comment for
+    /// the overall design. `cwd` is deliberately left pointing at the real
+    /// directory containing the archive the whole time a pane is virtual
+    /// (nothing about entering/navigating/leaving one ever changes it),
+    /// which is what makes every other cwd-keyed mechanism (history,
+    /// `App::navigate`, `:`'s cwd) keep working unmodified.
+    pub virtual_dir: Option<VirtualDir>,
 }
 
 impl Pane {
@@ -93,14 +103,30 @@ impl Pane {
             filter: None,
             back: Vec::new(),
             forward: Vec::new(),
+            virtual_dir: None,
         };
         pane.reload()?;
         Ok(pane)
     }
 
-    /// Re-reads `cwd` from disk, keeping the cursor in bounds.
+    /// True while this pane is browsing inside a `.zip` archive (Virtual
+    /// Directory) rather than a real directory. `App` consults this to
+    /// gate every action that needs a real filesystem path and doesn't
+    /// have its own virtual-mode meaning (rename/mkdir/delete/move/
+    /// duplicate/zip/unzip/open_editor/open_default) — see
+    /// `App::reject_if_virtual`.
+    pub fn is_virtual(&self) -> bool {
+        self.virtual_dir.is_some()
+    }
+
+    /// Re-reads the current listing, keeping the cursor in bounds: from
+    /// disk for a real pane, or from the archive's central directory at
+    /// the current inner level for a virtual one.
     pub fn reload(&mut self) -> Result<()> {
-        self.entries = read_dir_entries(&self.cwd)?;
+        self.entries = match &self.virtual_dir {
+            Some(vd) => virtual_dir::read_zip_dir_entries(&vd.archive_path, &vd.inner)?,
+            None => read_dir_entries(&self.cwd)?,
+        };
         self.clamp_cursor();
         Ok(())
     }
@@ -149,7 +175,12 @@ impl Pane {
         });
 
         let mut items = Vec::with_capacity(indices.len() + 1);
-        if !self.is_root() {
+        // A virtual pane always shows ".." regardless of the real `cwd`'s
+        // root-ness: at the archive root, ".." is what exits back to the
+        // real directory (see `virtual_go_parent`), which is always
+        // possible even if `cwd` itself happens to be the filesystem
+        // root.
+        if !self.is_root() || self.virtual_dir.is_some() {
             items.push(VisibleItem::Parent);
         }
         items.extend(
@@ -199,9 +230,93 @@ impl Pane {
 
         match target {
             Target::Parent => self.go_parent(),
+            Target::Descend(path) if self.virtual_dir.is_some() => self.virtual_descend(path),
             Target::Descend(path) => self.jump_to(path),
             Target::None => Ok(()),
         }
+    }
+
+    /// Enters Virtual Directory mode at `archive_path`'s root: validates
+    /// it's actually readable as a zip (a corrupt file or an unsupported
+    /// format fails here, before any UI state changes) and, on success,
+    /// swaps this pane over to it exactly like a `jump_to` — cursor/marks/
+    /// filter reset — except `cwd` is untouched (see the struct's doc
+    /// comment on `virtual_dir`).
+    pub fn enter_virtual(&mut self, archive_path: PathBuf) -> Result<()> {
+        let entries = virtual_dir::read_zip_dir_entries(&archive_path, Path::new(""))?;
+        let archive_name = archive_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| archive_path.display().to_string());
+        // Mirrors `go_parent`'s own cursor_memory bookkeeping: recording
+        // "the archive's own name" here is what lets `virtual_go_parent`
+        // restore the cursor onto the .zip file when it exits back out,
+        // via the exact same `restore_cursor_onto` real panes already use.
+        self.cursor_memory
+            .insert(self.cwd.clone(), archive_name.clone());
+        self.virtual_dir = Some(VirtualDir {
+            archive_path,
+            archive_name,
+            inner: PathBuf::new(),
+        });
+        self.entries = entries;
+        self.cursor = 0;
+        self.marks.clear();
+        self.filter = None;
+        Ok(())
+    }
+
+    /// Descends one level into the archive (a directory row was entered).
+    fn virtual_descend(&mut self, inner_path: PathBuf) -> Result<()> {
+        let Some(vd) = &self.virtual_dir else {
+            return Ok(());
+        };
+        let entries = virtual_dir::read_zip_dir_entries(&vd.archive_path, &inner_path)?;
+        self.virtual_dir.as_mut().unwrap().inner = inner_path;
+        self.entries = entries;
+        self.cursor = 0;
+        self.marks.clear();
+        self.filter = None;
+        Ok(())
+    }
+
+    /// `..` inside a virtual directory: climbs one archive-internal level
+    /// (remembering, and later restoring, the cursor position exactly like
+    /// `go_parent` does for real directories — via a synthetic
+    /// `cursor_memory` key built from the archive path, since there's no
+    /// real directory path to key it on), or — once already at the
+    /// archive root — exits Virtual Directory mode entirely, back to the
+    /// real directory containing the archive, with the cursor restored
+    /// onto the `.zip` file itself.
+    fn virtual_go_parent(&mut self) -> Result<()> {
+        let Some(vd) = self.virtual_dir.clone() else {
+            return Ok(());
+        };
+
+        if vd.inner.as_os_str().is_empty() {
+            self.virtual_dir = None;
+            self.reload()?;
+            self.restore_cursor_onto(&vd.archive_name);
+            return Ok(());
+        }
+
+        let leaving_name = vd
+            .inner
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let new_inner = vd.inner.parent().map(Path::to_path_buf).unwrap_or_default();
+
+        let entries = virtual_dir::read_zip_dir_entries(&vd.archive_path, &new_inner)?;
+        self.virtual_dir.as_mut().unwrap().inner = new_inner.clone();
+        self.entries = entries;
+        self.marks.clear();
+        self.filter = None;
+
+        let memory_key = vd.archive_path.join(virtual_dir::inner_display(&new_inner));
+        self.cursor_memory.insert(memory_key, leaving_name.clone());
+        self.restore_cursor_onto(&leaving_name);
+        Ok(())
     }
 
     /// Changes `cwd` to an arbitrary directory — descending into a
@@ -210,7 +325,17 @@ impl Pane {
     /// success; reverts (and reloads the old `cwd` back) on failure, so a
     /// bad jump target never leaves the pane stuck mid-transition.
     pub fn jump_to(&mut self, path: PathBuf) -> Result<()> {
-        let previous = std::mem::replace(&mut self.cwd, path);
+        let previous_cwd = std::mem::replace(&mut self.cwd, path);
+        // `jump_to` always means "go to this real directory" (bookmarks,
+        // home, the history menu, and `S-left`/`S-right` all funnel
+        // through it) — so it exits Virtual Directory mode as a side
+        // effect whenever it's active, the same way climbing out of the
+        // archive root does. Saved rather than just cleared, so a failed
+        // jump (bad target) reverts *both* `cwd` and `virtual_dir`
+        // together, leaving the pane exactly as it was rather than
+        // silently exiting the archive on a jump that never actually
+        // happened.
+        let previous_virtual = self.virtual_dir.take();
         match self.reload() {
             Ok(()) => {
                 self.cursor = 0;
@@ -219,7 +344,8 @@ impl Pane {
                 Ok(())
             }
             Err(err) => {
-                self.cwd = previous;
+                self.cwd = previous_cwd;
+                self.virtual_dir = previous_virtual;
                 let _ = self.reload();
                 Err(err)
             }
@@ -230,6 +356,9 @@ impl Pane {
     /// restores the cursor onto the directory just left, remembering that
     /// choice in `cursor_memory` for next time.
     pub fn go_parent(&mut self) -> Result<()> {
+        if self.virtual_dir.is_some() {
+            return self.virtual_go_parent();
+        }
         let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
             return Ok(());
         };
@@ -325,20 +454,17 @@ impl Pane {
         }
     }
 
-    /// Marks (never unmarks) whatever real entry sits at visible index
+    /// Toggles the mark on whatever real entry sits at visible index
     /// `index`, if any — a no-op on `..` or an out-of-range index. Used by
-    /// mouse drag range-marking (`App::handle_mouse_left_down`/
-    /// `handle_mouse_left_drag`), which sweeps over rows and always wants
-    /// "mark on", never a toggle (re-sweeping the same row on a jittery
-    /// drag must not un-mark it).
-    pub fn mark_index(&mut self, index: usize, marked: bool) {
+    /// mouse drag range-marking (`App::handle_mouse_left_drag`), which
+    /// sweeps over rows and toggles each one — the drag itself is
+    /// responsible for calling this at most once per row per gesture
+    /// (`DragState::visited`), so re-sweeping over an already-visited row
+    /// on a jittery drag doesn't flip it back.
+    pub fn toggle_mark_index(&mut self, index: usize) {
         if let Some(VisibleItem::Entry(e)) = self.visible_entries().get(index) {
             let path = e.path.clone();
-            if marked {
-                self.marks.insert(path);
-            } else {
-                self.marks.remove(&path);
-            }
+            self.flip_mark(path);
         }
     }
 

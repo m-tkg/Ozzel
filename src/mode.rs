@@ -91,6 +91,16 @@ pub enum PendingOp {
         archive_path: PathBuf,
         dest_dir: PathBuf,
     },
+    /// A confirmed extraction from a Virtual Directory (`C` while the
+    /// active pane is browsing inside a `.zip`) — dyna's "select + Copy =
+    /// partial extraction". `inner_targets` are archive-internal paths
+    /// (marks/cursor from the virtual pane), extracted into `dest_dir`
+    /// (the *other*, necessarily real, pane's cwd).
+    Extract {
+        archive_path: PathBuf,
+        inner_targets: Vec<PathBuf>,
+        dest_dir: PathBuf,
+    },
     /// Confirmed by the quit-while-busy guard: tasks are still running but
     /// the user wants out anyway.
     Quit,
