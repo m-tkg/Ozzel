@@ -39,6 +39,24 @@ pub enum TransferKind {
     Move,
 }
 
+/// Which representation the built-in viewer is currently showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Text,
+    /// An `xxd`-style hex dump of the raw bytes (see `viewer::format_hex_line`).
+    Hex,
+}
+
+impl ViewMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            ViewMode::Text => ViewMode::Hex,
+            ViewMode::Hex => ViewMode::Text,
+        }
+    }
+}
+
 /// The operation a `Mode::Confirm` will perform if the user answers yes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingOp {
@@ -95,13 +113,21 @@ pub enum Mode {
     /// The built-in full-frame text viewer (`x`/`o`/Enter-on-file). Fixed
     /// keys only (see `App::handle_viewer_key`): Up/Down/PageUp/PageDown/
     /// Home/End (`g`/`G` too) scroll vertically, Left/Right scroll
-    /// horizontally, `q`/Esc closes back to the filer.
+    /// horizontally, Tab toggles text/hex mode, `q`/Esc closes back to the
+    /// filer.
     Viewer {
         path: PathBuf,
         lines: Vec<String>,
-        /// Index of the first visible line.
+        /// The raw bytes backing `lines` (lossily decoded from these),
+        /// retained so hex mode can render the exact on-disk bytes.
+        bytes: Vec<u8>,
+        view_mode: ViewMode,
+        /// Index of the first visible line (text mode) or first visible
+        /// 16-byte row (hex mode) — reset to 0 on every Tab toggle, since
+        /// the two modes don't share a scroll position.
         scroll: usize,
-        /// Display-column offset of the first visible column.
+        /// Display-column offset of the first visible column (text mode
+        /// only; hex mode ignores this and always shows full rows).
         h_scroll: usize,
         /// The file was larger than the viewer's size cap and got cut off.
         truncated: bool,

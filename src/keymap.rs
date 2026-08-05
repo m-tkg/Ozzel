@@ -122,8 +122,14 @@ impl Keymap {
     /// bookmark, `~`/`H` jump to home, `:` runs a shell command (TUI
     /// suspended), `e` opens the cursor file in an editor (suspended, no
     /// pause), `x`/`o` open the cursor entry in the built-in text viewer,
-    /// and `q`/Ctrl+C quit. `OpenDefault` (the OS default-app handler) is a
-    /// valid action but deliberately unbound by default — rebind it via
+    /// and `q`/Ctrl+C quit. `S-up`/`S-down` jump straight to the top/bottom
+    /// of the pane (same as Home/End, kept bound too), and `S-enter` opens
+    /// the cursor entry with the OS default-app handler -- most terminals
+    /// can only report Shift+Enter distinctly from Enter when the kitty
+    /// keyboard protocol is active (see `main.rs`'s `keyboard_enhancement`
+    /// handling); without it, `S-enter` arrives as plain Enter and falls
+    /// back to the built-in viewer. `OpenDefault` is otherwise a valid
+    /// action but unbound on any other key by default — rebind it via
     /// `[keys]` to get the old behavior back.
     pub fn default_dyna() -> Self {
         use Action::*;
@@ -136,8 +142,11 @@ impl Keymap {
             ("pagedown", PageDown),
             ("home", Top),
             ("end", Bottom),
+            ("S-up", Top),
+            ("S-down", Bottom),
             ("tab", SwitchPane),
             ("enter", Enter),
+            ("S-enter", OpenDefault),
             ("backspace", Parent),
             ("s", CycleSort),
             (".", ToggleHidden),
@@ -401,6 +410,40 @@ mod tests {
         assert_eq!(
             km.resolve(KeyCode::Right, KeyModifiers::NONE),
             Some(Action::FocusRight)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_shift_up_down_to_top_bottom_and_keeps_home_end() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Up, KeyModifiers::SHIFT),
+            Some(Action::Top)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Down, KeyModifiers::SHIFT),
+            Some(Action::Bottom)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Home, KeyModifiers::NONE),
+            Some(Action::Top)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::End, KeyModifiers::NONE),
+            Some(Action::Bottom)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_shift_enter_to_open_default_and_keeps_plain_enter() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Enter, KeyModifiers::SHIFT),
+            Some(Action::OpenDefault)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Action::Enter)
         );
     }
 

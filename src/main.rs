@@ -18,18 +18,30 @@ mod viewer;
 use std::io::{self, Stdout};
 use std::panic;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 
 use app::App;
+
+/// Whether the kitty keyboard-enhancement flags are currently pushed onto
+/// the terminal. Shared (rather than a field on `TerminalGuard`) because
+/// the panic hook is installed *before* the guard exists and runs entirely
+/// outside its scope, so it has no other way to know whether a pop is
+/// needed before restoring the terminal.
+static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// ozzel: a dyna-filer-style two-pane TUI file manager.
 #[derive(Parser, Debug)]
@@ -41,37 +53,67 @@ struct Cli {
     right_dir: Option<PathBuf>,
 }
 
-/// Restores the terminal (raw mode + alternate screen) when dropped, so that
+/// Restores the terminal (raw mode + alternate screen, plus the kitty
+/// keyboard-enhancement flags if they were pushed) when dropped, so that
 /// every early-return path (including panics) leaves the shell usable.
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Whether this terminal answered the kitty keyboard-protocol query
+    /// (see `supports_keyboard_enhancement`'s docs). When `true`,
+    /// `S-enter` is reported distinctly from plain `Enter`; when `false`,
+    /// every keypress this session sees `S-enter` as arrives as plain
+    /// `Enter` instead, since there is no way to disambiguate them.
+    keyboard_enhancement: bool,
 }
 
 impl TerminalGuard {
     fn new() -> io::Result<Self> {
         enable_raw_mode()?;
+        // Queried right after raw mode is up, and only once per run: this
+        // makes a real terminal round-trip (it writes an escape query and
+        // reads the response), so re-querying per-keystroke would add
+        // needless latency for a value that can't change mid-session.
+        let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
         let mut stdout = io::stdout();
+        if keyboard_enhancement {
+            execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+            KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
+        }
         execute!(stdout, EnterAlternateScreen)?;
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            keyboard_enhancement,
+        })
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        if KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst) {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        let _ = disable_raw_mode();
     }
 }
 
 /// Installs a panic hook that restores the terminal *before* the default
 /// hook prints the panic message, otherwise the message would be swallowed
-/// by the alternate screen or mangled by raw mode.
+/// by the alternate screen or mangled by raw mode. Installed before
+/// `TerminalGuard` exists, so it can't borrow the guard's fields — it
+/// consults the shared `KEYBOARD_ENHANCEMENT_ACTIVE` flag instead.
 fn install_panic_hook() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        if KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst) {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        let _ = disable_raw_mode();
         default_hook(info);
     }));
 }
@@ -121,7 +163,7 @@ fn main() -> anyhow::Result<()> {
         app.log_error(msg);
     }
 
-    run(&mut guard.terminal, &mut app)?;
+    run(&mut guard.terminal, &mut app, guard.keyboard_enhancement)?;
 
     // Best-effort: the terminal is about to be restored by `guard`'s Drop
     // regardless, so a save failure here has nowhere good to be shown —
@@ -136,7 +178,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> anyhow::Result<()> {
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    keyboard_enhancement: bool,
+) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -153,7 +199,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> anyh
         // handle `external::run_suspended` needs to leave/re-enter the
         // alternate screen around it.
         if let Some(req) = app.pending_external.take() {
-            match external::run_suspended(terminal, &req) {
+            match external::run_suspended(terminal, &req, keyboard_enhancement) {
                 Ok(Some(spawn_error)) => app.log_error(spawn_error),
                 Ok(None) => {}
                 Err(err) => return Err(err),

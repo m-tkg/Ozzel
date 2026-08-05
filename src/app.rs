@@ -16,7 +16,7 @@ use crate::event::{AppEvent, KeyCode, KeyModifiers, TaskEvent};
 use crate::external::{self, ExternalRequest};
 use crate::filter::FilterSpec;
 use crate::keymap::Keymap;
-use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, SelectKind, TransferKind};
+use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, SelectKind, TransferKind, ViewMode};
 use crate::ops;
 use crate::pane::{PAGE_SIZE, Pane};
 use crate::persist::{Bookmarks, History, Side};
@@ -651,16 +651,18 @@ impl App {
         self.open_viewer(&path);
     }
 
-    /// Loads `path` and, if it's readable text, switches to `Mode::Viewer`.
-    /// A binary file is logged and *not* opened (never shown as garbage);
-    /// an I/O error is logged the same way any other failed action would
-    /// be.
+    /// Loads `path` and switches to `Mode::Viewer`. Binary files no longer
+    /// get rejected — they simply open in hex mode (see
+    /// `viewer::LoadedFile::initial_mode`); only a genuine I/O error is
+    /// logged and leaves the mode unchanged.
     fn open_viewer(&mut self, path: &Path) {
         match viewer::load(path) {
             Ok(loaded) => {
                 self.mode = Mode::Viewer {
                     path: path.to_path_buf(),
                     lines: loaded.lines,
+                    bytes: loaded.bytes,
+                    view_mode: loaded.initial_mode,
                     scroll: 0,
                     h_scroll: 0,
                     truncated: loaded.truncated,
@@ -682,6 +684,8 @@ impl App {
 
         let Mode::Viewer {
             lines,
+            bytes,
+            view_mode,
             scroll,
             h_scroll,
             ..
@@ -689,7 +693,21 @@ impl App {
         else {
             return;
         };
-        let max_scroll = lines.len().saturating_sub(1);
+
+        if code == KeyCode::Tab {
+            *view_mode = view_mode.toggle();
+            *scroll = 0;
+            *h_scroll = 0;
+            return;
+        }
+
+        let max_scroll = match view_mode {
+            ViewMode::Text => lines.len().saturating_sub(1),
+            ViewMode::Hex => bytes
+                .len()
+                .div_ceil(viewer::HEX_BYTES_PER_LINE)
+                .saturating_sub(1),
+        };
         match code {
             KeyCode::Up => *scroll = scroll.saturating_sub(1),
             KeyCode::Down => *scroll = (*scroll + 1).min(max_scroll),
@@ -1668,6 +1686,8 @@ mod tests {
             Mode::Viewer {
                 path,
                 lines,
+                bytes,
+                view_mode,
                 scroll,
                 h_scroll,
                 truncated,
@@ -1677,6 +1697,8 @@ mod tests {
                     lines,
                     &vec!["one".to_string(), "two".to_string(), "three".to_string()]
                 );
+                assert_eq!(bytes.as_slice(), b"one\ntwo\nthree");
+                assert_eq!(*view_mode, ViewMode::Text);
                 assert_eq!(*scroll, 0);
                 assert_eq!(*h_scroll, 0);
                 assert!(!truncated);
@@ -1720,7 +1742,7 @@ mod tests {
     }
 
     #[test]
-    fn view_logs_and_does_not_open_a_binary_file() {
+    fn view_opens_a_binary_file_directly_in_hex_mode() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("bin.dat"), [b'a', 0u8, b'b']).unwrap();
         let mut app = test_app(dir.path(), dir.path());
@@ -1728,17 +1750,51 @@ mod tests {
         select_entry_named(&mut app, "bin.dat");
 
         app.dispatch(Action::View);
-        assert!(
-            matches!(app.mode, Mode::Normal),
-            "a binary file must not open the viewer"
-        );
-        assert!(
-            app.log
-                .iter()
-                .any(|l| l.is_error && l.message.contains("binary file")),
-            "log: {:?}",
-            app.log
-        );
+        assert_eq!(view_mode_of(&app), ViewMode::Hex);
+    }
+
+    #[test]
+    fn viewer_tab_toggles_between_text_and_hex_and_resets_scroll() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "one\ntwo\nthree").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "notes.txt");
+        app.dispatch(Action::View);
+        assert_eq!(view_mode_of(&app), ViewMode::Text);
+
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 1);
+
+        app.handle_event(AppEvent::Input(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(view_mode_of(&app), ViewMode::Hex);
+        assert_eq!(scroll_of(&app), 0, "toggling mode resets scroll");
+
+        app.handle_event(AppEvent::Input(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(view_mode_of(&app), ViewMode::Text);
+    }
+
+    #[test]
+    fn viewer_hex_scroll_clamps_by_sixteen_byte_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        // 20 NUL bytes -> sniffed as binary (opens in hex mode) and
+        // ceil(20/16) = 2 hex rows, so max scroll index is 1.
+        std::fs::write(dir.path().join("bytes.dat"), vec![0u8; 20]).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "bytes.dat");
+        app.dispatch(Action::View);
+        assert_eq!(view_mode_of(&app), ViewMode::Hex);
+
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 1);
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 1, "must clamp at the last hex row");
+
+        app.handle_event(AppEvent::Input(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 1);
+        app.handle_event(AppEvent::Input(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(scroll_of(&app), 0);
     }
 
     #[test]
@@ -1841,6 +1897,13 @@ mod tests {
     fn h_scroll_of(app: &App) -> usize {
         match &app.mode {
             Mode::Viewer { h_scroll, .. } => *h_scroll,
+            other => panic!("expected Mode::Viewer, got {other:?}"),
+        }
+    }
+
+    fn view_mode_of(app: &App) -> ViewMode {
+        match &app.mode {
+            Mode::Viewer { view_mode, .. } => *view_mode,
             other => panic!("expected Mode::Viewer, got {other:?}"),
         }
     }

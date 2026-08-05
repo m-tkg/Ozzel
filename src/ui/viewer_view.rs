@@ -1,7 +1,9 @@
-//! Renders `Mode::Viewer`: a full-frame, borderless scrollable text view
-//! with a 1-line reverse-video footer (`path  [12-45/230]  q:close`). Takes
-//! over the entire frame — panes, log, and status bar are all replaced
-//! while a file is open, the same way a real pager would.
+//! Renders `Mode::Viewer`: a full-frame, borderless scrollable view — plain
+//! text or an `xxd`-style hex dump, toggled with Tab — with a 1-line
+//! reverse-video footer showing the mode tag and the visible range (e.g.
+//! `path  [text]  [12-45/230]  q:close`). Takes over the entire frame —
+//! panes, log, and status bar are all replaced while a file is open, the
+//! same way a real pager would.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,12 +13,15 @@ use ratatui::widgets::Paragraph;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::mode::Mode;
+use crate::mode::{Mode, ViewMode};
+use crate::viewer::{self, HEX_BYTES_PER_LINE};
 
 pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
     let Mode::Viewer {
         path,
         lines,
+        bytes,
+        view_mode,
         scroll,
         h_scroll,
         truncated,
@@ -33,24 +38,53 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
     let viewport_height = rows[0].height as usize;
     let viewport_width = rows[0].width as usize;
 
-    let visible: Vec<Line> = lines
-        .iter()
-        .skip(*scroll)
-        .take(viewport_height)
-        .map(|line| Line::raw(slice_display_cols(line, *h_scroll, viewport_width)))
-        .collect();
-    frame.render_widget(Paragraph::new(visible), rows[0]);
+    let (mode_tag, range_text) = match view_mode {
+        ViewMode::Text => {
+            let visible: Vec<Line> = lines
+                .iter()
+                .skip(*scroll)
+                .take(viewport_height)
+                .map(|line| Line::raw(slice_display_cols(line, *h_scroll, viewport_width)))
+                .collect();
+            frame.render_widget(Paragraph::new(visible), rows[0]);
 
-    let total = lines.len();
-    let bottom = (*scroll + viewport_height).min(total);
-    let range_text = if total == 0 {
-        "0/0".to_string()
-    } else {
-        format!("{}-{}/{}", *scroll + 1, bottom, total)
+            let total = lines.len();
+            let bottom = (*scroll + viewport_height).min(total);
+            let range_text = if total == 0 {
+                "0/0".to_string()
+            } else {
+                format!("{}-{}/{} lines", *scroll + 1, bottom, total)
+            };
+            ("text", range_text)
+        }
+        ViewMode::Hex => {
+            let total_rows = bytes.len().div_ceil(HEX_BYTES_PER_LINE).max(1);
+            let visible: Vec<Line> = bytes
+                .chunks(HEX_BYTES_PER_LINE)
+                .enumerate()
+                .skip(*scroll)
+                .take(viewport_height)
+                .map(|(row_idx, chunk)| {
+                    Line::raw(viewer::format_hex_line(chunk, row_idx * HEX_BYTES_PER_LINE))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(visible), rows[0]);
+
+            let bottom_row = (*scroll + viewport_height).min(total_rows);
+            let start_byte = (*scroll * HEX_BYTES_PER_LINE).min(bytes.len());
+            let end_byte = (bottom_row * HEX_BYTES_PER_LINE).min(bytes.len());
+            let range_text = if bytes.is_empty() {
+                "0/0 bytes".to_string()
+            } else {
+                format!("{start_byte}-{end_byte}/{} bytes", bytes.len())
+            };
+            ("hex", range_text)
+        }
     };
+
     let truncated_note = if *truncated { "  [truncated]" } else { "" };
     let footer = format!(
-        " {}  [{range_text}]{truncated_note}  q:close",
+        " {}  [{mode_tag}]  [{range_text}]{truncated_note}  Tab:hex/text  q:close",
         path.display()
     );
     let footer_style = Style::default().add_modifier(Modifier::REVERSED);

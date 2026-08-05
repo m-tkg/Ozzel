@@ -11,7 +11,10 @@ use anyhow::{Context, Result};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::Show;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -94,10 +97,24 @@ fn unix_shell_command(shell: &str, cmdline: &str) -> (String, Vec<String>) {
 /// the TUI must come back either way, never crash. Terminal-manipulation
 /// failures (steps 1/4) propagate as `Err`, since at that point something
 /// is wrong enough that the caller can't safely keep drawing anyway.
+///
+/// `keyboard_enhancement` mirrors whatever `TerminalGuard` decided at
+/// startup (see `main.rs`): when `true`, the kitty keyboard-enhancement
+/// flags ozzel pushed are popped *before* the child gets the terminal and
+/// re-pushed immediately after re-enabling raw mode, symmetric with
+/// `TerminalGuard`'s own push/pop — otherwise the child would either
+/// inherit flags it doesn't expect, or (worse) ozzel would come back with
+/// no flags active despite `main.rs` believing they still were, breaking
+/// `S-enter` disambiguation after e.g. `:vim`.
 pub fn run_suspended(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     req: &ExternalRequest,
+    keyboard_enhancement: bool,
 ) -> Result<Option<String>> {
+    if keyboard_enhancement {
+        execute!(io::stdout(), PopKeyboardEnhancementFlags)
+            .context("failed to pop keyboard enhancement flags")?;
+    }
     disable_raw_mode().context("failed to disable raw mode")?;
     execute!(io::stdout(), LeaveAlternateScreen, Show)
         .context("failed to leave alternate screen")?;
@@ -112,20 +129,36 @@ pub fn run_suspended(
         .stderr(Stdio::inherit());
     let spawn_result = spawn_and_wait(&mut command);
 
+    // Re-enabling raw mode (and re-pushing the enhancement flags, if
+    // active) is common to every outcome, so it's hoisted above the match
+    // instead of duplicated in all three arms.
+    let reenable = |pause_message: Option<String>| -> Result<()> {
+        enable_raw_mode().context("failed to re-enable raw mode")?;
+        if keyboard_enhancement {
+            execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )
+            .context("failed to re-push keyboard enhancement flags")?;
+        }
+        if let Some(msg) = pause_message {
+            print!("{msg}");
+            let _ = io::stdout().flush();
+            wait_for_keypress().context("failed to wait for keypress")?;
+        }
+        Ok(())
+    };
+
     let spawn_error = match spawn_result {
         Ok(status) => {
-            if req.pause_after {
-                print!("\r\n[ozzel] exit: {status} — press any key\r\n");
-                let _ = io::stdout().flush();
-                enable_raw_mode().context("failed to re-enable raw mode")?;
-                wait_for_keypress().context("failed to wait for keypress")?;
-            } else {
-                enable_raw_mode().context("failed to re-enable raw mode")?;
-            }
+            let pause_message = req
+                .pause_after
+                .then(|| format!("\r\n[ozzel] exit: {status} — press any key\r\n"));
+            reenable(pause_message)?;
             None
         }
         Err(err) => {
-            enable_raw_mode().context("failed to re-enable raw mode")?;
+            reenable(None)?;
             Some(format!("failed to run `{}`: {err}", req.cmdline))
         }
     };

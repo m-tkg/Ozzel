@@ -21,8 +21,31 @@ const MARK_COL_WIDTH: usize = 1;
 const SIZE_COL_WIDTH: usize = 9;
 const MTIME_COL_WIDTH: usize = 14;
 
-pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool, cursor_color: Color) {
-    let border_style = if active {
+/// Color/dim settings for rendering a pane, derived from `config::ColorsConfig`
+/// by `ui/mod.rs`. Kept as its own small `Copy` struct (rather than passing
+/// `&ColorsConfig` straight through) so this module stays independent of
+/// `config.rs`.
+#[derive(Debug, Clone, Copy)]
+pub struct PaneColors {
+    pub cursor: Color,
+    pub cursor_inactive: Color,
+    pub dim_inactive: bool,
+}
+
+pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool, colors: PaneColors) {
+    // The inactive pane dims when configured to (default on); its cursor
+    // row always stays at full brightness so it's never hard to read, even
+    // dimmed alongside a plain white background.
+    let dim = !active && colors.dim_inactive;
+    let cursor_color = if active {
+        colors.cursor
+    } else {
+        colors.cursor_inactive
+    };
+
+    let border_style = if dim {
+        Style::default().add_modifier(Modifier::DIM)
+    } else if active {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -62,14 +85,22 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool, cursor_c
             // The cursor row's bg/fg takes priority over the marked
             // row's yellow fg when both apply — yellow-on-light-green
             // reads poorly, and the row's own `*` prefix already marks
-            // "marked" unambiguously regardless of color.
+            // "marked" unambiguously regardless of color. The cursor row
+            // is also exempt from dimming even in a dimmed (inactive) pane.
             let style = if idx == cursor {
                 Style::default()
                     .bg(cursor_color)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
             } else if marked {
-                Style::default().fg(Color::Yellow)
+                let base = Style::default().fg(Color::Yellow);
+                if dim {
+                    base.add_modifier(Modifier::DIM)
+                } else {
+                    base
+                }
+            } else if dim {
+                Style::default().add_modifier(Modifier::DIM)
             } else {
                 Style::default()
             };

@@ -33,6 +33,17 @@ fn default_cursor_color() -> Color {
     Color::Rgb(0x90, 0xEE, 0x90)
 }
 
+/// The cursor row in the *inactive* pane uses a neutral white by default,
+/// so a glance at the screen shows exactly one green (active) cursor and
+/// one white (inactive) cursor rather than two identically-colored ones.
+fn default_cursor_inactive_color() -> Color {
+    Color::White
+}
+
+fn default_dim_inactive() -> bool {
+    true
+}
+
 fn deserialize_color<'de, D>(deserializer: D) -> std::result::Result<Color, D::Error>
 where
     D: Deserializer<'de>,
@@ -49,12 +60,25 @@ pub struct ColorsConfig {
         default = "default_cursor_color"
     )]
     pub cursor: Color,
+    /// Cursor row color in whichever pane is *not* currently active.
+    #[serde(
+        deserialize_with = "deserialize_color",
+        default = "default_cursor_inactive_color"
+    )]
+    pub cursor_inactive: Color,
+    /// Whether the inactive pane's non-cursor rows (and its border/header)
+    /// render dimmed. The cursor row itself always stays at full
+    /// brightness so it's never hard to read.
+    #[serde(default = "default_dim_inactive")]
+    pub dim_inactive: bool,
 }
 
 impl Default for ColorsConfig {
     fn default() -> Self {
         Self {
             cursor: default_cursor_color(),
+            cursor_inactive: default_cursor_inactive_color(),
+            dim_inactive: default_dim_inactive(),
         }
     }
 }
@@ -147,12 +171,47 @@ mod tests {
         assert!(config.home.is_none());
         assert!(config.editor.is_none());
         assert_eq!(config.colors.cursor, Color::Rgb(0x90, 0xEE, 0x90));
+        assert_eq!(config.colors.cursor_inactive, Color::White);
+        assert!(config.colors.dim_inactive);
     }
 
     #[test]
     fn colors_section_absent_falls_back_to_default_cursor_color() {
         let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
         assert_eq!(config.colors.cursor, Color::Rgb(0x90, 0xEE, 0x90));
+        assert_eq!(config.colors.cursor_inactive, Color::White);
+        assert!(config.colors.dim_inactive);
+    }
+
+    #[test]
+    fn colors_cursor_inactive_accepts_named_color() {
+        let config: Config = toml::from_str("[colors]\ncursor_inactive = \"blue\"").unwrap();
+        assert_eq!(config.colors.cursor_inactive, Color::Blue);
+    }
+
+    #[test]
+    fn colors_cursor_inactive_accepts_hex_color() {
+        let config: Config = toml::from_str("[colors]\ncursor_inactive = \"#abcdef\"").unwrap();
+        assert_eq!(config.colors.cursor_inactive, Color::Rgb(0xab, 0xcd, 0xef));
+    }
+
+    #[test]
+    fn colors_cursor_inactive_invalid_value_is_a_hard_parse_error() {
+        let result: Result<Config, _> =
+            toml::from_str("[colors]\ncursor_inactive = \"not-a-color\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn colors_dim_inactive_can_be_set_to_false() {
+        let config: Config = toml::from_str("[colors]\ndim_inactive = false").unwrap();
+        assert!(!config.colors.dim_inactive);
+    }
+
+    #[test]
+    fn colors_dim_inactive_true_round_trips() {
+        let config: Config = toml::from_str("[colors]\ndim_inactive = true").unwrap();
+        assert!(config.colors.dim_inactive);
     }
 
     #[test]

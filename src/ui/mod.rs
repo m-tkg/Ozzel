@@ -41,20 +41,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rows[0]);
 
-    let cursor_color = app.config.colors.cursor;
+    let colors = pane_view::PaneColors {
+        cursor: app.config.colors.cursor,
+        cursor_inactive: app.config.colors.cursor_inactive,
+        dim_inactive: app.config.colors.dim_inactive,
+    };
     pane_view::render(
         frame,
         panes[0],
         &app.panes[0],
         app.active == ActivePane::Left,
-        cursor_color,
+        colors,
     );
     pane_view::render(
         frame,
         panes[1],
         &app.panes[1],
         app.active == ActivePane::Right,
-        cursor_color,
+        colors,
     );
 
     log_view::render(frame, rows[1], app);
