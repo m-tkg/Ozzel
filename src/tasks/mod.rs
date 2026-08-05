@@ -16,6 +16,17 @@ use std::time::{Duration, Instant};
 
 use crate::event::TaskEvent;
 
+/// Chunked read/write buffer size shared by every worker that streams file
+/// bytes through a manual `Read`/`Write` loop: copy/move's chunked-file
+/// path (`copy_move.rs`) and zip/tar create/extract (`archive.rs`). Was
+/// declared identically in both files; one value now.
+pub(crate) const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
+/// `Throttle` interval shared by every worker's `Progress` events — how
+/// often the UI's gauge actually needs to move, not how often a worker's
+/// inner loop makes forward progress. Was declared identically in
+/// `copy_move.rs` and `archive.rs`; one value now.
+pub(crate) const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Identifies one spawned task. Ordered by creation order (an incrementing
 /// counter), so a `BTreeMap<TaskId, _>` iterates tasks oldest-first —
 /// keeping gauge rows in a stable order across frames instead of the
@@ -36,10 +47,10 @@ pub struct RunningTask {
     pub desc: String,
     pub progress: (u64, u64),
     pub detail: String,
-    #[allow(
-        dead_code,
-        reason = "cancel UI is explicitly post-MVP per the plan; every worker already checks this flag, so wiring a keybinding to it later needs no further threading changes"
-    )]
+    /// Set by `App::cancel_running_tasks` (`Action::CancelTasks`); every
+    /// worker (copy/move/delete/zip/unzip/extract) polls this between
+    /// files/chunks and unwinds to `Finished(Err("cancelled"))` when it's
+    /// set.
     pub cancel: Arc<AtomicBool>,
 }
 
@@ -143,6 +154,25 @@ impl Throttle {
             }
         }
     }
+}
+
+/// Sends a `Log` event for `id`, silently dropping the vanishingly rare
+/// send failure (the receiver hanging up mid-task, e.g. the UI thread
+/// exiting) the same way every other event send in `tasks/*` already does.
+/// Every worker's non-fatal per-entry warning (a skipped symlink, an unsafe
+/// archive path, a target missing from an archive, ...) goes through this
+/// rather than each call site re-spelling `tx.send(TaskEvent::Log { .. })`.
+pub(crate) fn send_log(tx: &Sender<TaskEvent>, id: TaskId, line: String) {
+    let _ = tx.send(TaskEvent::Log { id, line });
+}
+
+/// Sends the fixed `Finished(Err("cancelled"))` every worker reports the
+/// same way the moment its cancel flag is observed set.
+pub(crate) fn finish_cancelled(tx: &Sender<TaskEvent>, id: TaskId) {
+    let _ = tx.send(TaskEvent::Finished {
+        id,
+        result: Err("cancelled".to_string()),
+    });
 }
 
 #[cfg(test)]

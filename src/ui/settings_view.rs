@@ -13,6 +13,7 @@ use ratatui::widgets::{List, ListItem, Paragraph};
 use crate::app::App;
 use crate::mode::{Mode, SettingsEditor, SettingsScreen, TextField};
 use crate::settings::{self, Category};
+use crate::ui::text;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let Mode::Settings { screen } = &app.mode else {
@@ -105,18 +106,6 @@ pub(super) fn windowed_range(total: usize, cursor: usize, height: usize) -> std:
     start..(start + height).min(total)
 }
 
-/// `label` right-padded to `width` *display columns* (not `char` count —
-/// plain `{:<N}` formatting would under-pad a label containing any wide
-/// (e.g. Japanese) grapheme, since it counts characters, not the columns
-/// they actually occupy). Never truncates: a label already at or past
-/// `width` gets exactly one space before the value instead.
-fn pad_label(label: &str, width: usize) -> String {
-    let current = unicode_width::UnicodeWidthStr::width(label);
-    let mut out = label.to_string();
-    out.push_str(&" ".repeat(width.saturating_sub(current).max(1)));
-    out
-}
-
 /// Renders one category's item list. Only builds `ListItem`s for the rows
 /// actually on screen (`windowed_range`, computed from a total that's known
 /// up front for every category without touching per-item data) rather than
@@ -143,21 +132,30 @@ fn render_items(frame: &mut Frame, area: Rect, app: &mut App, category: Category
             .map(|i| {
                 let item = &settings::BEHAVIOR_ITEMS[i];
                 let value = settings::item_value_display(category, item, &app.config);
-                list_item(format!(" {}{value}", pad_label(item.label, 4)), i == cursor)
+                list_item(
+                    format!(" {}{value}", text::pad_label_min1(item.label, 4)),
+                    i == cursor,
+                )
             })
             .collect(),
         Category::Colors => window
             .map(|i| {
                 let item = &settings::COLOR_ITEMS[i];
                 let value = settings::item_value_display(category, item, &app.config);
-                list_item(format!(" {}{value}", pad_label(item.label, 4)), i == cursor)
+                list_item(
+                    format!(" {}{value}", text::pad_label_min1(item.label, 4)),
+                    i == cursor,
+                )
             })
             .collect(),
         Category::Startup => window
             .map(|i| {
                 let item = &settings::STARTUP_ITEMS[i];
                 let value = settings::item_value_display(category, item, &app.config);
-                list_item(format!(" {}{value}", pad_label(item.label, 4)), i == cursor)
+                list_item(
+                    format!(" {}{value}", text::pad_label_min1(item.label, 4)),
+                    i == cursor,
+                )
             })
             .collect(),
         Category::Viewers => {

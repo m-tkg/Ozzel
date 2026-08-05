@@ -88,19 +88,21 @@ impl Bookmarks {
 }
 
 /// Path to `history.json`, if this platform has a resolvable data dir.
-pub fn history_path() -> Option<PathBuf> {
+/// Private — only `load_history`/`save_history` in this module use it.
+fn history_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("history.json"))
 }
 
 /// Path to `bookmarks.json`, if this platform has a resolvable data dir.
-pub fn bookmarks_path() -> Option<PathBuf> {
+/// Private — only `load_bookmarks`/`save_bookmarks` in this module use it.
+fn bookmarks_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("bookmarks.json"))
 }
 
 fn data_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        directories::ProjectDirs::from("", "", "ozzel").map(|dirs| dirs.data_dir().to_path_buf())
+        crate::xdg::windows_project_dirs().map(|dirs| dirs.data_dir().to_path_buf())
     }
     #[cfg(not(windows))]
     {
@@ -110,19 +112,20 @@ fn data_dir() -> Option<PathBuf> {
     }
 }
 
-/// Pure XDG-style resolution used on macOS and Linux: `$XDG_DATA_HOME` when
-/// set to an absolute path, otherwise `~/.local/share/ozzel`. A standalone
-/// function (mirroring `config::unix_config_path`) so tests can exercise
-/// the fallback logic without mutating process-global environment state.
+/// `persist.rs`'s own thin wrapper around the resolution logic shared with
+/// `config::unix_config_path` (see `crate::xdg::unix_ozzel_dir`'s doc
+/// comment): `$XDG_DATA_HOME` when set to an absolute path, otherwise
+/// `~/.local/share`, joined with `ozzel` — unlike `config.rs`'s wrapper,
+/// there's no further filename to join here, since `history_path`/
+/// `bookmarks_path` each append their own. A standalone function so tests
+/// can exercise the fallback logic without mutating process-global
+/// environment state.
 #[cfg_attr(
     windows,
     allow(dead_code, reason = "only used on the unix data_dir path")
 )]
 fn unix_data_dir(xdg_data_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> Option<PathBuf> {
-    let base = xdg_data_home
-        .filter(|p| p.is_absolute())
-        .or_else(|| home_dir.map(|home| home.join(".local/share")))?;
-    Some(base.join("ozzel"))
+    crate::xdg::unix_ozzel_dir(xdg_data_home, home_dir, ".local/share")
 }
 
 pub fn load_history() -> (History, Option<String>) {

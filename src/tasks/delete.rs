@@ -19,7 +19,7 @@ use std::sync::mpsc::Sender;
 
 use crate::config::DeleteBehavior;
 use crate::event::TaskEvent;
-use crate::tasks::TaskId;
+use crate::tasks::{TaskId, finish_cancelled, send_log};
 
 /// Worker entry point for a delete task; matches the `TaskManager::spawn`
 /// closure signature (plus the `targets`/`behavior` it's bound with via a
@@ -97,10 +97,7 @@ fn run_permanent(
 
     for (idx, target) in targets.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            let _ = tx.send(TaskEvent::Finished {
-                id,
-                result: Err("cancelled".to_string()),
-            });
+            finish_cancelled(tx, id);
             return;
         }
 
@@ -109,10 +106,7 @@ fn run_permanent(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         if let Err(err) = delete_one_permanently(target) {
-            let _ = tx.send(TaskEvent::Log {
-                id,
-                line: format!("{}: {err}", target.display()),
-            });
+            send_log(tx, id, format!("{}: {err}", target.display()));
             failures += 1;
         }
         let done = idx as u64 + 1;

@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -1020,6 +1021,10 @@ impl App {
                 self.begin_quit();
                 Ok(())
             }
+            Action::CancelTasks => {
+                self.cancel_running_tasks();
+                Ok(())
+            }
         };
 
         if let Err(err) = result {
@@ -1056,6 +1061,27 @@ impl App {
         }
 
         self.should_quit = true;
+    }
+
+    /// `Action::CancelTasks`: sets *every* currently-running task's cancel
+    /// flag at once — a single "stop everything" action rather than a
+    /// per-task selection UI, since there's no way to distinguish one
+    /// running task from another in the UI beyond its log gauge row. Every
+    /// worker (copy/move/delete/zip/unzip/extract, via `TaskManager::spawn`'s
+    /// `Arc<AtomicBool>`) already polls this flag between files/chunks and
+    /// unwinds to its own `Finished(Err("cancelled"))` on its own thread;
+    /// this only flips the flag and returns immediately, it never waits for
+    /// a worker thread to actually stop.
+    fn cancel_running_tasks(&mut self) {
+        let n = self.tasks.running.len();
+        if n == 0 {
+            self.log_info("no running tasks");
+            return;
+        }
+        for task in self.tasks.running.values() {
+            task.cancel.store(true, Ordering::Relaxed);
+        }
+        self.log_info(format!("cancelling {n} task(s)"));
     }
 
     /// Runs `f` against the active pane and, if its `cwd` actually
@@ -4046,6 +4072,134 @@ mod tests {
         assert!(!app.should_quit);
         assert!(matches!(app.mode, Mode::Normal));
         wait_for_tasks_done(&mut app);
+    }
+
+    // --- `Action::CancelTasks` -------------------------------------------
+
+    #[test]
+    fn cancel_tasks_action_sets_the_cancel_flag_on_every_running_task() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        // Two long-enough-sleeping no-op tasks so both are still in
+        // `running` (and their threads haven't observed the flag yet) when
+        // asserted below — `TaskManager::spawn` inserts into `running`
+        // synchronously before the thread even starts, so there's no race
+        // to get right here.
+        let mut cancels: Vec<Arc<AtomicBool>> = Vec::new();
+        for _ in 0..2 {
+            let id = app.tasks.spawn("noop", |id, tx, cancel| {
+                for _ in 0..100 {
+                    if cancel.load(Ordering::Relaxed) {
+                        let _ = tx.send(TaskEvent::Finished {
+                            id,
+                            result: Err("cancelled".to_string()),
+                        });
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = tx.send(TaskEvent::Finished {
+                    id,
+                    result: Ok("done".to_string()),
+                });
+            });
+            cancels.push(app.tasks.running.get(&id).unwrap().cancel.clone());
+        }
+        assert_eq!(app.tasks.running.len(), 2);
+
+        app.dispatch(Action::CancelTasks);
+
+        for cancel in &cancels {
+            assert!(
+                cancel.load(Ordering::Relaxed),
+                "every running task's cancel flag must be set"
+            );
+        }
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.message.contains("cancelling 2 task(s)")),
+            "log: {:?}",
+            app.log.iter().map(|l| &l.message).collect::<Vec<_>>()
+        );
+
+        wait_for_tasks_done(&mut app);
+        // Both worker threads must have actually observed the flag and
+        // unwound to a cancelled Finished, not merely had the flag set —
+        // the same `Finished(Err("cancelled"))` contract every real
+        // `tasks::*` worker (copy/move/delete/zip/unzip/extract) reports.
+        assert!(
+            app.log
+                .iter()
+                .filter(|l| l.message.contains("cancelled"))
+                .count()
+                >= 2,
+            "log: {:?}",
+            app.log.iter().map(|l| &l.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cancel_tasks_action_logs_no_running_tasks_when_nothing_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.dispatch(Action::CancelTasks);
+
+        assert!(
+            app.log.iter().any(|l| l.message == "no running tasks"),
+            "log: {:?}",
+            app.log.iter().map(|l| &l.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cancel_tasks_action_makes_a_real_copy_worker_finish_cancelled() {
+        // End-to-end through a real `tasks::copy_move` worker (rather than
+        // the synthetic loop above) — proves the flag
+        // `App::cancel_running_tasks` sets is the exact same
+        // `Arc<AtomicBool>` `copy_move::run_copy` polls, all the way
+        // through `TaskManager::spawn`'s plumbing. The cancel flag is set
+        // *before* spawning (same "pre-cancelled" pattern
+        // `copy_move::tests::cancel_flag_set_before_start_aborts_immediately`
+        // uses) rather than raced against a real in-flight copy, so this is
+        // fully deterministic: `run_copy` checks the flag before touching
+        // any file.
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        std::fs::write(src_dir.path().join("a.txt"), b"hello").unwrap();
+
+        let mut app = test_app(src_dir.path(), dest_dir.path());
+        let sources = vec![src_dir.path().join("a.txt")];
+        let dest = dest_dir.path().to_path_buf();
+        app.tasks.spawn("copy 1 item", move |id, tx, cancel| {
+            // Give `cancel_running_tasks` below a chance to run first.
+            std::thread::sleep(Duration::from_millis(50));
+            crate::tasks::copy_move::run_copy(id, tx, cancel, sources, dest);
+        });
+        assert_eq!(app.tasks.running.len(), 1);
+
+        app.dispatch(Action::CancelTasks);
+        wait_for_tasks_done(&mut app);
+
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.contains("cancelled")),
+            "log: {:?}",
+            app.log
+                .iter()
+                .map(|l| (&l.message, l.is_error))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_dir.path().join("a.txt").exists(),
+            "a task cancelled before it started copying must not have written anything"
+        );
     }
 
     #[test]

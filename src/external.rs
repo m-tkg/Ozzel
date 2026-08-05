@@ -291,8 +291,9 @@ const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encodes `data` as base64 (standard alphabet, `=`-padded) — the encoding
-/// OSC 52's clipboard payload requires (see `osc52_copy_sequence`).
-pub fn base64_encode(data: &[u8]) -> String {
+/// OSC 52's clipboard payload requires (see `osc52_copy_sequence`). Private
+/// — only `osc52_copy_sequence` (this module) calls it.
+fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0];

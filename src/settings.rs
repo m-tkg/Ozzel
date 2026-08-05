@@ -235,7 +235,8 @@ pub fn display_delete_behavior(value: DeleteBehavior) -> &'static str {
     }
 }
 
-pub fn display_optional_text(value: &Option<String>) -> String {
+/// Private — only `item_value_display` (this module) calls it.
+fn display_optional_text(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| "(未設定)".to_string())
 }
 

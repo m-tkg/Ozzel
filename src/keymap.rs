@@ -216,6 +216,7 @@ impl Keymap {
             ("\\", JumpSearch),
             ("p", ZipMarked),
             ("u", Unzip),
+            ("C-k", CancelTasks),
             ("h", Help),
             ("?", Help),
             ("H", HistoryJump),

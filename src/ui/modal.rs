@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::mode::{LineEditor, Mode, PromptKind};
-use crate::ui::viewer_view::slice_display_cols;
+use crate::ui::text::slice_display_cols;
 
 /// Narrowest a `render_prompt_box` popup is ever allowed to shrink to,
 /// regardless of how short the title/content are — small enough to still
@@ -105,7 +105,7 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, mode: &Mode, error: Opt
         return;
     };
     let suffix = error.map(|err| format!("  (invalid regex: {err})"));
-    render_input_line(frame, area, "Filter: ", input, suffix.as_deref());
+    render_prefixed_input_line(frame, area, "Filter: ", input, suffix.as_deref());
 }
 
 /// Draws the `JumpSearch` line into `area`, showing the live input plus a
@@ -119,31 +119,36 @@ pub fn render_jump_search_line(frame: &mut Frame, area: Rect, mode: &Mode, has_m
     };
     let no_match = !input.value().is_empty() && !has_match;
     let suffix = no_match.then_some("  (no match)");
-    render_input_line(frame, area, "Jump: ", input, suffix);
+    render_prefixed_input_line(frame, area, "Jump: ", input, suffix);
 }
 
-/// Shared by `render_filter_line`/`render_jump_search_line` (the two
-/// bottom-status-bar-line inputs — `render_prompt_box`'s popup has its own
-/// layout, `render_input_box`, since it isn't drawn into the status bar
-/// row at all): draws `{label}{input}{warning_suffix}` (reverse-video, red
-/// when a warning suffix is present) and positions the real terminal
-/// cursor at the input's own edit point. `warning_suffix`, when present,
-/// is expected to already include its own leading spacing/punctuation
-/// (e.g. `"  (invalid regex: ...)"`, `"  (no match)"`) since the two
-/// callers' wording differs.
-fn render_input_line(
+/// One reverse-video input line: `{label}{input}{suffix}`, with the real
+/// terminal cursor positioned at the input's own edit point (`label`'s
+/// width plus the input's display column, clamped to stay inside `area`).
+/// Shared by six call sites across `ui/*`: `render_filter_line`/
+/// `render_jump_search_line` below (`suffix` carries their warning text,
+/// e.g. `"  (invalid regex: ...)"`/`"  (no match)"`, and turns the whole
+/// line red when present), plus `ui::help_view`/`ui::log_view`/
+/// `ui::viewer_view`'s `/`/`?` search input line (label is `"/"`/`"?"`,
+/// `suffix` always `None` — those three never show a warning, so the red
+/// styling never triggers for them). `suffix`, when present, is expected
+/// to already include its own leading spacing/punctuation since callers'
+/// wording differs. `pub(super)` so the three `ui::*_view` modules can
+/// reach it without redefining this line-drawing/cursor-positioning logic
+/// three more times.
+pub(super) fn render_prefixed_input_line(
     frame: &mut Frame,
     area: Rect,
     label: &str,
     input: &crate::mode::LineEditor,
-    warning_suffix: Option<&str>,
+    suffix: Option<&str>,
 ) {
-    let text = match warning_suffix {
+    let text = match suffix {
         Some(suffix) => format!("{label}{}{suffix}", input.value()),
         None => format!("{label}{}", input.value()),
     };
     let mut style = Style::default().add_modifier(Modifier::REVERSED);
-    if warning_suffix.is_some() {
+    if suffix.is_some() {
         style = style.fg(Color::Red);
     }
     let paragraph = Paragraph::new(text).style(style);
@@ -212,7 +217,10 @@ pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(paragraph, popup);
 }
 
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+/// Centers a `width` x `height` box inside `area`. `pub(super)` so
+/// `ui::function_list_view`'s command-palette popup (the only other centered
+/// popup in `ui/*`) reuses the exact same math instead of a second copy.
+pub(super) fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect {

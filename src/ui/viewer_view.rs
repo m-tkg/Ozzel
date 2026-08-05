@@ -17,7 +17,10 @@ use ratatui::widgets::Paragraph;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::mode::{LineEditor, Mode, SearchDirection, ViewMode, ViewerSearch};
+#[cfg(test)]
+use crate::mode::{LineEditor, SearchDirection};
+use crate::mode::{Mode, ViewMode, ViewerSearch};
+use crate::ui::text;
 use crate::viewer::{self, HEX_BYTES_PER_LINE, Matcher};
 
 /// Style applied to the byte range of every search match on a visible
@@ -116,7 +119,13 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
         input, direction, ..
     } = search
     {
-        render_search_input_line(frame, rows[1], *direction, input);
+        crate::ui::modal::render_prefixed_input_line(
+            frame,
+            rows[1],
+            direction.label(),
+            input,
+            None,
+        );
         return;
     }
 
@@ -130,10 +139,7 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
             wrapped,
             ..
         } => {
-            let prefix = match direction {
-                SearchDirection::Forward => '/',
-                SearchDirection::Backward => '?',
-            };
+            let prefix = direction.label();
             let wrap_note = if *wrapped { "  (search wrapped)" } else { "" };
             format!(
                 "  {prefix}{pattern}  {}/{}{wrap_note}",
@@ -151,32 +157,8 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
     frame.render_widget(Paragraph::new(footer).style(footer_style), rows[1]);
 }
 
-/// Draws the `/`/`?` search input line into `area`, mirroring
-/// `ui::modal::render_input_line`'s look (reverse video, real terminal
-/// cursor positioned at the edit point) without depending on that private
-/// helper — the viewer is a full-frame takeover with its own layout, not
-/// the shared pane/status-bar frame `modal.rs`'s callers draw into.
-fn render_search_input_line(
-    frame: &mut Frame,
-    area: Rect,
-    direction: SearchDirection,
-    input: &LineEditor,
-) {
-    let label = match direction {
-        SearchDirection::Forward => "/",
-        SearchDirection::Backward => "?",
-    };
-    let text = format!("{label}{}", input.value());
-    let style = Style::default().add_modifier(Modifier::REVERSED);
-    frame.render_widget(Paragraph::new(text).style(style), area);
-
-    let col = area.x + UnicodeWidthStr::width(label) as u16 + input.cursor_display_col() as u16;
-    let col = col.min(area.x + area.width.saturating_sub(1));
-    frame.set_cursor_position((col, area.y));
-}
-
 /// Builds one rendered `Line` for `line`'s visible slice
-/// `[start_col, start_col + width)` (see `slice_display_cols`), split into
+/// `[start_col, start_col + width)` (see `text::slice_display_cols`), split into
 /// unstyled/highlighted spans wherever `matcher` (`None` when there's no
 /// active search) matches — grapheme-safe, so a highlighted run never
 /// splits a multi-byte character. `width = usize::MAX` (hex mode, which
@@ -192,11 +174,11 @@ pub(super) fn styled_line(
     matcher: Option<&Matcher>,
 ) -> Line<'static> {
     let Some(matcher) = matcher else {
-        return Line::raw(slice_display_cols(line, start_col, width));
+        return Line::raw(text::slice_display_cols(line, start_col, width));
     };
     let match_ranges = matcher.find_ranges(line);
     if match_ranges.is_empty() {
-        return Line::raw(slice_display_cols(line, start_col, width));
+        return Line::raw(text::slice_display_cols(line, start_col, width));
     }
     let spans: Vec<Span> = highlighted_segments(line, start_col, width, &match_ranges)
         .into_iter()
@@ -211,50 +193,7 @@ pub(super) fn styled_line(
     Line::from(spans)
 }
 
-/// Returns the substring of `line` covering display columns
-/// `[start_col, start_col + width)`, breaking only on grapheme-cluster
-/// boundaries. A grapheme whose *start* column falls inside the window is
-/// included in full; one that starts before it is dropped in full — cheap
-/// and correct for the common case, at the cost of not clipping a wide
-/// grapheme that straddles the window edge mid-glyph. `pub(super)` (rather
-/// than private) so `ui::modal`'s centered prompt box can reuse the exact
-/// same horizontal-scroll math for a `LineEditor`'s content instead of
-/// duplicating it.
-pub(super) fn slice_display_cols(line: &str, start_col: usize, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    // Fast path: a pure-ASCII line (the common case — source code, logs,
-    // paths) has exactly one display column per byte, so the visible slice
-    // is a plain byte-range copy rather than a per-grapheme walk from
-    // column 0. Without this, opening a huge single-line minified-JS-style
-    // file and scrolling it horizontally re-walked the *entire* line from
-    // the start on every rendered row, every frame, just to find where
-    // `start_col` began. `.max(1)` on the grapheme path below means even an
-    // ASCII control character counts as width 1, matching this exactly.
-    if line.is_ascii() {
-        let len = line.len();
-        let start = start_col.min(len);
-        let end = start_col.saturating_add(width).min(len);
-        return line[start..end].to_string();
-    }
-    let end_col = start_col.saturating_add(width);
-    let mut result = String::new();
-    let mut col = 0usize;
-    for g in line.graphemes(true) {
-        if col >= end_col {
-            break;
-        }
-        let w = UnicodeWidthStr::width(g).max(1);
-        if col >= start_col {
-            result.push_str(g);
-        }
-        col += w;
-    }
-    result
-}
-
-/// Like `slice_display_cols`, but splits the visible window into runs of
+/// Like `text::slice_display_cols`, but splits the visible window into runs of
 /// `(text, is_match)` instead of a single plain string — the run boundary
 /// bookkeeping `styled_line` needs to turn a line into alternating
 /// unstyled/highlighted spans. A grapheme counts as a match if its byte
@@ -304,32 +243,18 @@ fn highlighted_segments(
 mod tests {
     use super::*;
 
-    #[test]
-    fn slice_display_cols_returns_whole_line_when_it_fits() {
-        assert_eq!(slice_display_cols("hello", 0, 80), "hello");
-    }
-
+    // `text::slice_display_cols` itself is exercised by `ui::text`'s own
+    // tests; the two ASCII-fast-path + wide-grapheme cases matter enough to
+    // the viewer's horizontal scroll specifically that they're worth a
+    // second, direct check here too.
     #[test]
     fn slice_display_cols_clips_to_width() {
-        assert_eq!(slice_display_cols("hello world", 0, 5), "hello");
-    }
-
-    #[test]
-    fn slice_display_cols_applies_horizontal_offset() {
-        assert_eq!(slice_display_cols("hello world", 6, 5), "world");
+        assert_eq!(text::slice_display_cols("hello world", 0, 5), "hello");
     }
 
     #[test]
     fn slice_display_cols_respects_wide_japanese_graphemes() {
-        // "日本語" is 3 graphemes, each width 2 (total width 6).
-        assert_eq!(slice_display_cols("日本語", 0, 2), "日");
-        assert_eq!(slice_display_cols("日本語", 2, 2), "本");
-        assert_eq!(slice_display_cols("日本語", 4, 2), "語");
-    }
-
-    #[test]
-    fn slice_display_cols_offset_past_end_is_empty() {
-        assert_eq!(slice_display_cols("short", 100, 20), "");
+        assert_eq!(text::slice_display_cols("日本語", 2, 2), "本");
     }
 
     // --- `highlighted_segments`: match-span math --------------------------

@@ -141,9 +141,9 @@ executable = "yellow"
 # top, bottom, switch_pane, open, parent, cycle_sort, toggle_hidden,
 # swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
 # duplicate, copy_path, filter, clear_filter, zip_marked, unzip,
-# history_jump, history_back, history_forward, bookmark_jump,
+# cancel_tasks, history_jump, history_back, history_forward, bookmark_jump,
 # bookmark_add, go_home, command_line, open_editor, open_default,
-# help, edit_config, show_log, function_list, quit
+# help, edit_config, show_log, function_list, settings, quit
 
 # --- キーバインドの上書き（逆向き記法・デフォルトの全キーバインド一覧） ---
 # [keys] とは逆に、左辺がアクション名、右辺がキーの組み合わせの配列です。
@@ -188,6 +188,7 @@ duplicate = ["c"]
 copy_path = ["y"]
 zip_marked = ["p"]
 unzip = ["u"]
+cancel_tasks = ["C-k"]
 filter = ["/", "f"]
 clear_filter = ["Esc"]
 jump_search = ["\\"]

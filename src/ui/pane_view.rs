@@ -11,7 +11,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::PaneLayout;
@@ -20,7 +19,10 @@ use crate::entry::EntryKind;
 #[cfg(test)]
 use crate::entry::FsEntry;
 use crate::pane::{Pane, VisibleItem};
+use crate::ui::text;
 use crate::virtual_dir;
+#[cfg(test)]
+use unicode_segmentation::UnicodeSegmentation;
 
 /// How much the inactive pane's cursor row background darkens toward
 /// black when the pane is dimmed (`dim_inactive`, default on) — see
@@ -344,36 +346,16 @@ fn wrap_header_lines(source: &str, width: usize) -> Vec<String> {
     if UnicodeWidthStr::width(source) <= width {
         return vec![source.to_string()];
     }
-    let (line1, rest) = greedy_wrap_one_line(source, width);
+    let (line1, rest) = text::take_display_prefix(source, width);
     if UnicodeWidthStr::width(rest.as_str()) <= width {
         return vec![line1, rest];
     }
     // Even 2 rows of plain wrapping can't hold it: fall back to truncating
     // the whole thing from the left (keeping the tail) to fit exactly a
     // 2-row budget, then re-wrap that shorter, now-fitting string.
-    let truncated = truncate_left(source, width * 2);
-    let (line1, line2) = greedy_wrap_one_line(&truncated, width);
+    let truncated = text::truncate_left(source, width * 2);
+    let (line1, line2) = text::take_display_prefix(&truncated, width);
     vec![line1, line2]
-}
-
-/// Splits `s` into `(first `width`-columns-worth, remainder)` on grapheme
-/// boundaries, never exceeding `width` display columns in the first part.
-fn greedy_wrap_one_line(s: &str, width: usize) -> (String, String) {
-    let graphemes: Vec<&str> = s.graphemes(true).collect();
-    let mut line = String::new();
-    let mut used = 0;
-    let mut i = 0;
-    while i < graphemes.len() {
-        let g = graphemes[i];
-        let w = UnicodeWidthStr::width(g);
-        if used + w > width {
-            break;
-        }
-        line.push_str(g);
-        used += w;
-        i += 1;
-    }
-    (line, graphemes[i..].concat())
 }
 
 /// Where the viewport should start so that `cursor` is always visible.
@@ -431,9 +413,9 @@ fn format_row(item: &VisibleItem<'_>, width: usize, marked: bool, show_perms_col
     }
     let name_width = width.saturating_sub(reserved).max(3);
 
-    let name_col = pad_right_display(&truncate_right(&name, name_width), name_width);
-    let size_col = pad_left_display(&size_text, SIZE_COL_WIDTH);
-    let mtime_col = pad_left_display(&mtime_text, MTIME_COL_WIDTH);
+    let name_col = text::pad_right(&text::truncate_right(&name, name_width), name_width);
+    let size_col = text::pad_left(&size_text, SIZE_COL_WIDTH);
+    let mtime_col = text::pad_left(&mtime_text, MTIME_COL_WIDTH);
 
     if show_perms_col {
         format!("{mark_col}{name_col} {perms_text} {size_col} {mtime_col}")
@@ -459,74 +441,6 @@ fn human_size(bytes: u64) -> String {
 fn format_mtime(t: SystemTime) -> String {
     let dt: DateTime<Local> = t.into();
     dt.format("%y-%m-%d %H:%M").to_string()
-}
-
-/// Truncates `s` from the right (keeping the start) so its display width
-/// fits within `max_width`, breaking only on grapheme-cluster boundaries and
-/// appending an ellipsis when anything was cut.
-fn truncate_right(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let budget = max_width.saturating_sub(1); // reserve 1 col for the ellipsis
-    let mut result = String::new();
-    let mut used = 0;
-    for g in s.graphemes(true) {
-        let w = UnicodeWidthStr::width(g);
-        if used + w > budget {
-            break;
-        }
-        result.push_str(g);
-        used += w;
-    }
-    result.push('…');
-    result
-}
-
-/// Truncates `s` from the left (keeping the end) so its display width fits
-/// within `max_width`; used for the pane header so a deeply nested path
-/// still shows the directory you're actually in.
-fn truncate_left(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let budget = max_width.saturating_sub(1);
-    let graphemes: Vec<&str> = s.graphemes(true).collect();
-    let mut used = 0;
-    let mut start_idx = graphemes.len();
-    for (i, g) in graphemes.iter().enumerate().rev() {
-        let w = UnicodeWidthStr::width(*g);
-        if used + w > budget {
-            break;
-        }
-        used += w;
-        start_idx = i;
-    }
-    format!("…{}", graphemes[start_idx..].concat())
-}
-
-fn pad_right_display(s: &str, width: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    if w >= width {
-        s.to_string()
-    } else {
-        format!("{s}{}", " ".repeat(width - w))
-    }
-}
-
-fn pad_left_display(s: &str, width: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    if w >= width {
-        s.to_string()
-    } else {
-        format!("{}{s}", " ".repeat(width - w))
-    }
 }
 
 #[cfg(test)]
@@ -736,45 +650,6 @@ mod tests {
         assert_eq!(human_size(1536), "1.5K");
         assert_eq!(human_size(1024 * 1024), "1.0M");
         assert_eq!(human_size(1024 * 1024 * 1024), "1.0G");
-    }
-
-    #[test]
-    fn truncate_right_keeps_ascii_untouched_when_it_fits() {
-        assert_eq!(truncate_right("short.txt", 20), "short.txt");
-    }
-
-    #[test]
-    fn truncate_right_never_splits_a_japanese_grapheme() {
-        let name = "日本語ファイル名.txt";
-        // Each of 日/本/語/ファイル名 is width 2; force a truncation that
-        // would land mid-character if done by byte count instead of width.
-        let truncated = truncate_right(name, 7);
-        assert!(truncated.ends_with('…'));
-        // Must be valid UTF-8 (guaranteed by type) and must not exceed the
-        // requested display width.
-        assert!(UnicodeWidthStr::width(truncated.as_str()) <= 7);
-        // Every grapheme in the result must also appear as a whole grapheme
-        // in the source (no half-character survived).
-        let source_graphemes: Vec<&str> = name.graphemes(true).collect();
-        for g in truncated.trim_end_matches('…').graphemes(true) {
-            assert!(source_graphemes.contains(&g));
-        }
-    }
-
-    #[test]
-    fn truncate_left_keeps_the_tail_of_a_long_path() {
-        let path = "/very/deeply/nested/日本語ディレクトリ/leaf";
-        let truncated = truncate_left(path, 15);
-        assert!(truncated.starts_with('…'));
-        assert!(truncated.ends_with("leaf"));
-        assert!(UnicodeWidthStr::width(truncated.as_str()) <= 15);
-    }
-
-    #[test]
-    fn pad_right_display_accounts_for_wide_characters() {
-        // "日本語" is 3 graphemes but 6 display columns wide.
-        let padded = pad_right_display("日本語", 10);
-        assert_eq!(UnicodeWidthStr::width(padded.as_str()), 10);
     }
 
     #[test]

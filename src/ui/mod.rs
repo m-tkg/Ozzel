@@ -15,6 +15,7 @@ pub mod log_view;
 mod modal;
 mod pane_view;
 mod settings_view;
+mod text;
 mod viewer_view;
 
 use ratatui::Frame;

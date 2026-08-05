@@ -15,6 +15,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::mode::Mode;
+use crate::ui::modal::centered_rect;
 
 /// How wide/tall the palette popup is, as a fraction of the full frame —
 /// generous enough to show several actions' descriptions without wrapping
@@ -97,15 +98,4 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     frame.render_widget(List::new(list_rows), rows[1]);
-}
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
 }

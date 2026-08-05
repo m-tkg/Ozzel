@@ -7,7 +7,7 @@
 //! `format_timestamp_prefix`; the year was added so a log spanning
 //! midnight on New Year's Eve, or one simply read back much later, is
 //! never ambiguous), and long lines wrap across multiple rows
-//! (width-aware, grapheme-safe — see `wrap_to_width`) rather than getting
+//! (width-aware, grapheme-safe — see `text::wrap_to_width`) rather than getting
 //! clipped at the right edge. A wrapped line's continuation rows hang-
 //! indent by the timestamp prefix's width instead of repeating it, so the
 //! message column stays aligned under the first row's. The *newest*
@@ -23,11 +23,12 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, LogLine};
 use crate::tasks::RunningTask;
+use crate::ui::text;
+#[cfg(test)]
+use unicode_width::UnicodeWidthStr;
 
 /// `strftime`-style format for a log line's timestamp prefix: 4-digit
 /// year, 2-digit month/day/hour/minute/second, fixed punctuation, always
@@ -112,7 +113,7 @@ pub(crate) fn format_timestamp_prefix(timestamp: DateTime<Local>) -> String {
 
 /// Wraps every log line to `width` display columns — the *message* portion
 /// wraps against `width` minus the timestamp prefix's width (see
-/// `wrap_to_width`), and the result is flattened into
+/// `text::wrap_to_width`), and the result is flattened into
 /// `(display_row_text, is_error)` pairs in original order. The first
 /// wrapped row of each line gets the real timestamp prefix; continuation
 /// rows get a blank hang-indent of the same width instead, so the message
@@ -138,7 +139,7 @@ pub fn wrap_log_lines<'a>(
         let prefix = line.formatted_timestamp.clone();
         let is_error = line.is_error;
         let hang_indent = hang_indent.clone();
-        wrap_to_width(&line.message, message_width)
+        text::wrap_to_width(&line.message, message_width)
             .into_iter()
             .enumerate()
             .map(move |(i, row)| {
@@ -176,7 +177,7 @@ pub fn wrap_log_lines_tail<'a>(
     // makes that O(1) instead of an `insert(0, ...)` shuffle on a `Vec`.
     let mut collected: VecDeque<(String, bool)> = VecDeque::new();
     for line in log_newest_first {
-        let rows = wrap_to_width(&line.message, message_width);
+        let rows = text::wrap_to_width(&line.message, message_width);
         for (i, row) in rows.into_iter().enumerate().rev() {
             let indent = if i == 0 {
                 line.formatted_timestamp.as_str()
@@ -192,32 +193,6 @@ pub fn wrap_log_lines_tail<'a>(
 
     let start = collected.len().saturating_sub(needed_rows);
     collected.into_iter().skip(start).collect()
-}
-
-/// Hard-wraps `s` into chunks of at most `width` display columns, breaking
-/// only on grapheme-cluster boundaries (never mid-character, even for wide
-/// Japanese graphemes) — this is a plain width-based wrap, not word-wrap,
-/// since log messages are often paths with no spaces to break on. An empty
-/// string still yields one (empty) row, matching the pre-wrap one-row-per-
-/// line baseline for a blank message.
-fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let mut rows = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for g in s.graphemes(true) {
-        let w = UnicodeWidthStr::width(g).max(1);
-        if current_width + w > width && !current.is_empty() {
-            rows.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push_str(g);
-        current_width += w;
-    }
-    rows.push(current);
-    rows
 }
 
 /// `L`/`S-l`: renders the *entire* in-memory log (all `LOG_CAPACITY` lines,
@@ -301,7 +276,13 @@ pub fn render_full(frame: &mut Frame, area: Rect, app: &mut App, scroll_from_bot
         input, direction, ..
     } = &search
     {
-        render_search_input_line(frame, rows[1], *direction, input);
+        crate::ui::modal::render_prefixed_input_line(
+            frame,
+            rows[1],
+            direction.label(),
+            input,
+            None,
+        );
         return;
     }
 
@@ -314,10 +295,7 @@ pub fn render_full(frame: &mut Frame, area: Rect, app: &mut App, scroll_from_bot
             wrapped: search_wrapped,
             ..
         } => {
-            let prefix = match direction {
-                crate::mode::SearchDirection::Forward => '/',
-                crate::mode::SearchDirection::Backward => '?',
-            };
+            let prefix = direction.label();
             let wrap_note = if *search_wrapped {
                 "  (search wrapped)"
             } else {
@@ -335,30 +313,6 @@ pub fn render_full(frame: &mut Frame, area: Rect, app: &mut App, scroll_from_bot
     let footer = format!(" Log  [{range_text}]{search_note}  /,?:search  q/Esc:close");
     let footer_style = Style::default().add_modifier(Modifier::REVERSED);
     frame.render_widget(Paragraph::new(footer).style(footer_style), rows[1]);
-}
-
-/// Draws the `/`/`?` search input line into `area` — mirrors
-/// `ui::viewer_view`'s identical helper (kept as a small, private
-/// duplicate rather than a shared export: `log_view`'s footer row has no
-/// other reason to depend on `viewer_view` beyond `styled_line`/
-/// `match_style`, which are already reused above and below).
-fn render_search_input_line(
-    frame: &mut Frame,
-    area: Rect,
-    direction: crate::mode::SearchDirection,
-    input: &crate::mode::LineEditor,
-) {
-    let label = match direction {
-        crate::mode::SearchDirection::Forward => "/",
-        crate::mode::SearchDirection::Backward => "?",
-    };
-    let text = format!("{label}{}", input.value());
-    let style = Style::default().add_modifier(Modifier::REVERSED);
-    frame.render_widget(Paragraph::new(text).style(style), area);
-
-    let col = area.x + UnicodeWidthStr::width(label) as u16 + input.cursor_display_col() as u16;
-    let col = col.min(area.x + area.width.saturating_sub(1));
-    frame.set_cursor_position((col, area.y));
 }
 
 /// The pure scroll math behind `render_full`: `scroll_from_bottom` rows
@@ -408,48 +362,6 @@ mod tests {
 
     fn log_line(message: &str, is_error: bool) -> LogLine {
         LogLine::new(message.to_string(), is_error, test_timestamp())
-    }
-
-    #[test]
-    fn wrap_to_width_leaves_a_short_line_as_one_row() {
-        assert_eq!(wrap_to_width("short", 80), vec!["short".to_string()]);
-    }
-
-    #[test]
-    fn wrap_to_width_splits_a_long_ascii_line_at_the_width() {
-        let rows = wrap_to_width("abcdefghij", 4);
-        assert_eq!(rows, vec!["abcd", "efgh", "ij"]);
-        for row in &rows {
-            assert!(UnicodeWidthStr::width(row.as_str()) <= 4);
-        }
-    }
-
-    #[test]
-    fn wrap_to_width_never_splits_a_wide_japanese_grapheme() {
-        // Each of "日本語ファイル" is a width-2 grapheme; width=5 must wrap
-        // after 2 graphemes (4 cols), not 2.5.
-        let rows = wrap_to_width("日本語ファイル", 5);
-        for row in &rows {
-            assert!(
-                UnicodeWidthStr::width(row.as_str()) <= 5,
-                "row {row:?} exceeds width 5"
-            );
-        }
-        // Every grapheme in the source must survive intact in some row.
-        let source_graphemes: Vec<&str> = "日本語ファイル".graphemes(true).collect();
-        let rebuilt: String = rows.concat();
-        let rebuilt_graphemes: Vec<&str> = rebuilt.graphemes(true).collect();
-        assert_eq!(source_graphemes, rebuilt_graphemes);
-    }
-
-    #[test]
-    fn wrap_to_width_empty_string_is_one_empty_row() {
-        assert_eq!(wrap_to_width("", 80), vec!["".to_string()]);
-    }
-
-    #[test]
-    fn wrap_to_width_zero_width_is_one_empty_row_not_a_panic() {
-        assert_eq!(wrap_to_width("anything", 0), vec!["".to_string()]);
     }
 
     #[test]
