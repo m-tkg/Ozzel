@@ -50,6 +50,9 @@ pub(crate) fn windows_project_dirs() -> Option<directories::ProjectDirs> {
 
 #[cfg(test)]
 mod tests {
+    // Every test below is `#[cfg(unix)]`, so on Windows this import would
+    // itself be flagged unused under `-D warnings` — gate it the same way.
+    #[cfg(unix)]
     use super::*;
 
     // Meaningful only on unix (a path like "/custom/xdg" isn't absolute on
