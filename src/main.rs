@@ -171,6 +171,11 @@ fn run(
         let event = event::read_event(poll_interval)?;
         app.handle_event(event);
 
+        // Every side-channel output `app.handle_event` above might have
+        // queued — see `app::Outbox`'s doc comment — drained here in one
+        // call rather than polled field by field.
+        let outbox = app.take_outbox();
+
         // `:` and `e` queue a suspend request rather than running the
         // child process inline, since only `main.rs` holds the `Terminal`
         // handle `external::run_suspended` needs to leave/re-enter the
@@ -179,7 +184,7 @@ fn run(
         // change dynamically — but a suspend can only ever be queued from
         // `Normal` mode, where capture always matches `config.mouse`
         // anyway, so this is really just "don't assume it's always on".
-        if let Some(req) = app.pending_external.take() {
+        if let Some(req) = outbox.external {
             let mouse_was_active = MOUSE_CAPTURE_ACTIVE.load(Ordering::SeqCst);
             match external::run_suspended(terminal, &req, keyboard_enhancement, mouse_was_active) {
                 Ok(Some(spawn_error)) => app.log_error(spawn_error),
@@ -198,31 +203,29 @@ fn run(
             // `,` (edit_config) queues this alongside the suspend request
             // itself; reload only after the editor has actually exited, so
             // the new config takes effect immediately without a restart.
-            if app.pending_config_reload {
-                app.pending_config_reload = false;
+            if outbox.config_reload {
                 app.reload_config();
             }
         }
 
         // `y` (copy_path) queues the OSC 52 escape rather than writing it
-        // itself, same reasoning as `pending_external`: only `main.rs`
-        // holds a raw handle to stdout it's safe to interleave writes with
-        // (the alternate-screen/raw-mode dance elsewhere all goes through
-        // here too). Best-effort — a write failure has nowhere useful to
-        // be surfaced beyond stderr, and must never crash the session over
-        // a clipboard copy.
-        if let Some(text) = app.pending_clipboard.take() {
+        // itself, same reasoning as `external`: only `main.rs` holds a raw
+        // handle to stdout it's safe to interleave writes with (the
+        // alternate-screen/raw-mode dance elsewhere all goes through here
+        // too). Best-effort — a write failure has nowhere useful to be
+        // surfaced beyond stderr, and must never crash the session over a
+        // clipboard copy.
+        if let Some(text) = outbox.clipboard {
             let seq = external::osc52_copy_sequence(&text);
             let mut stdout = io::stdout();
             let _ = stdout.write_all(seq.as_bytes());
             let _ = stdout.flush();
         }
 
-        if app.bookmarks_dirty {
-            if let Err(err) = persist::save_bookmarks(&app.bookmarks) {
-                app.log_error(format!("failed to save bookmarks: {err}"));
-            }
-            app.bookmarks_dirty = false;
+        if outbox.bookmarks_dirty
+            && let Err(err) = persist::save_bookmarks(&app.bookmarks)
+        {
+            app.log_error(format!("failed to save bookmarks: {err}"));
         }
 
         // One choke point for every mode transition that might change

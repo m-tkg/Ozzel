@@ -1,0 +1,546 @@
+use super::super::test_support::*;
+use super::super::*;
+
+#[test]
+fn open_on_directory_navigates_and_records_history() {
+    // `open` merges the old Enter/View actions: on a directory it
+    // navigates (the old View action used to error here instead —
+    // "cursor is not on a file" — that behavior is gone now that
+    // there's only one context-dependent action bound to both `Enter`
+    // and `o`).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "sub");
+
+    app.dispatch(Action::Open);
+    assert_eq!(app.panes[0].cwd, dir.path().join("sub"));
+    assert_eq!(
+        app.history.ring(Side::Left).first(),
+        Some(&dir.path().join("sub"))
+    );
+}
+
+#[test]
+fn parent_navigation_also_records_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut app = test_app(&sub, &sub);
+
+    app.dispatch(Action::Parent);
+    assert_eq!(app.panes[0].cwd, dir.path());
+    assert_eq!(
+        app.history.ring(Side::Left).first(),
+        Some(&dir.path().to_path_buf())
+    );
+}
+
+#[test]
+fn go_home_jumps_to_configured_home_and_records_history() {
+    let start = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        start.path().to_path_buf(),
+        start.path().to_path_buf(),
+        Config {
+            home: Some(home.path().to_path_buf()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    app.dispatch(Action::GoHome);
+    assert_eq!(app.panes[0].cwd, home.path());
+    assert_eq!(
+        app.history.ring(Side::Left).first(),
+        Some(&home.path().to_path_buf())
+    );
+}
+
+#[test]
+fn go_home_errors_and_stays_put_when_configured_home_is_missing() {
+    let start = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        start.path().to_path_buf(),
+        start.path().to_path_buf(),
+        Config {
+            home: Some(PathBuf::from("/does/not/exist/at/all/ozzel-test")),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    app.dispatch(Action::GoHome);
+    assert_eq!(app.panes[0].cwd, start.path());
+    assert!(app.log.iter().any(|l| l.is_error));
+}
+
+/// Reported real-world case: `home = "~/work"` where `~/work` is
+/// itself a symlink to some other real directory (the user's actual
+/// setup: `~/work -> Dropbox/work`). `config::parse_config` expands
+/// `~` (tested directly in `config::tests`); this checks the other
+/// half of the chain — that `begin_go_home`'s existing `is_dir()` +
+/// jump logic, given the *already-expanded* symlink path a real
+/// config load would hand it, still lands the pane on the symlink's
+/// resolved contents rather than erroring on it.
+#[test]
+#[cfg(unix)]
+fn go_home_jumps_through_a_symlinked_home_target() {
+    let start = tempfile::tempdir().unwrap();
+    let home_parent = tempfile::tempdir().unwrap();
+    let real_target = tempfile::tempdir().unwrap();
+    std::fs::write(real_target.path().join("marker.txt"), b"hi").unwrap();
+    let link = home_parent.path().join("work");
+    std::os::unix::fs::symlink(real_target.path(), &link).unwrap();
+
+    let mut app = App::new(
+        start.path().to_path_buf(),
+        start.path().to_path_buf(),
+        Config {
+            home: Some(link.clone()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    app.dispatch(Action::GoHome);
+    assert_eq!(app.panes[0].cwd, link);
+    assert!(app.panes[0].cwd.join("marker.txt").is_file());
+    assert!(!app.log.iter().any(|l| l.is_error));
+}
+
+#[test]
+fn bookmark_add_dedups_and_marks_dirty_only_when_actually_added() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    assert!(!app.outbox.bookmarks_dirty);
+
+    app.dispatch(Action::BookmarkAdd);
+    assert_eq!(app.bookmarks.paths, vec![dir.path().to_path_buf()]);
+    assert!(app.outbox.bookmarks_dirty);
+
+    app.outbox.bookmarks_dirty = false;
+    app.dispatch(Action::BookmarkAdd); // duplicate
+    assert_eq!(app.bookmarks.paths.len(), 1, "must not add a duplicate");
+    assert!(
+        !app.outbox.bookmarks_dirty,
+        "a no-op add must not mark dirty again"
+    );
+}
+
+#[test]
+fn bookmark_jump_menu_enter_navigates_active_pane() {
+    let target = tempfile::tempdir().unwrap();
+    let start = tempfile::tempdir().unwrap();
+    let mut app = test_app(start.path(), start.path());
+    app.bookmarks.add(target.path().to_path_buf());
+
+    app.dispatch(Action::BookmarkJump);
+    assert!(matches!(
+        app.mode,
+        Mode::Select {
+            kind: SelectKind::Bookmark,
+            ..
+        }
+    ));
+
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(app.panes[0].cwd, target.path());
+}
+
+#[test]
+fn bookmark_jump_menu_esc_cancels_without_navigating() {
+    let target = tempfile::tempdir().unwrap();
+    let start = tempfile::tempdir().unwrap();
+    let mut app = test_app(start.path(), start.path());
+    app.bookmarks.add(target.path().to_path_buf());
+
+    app.dispatch(Action::BookmarkJump);
+    app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(app.panes[0].cwd, start.path(), "Esc must not navigate");
+}
+
+#[test]
+fn bookmark_menu_down_then_d_deletes_the_highlighted_entry() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let start = tempfile::tempdir().unwrap();
+    let mut app = test_app(start.path(), start.path());
+    app.bookmarks.add(a.path().to_path_buf());
+    app.bookmarks.add(b.path().to_path_buf());
+
+    app.dispatch(Action::BookmarkJump);
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    assert_eq!(app.bookmarks.paths, vec![a.path().to_path_buf()]);
+    assert!(app.outbox.bookmarks_dirty);
+    match &app.mode {
+        Mode::Select { items, .. } => {
+            assert_eq!(items.len(), 1, "menu list must refresh after delete")
+        }
+        other => panic!("expected Select mode to stay open, got {other:?}"),
+    }
+}
+
+#[test]
+fn history_jump_menu_lists_most_recent_first_and_selects() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    select_entry_named(&mut app, "sub");
+    app.dispatch(Action::Open); // history: [sub]
+    app.dispatch(Action::Parent); // history: [dir, sub]
+
+    app.dispatch(Action::HistoryJump);
+    assert!(matches!(
+        app.mode,
+        Mode::Select {
+            kind: SelectKind::History,
+            ..
+        }
+    ));
+
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.panes[0].cwd, sub);
+}
+
+#[test]
+fn history_jump_with_empty_history_logs_error_instead_of_opening_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::HistoryJump);
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(app.log.iter().any(|l| l.is_error));
+}
+
+#[test]
+fn open_default_errors_when_no_entry_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    // Cursor starts on ".." (index 0): a tempdir always has a real
+    // parent, so nothing is "selected" for OpenDefault's purposes.
+    app.dispatch(Action::OpenDefault);
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.is_error && l.message.contains("no entry selected"))
+    );
+}
+
+#[test]
+fn focus_left_and_focus_right_activate_the_named_pane() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    assert_eq!(app.active, ActivePane::Left);
+
+    app.dispatch(Action::FocusRight);
+    assert_eq!(app.active, ActivePane::Right);
+
+    // No-op when already active.
+    app.dispatch(Action::FocusRight);
+    assert_eq!(app.active, ActivePane::Right);
+
+    app.dispatch(Action::FocusLeft);
+    assert_eq!(app.active, ActivePane::Left);
+}
+
+#[test]
+fn left_right_arrow_keys_switch_pane_focus_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.active, ActivePane::Right);
+    app.handle_event(AppEvent::Input(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(app.active, ActivePane::Left);
+}
+
+#[test]
+fn history_back_and_forward_walk_the_per_pane_stack() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+
+    app.navigate(|pane| pane.jump_to(sub.clone()));
+    assert_eq!(app.active_pane().cwd, sub);
+
+    app.dispatch(Action::HistoryBack);
+    assert_eq!(app.active_pane().cwd, dir.path());
+
+    app.dispatch(Action::HistoryForward);
+    assert_eq!(app.active_pane().cwd, sub);
+}
+
+#[test]
+fn history_back_with_nothing_to_go_back_to_logs_and_stays_put() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::HistoryBack);
+    assert_eq!(app.active_pane().cwd, dir.path());
+    assert!(app.log.back().unwrap().is_error);
+}
+
+#[test]
+fn history_forward_with_nothing_to_go_forward_to_logs_and_stays_put() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::HistoryForward);
+    assert_eq!(app.active_pane().cwd, dir.path());
+    assert!(app.log.back().unwrap().is_error);
+}
+
+#[test]
+fn a_new_navigation_after_going_back_clears_the_forward_stack() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub_a = dir.path().join("a");
+    let sub_b = dir.path().join("b");
+    std::fs::create_dir(&sub_a).unwrap();
+    std::fs::create_dir(&sub_b).unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+
+    app.navigate(|pane| pane.jump_to(sub_a.clone()));
+    app.dispatch(Action::HistoryBack); // back to dir.path()
+    app.navigate(|pane| pane.jump_to(sub_b.clone())); // a fresh move
+
+    app.dispatch(Action::HistoryForward);
+    // Forward stack was cleared by the fresh navigation, so this must
+    // be a no-op (still in sub_b), not a jump back to sub_a.
+    assert_eq!(app.active_pane().cwd, sub_b);
+}
+
+#[test]
+fn function_list_opens_empty_and_lists_every_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::FunctionList);
+    match &app.mode {
+        Mode::FunctionList { input, cursor } => {
+            assert_eq!(input.value(), "");
+            assert_eq!(*cursor, 0);
+        }
+        other => panic!("expected Mode::FunctionList, got {other:?}"),
+    }
+    assert_eq!(
+        app.function_list_filtered_actions().len(),
+        Action::ALL.len()
+    );
+}
+
+#[test]
+fn function_list_typing_narrows_and_resets_the_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::FunctionList);
+
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    if let Mode::FunctionList { cursor, .. } = &app.mode {
+        assert_eq!(*cursor, 1);
+    }
+
+    for c in "mkdir".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let filtered = app.function_list_filtered_actions();
+    assert_eq!(filtered, vec![Action::Mkdir]);
+    // Re-filtering resets the highlight to the top.
+    if let Mode::FunctionList { cursor, .. } = &app.mode {
+        assert_eq!(*cursor, 0);
+    }
+}
+
+#[test]
+fn function_list_enter_closes_the_palette_then_dispatches_the_highlighted_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::FunctionList);
+    for c in "mkdir".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    // `mkdir` opens a Prompt — proves the palette closed *and* the
+    // action actually dispatched (not just returned to Normal).
+    assert!(matches!(
+        app.mode,
+        Mode::Prompt {
+            kind: PromptKind::Mkdir,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn function_list_esc_cancels_without_dispatching_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::FunctionList);
+    app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+}
+
+#[test]
+fn jump_search_moves_cursor_to_the_first_case_insensitive_prefix_match() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("aa.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("ab.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "b.txt");
+
+    app.dispatch(Action::JumpSearch);
+    assert!(matches!(app.mode, Mode::JumpSearch { .. }));
+    // Uppercase input must still match the lowercase files.
+    app.handle_event(AppEvent::Input(KeyCode::Char('A'), KeyModifiers::NONE));
+
+    assert_eq!(
+        cursor_entry_name(&app),
+        "aa.txt",
+        "must land on the first match in display order, not \"ab.txt\""
+    );
+}
+
+#[test]
+fn jump_search_handles_japanese_prefixes_and_narrows_incrementally() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("あいう.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("あえお.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("かきく.txt"), b"a").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "かきく.txt");
+
+    app.dispatch(Action::JumpSearch);
+    app.handle_event(AppEvent::Input(KeyCode::Char('あ'), KeyModifiers::NONE));
+    assert_eq!(
+        cursor_entry_name(&app),
+        "あいう.txt",
+        "first match for the single-character prefix \"あ\""
+    );
+
+    // Narrowing the prefix further must re-search from the top and
+    // move off "あいう.txt" onto the only remaining match.
+    app.handle_event(AppEvent::Input(KeyCode::Char('え'), KeyModifiers::NONE));
+    assert_eq!(cursor_entry_name(&app), "あえお.txt");
+}
+
+#[test]
+fn jump_search_down_and_up_cycle_through_matches_with_wraparound() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cat1.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("cat2.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("cat3.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("dog.txt"), b"a").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+
+    app.dispatch(Action::JumpSearch);
+    for c in "cat".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert_eq!(cursor_entry_name(&app), "cat1.txt");
+
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(cursor_entry_name(&app), "cat2.txt");
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(cursor_entry_name(&app), "cat3.txt");
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        cursor_entry_name(&app),
+        "cat1.txt",
+        "Down from the last match must wrap around to the first"
+    );
+
+    app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+        cursor_entry_name(&app),
+        "cat3.txt",
+        "Up from the first match must wrap around to the last"
+    );
+}
+
+#[test]
+fn jump_search_with_no_match_leaves_the_cursor_where_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "b.txt");
+
+    app.dispatch(Action::JumpSearch);
+    app.handle_event(AppEvent::Input(KeyCode::Char('z'), KeyModifiers::NONE));
+    assert_eq!(cursor_entry_name(&app), "b.txt");
+}
+
+#[test]
+fn jump_search_esc_restores_the_cursor_to_where_the_search_started() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "b.txt");
+
+    app.dispatch(Action::JumpSearch);
+    app.handle_event(AppEvent::Input(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert_eq!(cursor_entry_name(&app), "a.txt", "sanity: search moved it");
+
+    app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(cursor_entry_name(&app), "b.txt");
+}
+
+#[test]
+fn jump_search_enter_keeps_the_cursor_where_the_search_left_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "b.txt");
+
+    app.dispatch(Action::JumpSearch);
+    app.handle_event(AppEvent::Input(KeyCode::Char('a'), KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(cursor_entry_name(&app), "a.txt");
+}
+
+#[test]
+fn jump_search_never_matches_the_parent_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    // A real filename that happens to start with "..", to make sure a
+    // "." or ".." prefix search matches a real entry rather than the
+    // synthetic ".." parent row (which isn't a named `FsEntry` at all,
+    // but this also documents the exclusion at the behavioral level).
+    std::fs::write(dir.path().join("..extra.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("normal.txt"), b"a").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    app.dispatch(Action::ToggleHidden);
+    select_entry_named(&mut app, "normal.txt");
+
+    assert!(matches!(
+        app.active_pane().visible_entries()[0],
+        crate::pane::VisibleItem::Parent
+    ));
+
+    app.dispatch(Action::JumpSearch);
+    app.handle_event(AppEvent::Input(KeyCode::Char('.'), KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Char('.'), KeyModifiers::NONE));
+
+    assert_eq!(cursor_entry_name(&app), "..extra.txt");
+    assert_ne!(
+        app.active_pane().cursor,
+        0,
+        "must never land on the parent row"
+    );
+}
