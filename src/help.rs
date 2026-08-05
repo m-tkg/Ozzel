@@ -26,14 +26,45 @@ pub enum HelpLine {
     Blank,
 }
 
+impl HelpLine {
+    /// This row's plain display text — no styling (that's `ui::help_view`'s
+    /// job, wrapping this in a `Line` and bolding `Header`s), and no
+    /// leading indent (also `ui::help_view`'s job) — just the exact
+    /// characters a `/`/`?` search matches against, so the search haystack
+    /// (`build_display_lines`) and the rendered screen can never drift
+    /// apart from each other.
+    pub fn text(&self) -> String {
+        match self {
+            HelpLine::Header(title) => title.clone(),
+            HelpLine::Binding {
+                keys,
+                action,
+                description,
+            } => format!("{keys:<16} {action:<16} {description}"),
+            HelpLine::Text(text) => text.clone(),
+            HelpLine::Blank => String::new(),
+        }
+    }
+}
+
+/// `build_lines`, flattened to each row's plain display text — the search
+/// haystack for `Mode::Help`'s `/`/`?` (see `crate::search`), built fresh
+/// per search rather than cached, the same "cheap enough, never goes
+/// stale" reasoning `App::handle_help_key`'s doc comment already gives for
+/// `build_lines` itself.
+pub fn build_display_lines(keymap: &Keymap) -> Vec<String> {
+    build_lines(keymap).iter().map(HelpLine::text).collect()
+}
+
 /// The fixed (non-remappable) keys of every other mode, since none of them
 /// consult the `Keymap` and so have no other way to show up here.
 const FIXED_KEY_LINES: &[&str] = &[
     "Prompt (rename/mkdir/zip name/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
     "Confirm dialogs: y/Y proceed, any other key (including Esc) cancels",
     "Select menu (history/bookmarks): Up/Down move, Enter select, Esc cancel, d delete (bookmarks only)",
-    "Viewer: Up/Down/PageUp/PageDown/Home/End (g/G) scroll, Left/Right scroll horizontally (text mode), Tab toggle text/hex, q/Esc close",
-    "This help screen: Up/Down/PageUp/PageDown/Home/End (g/G) scroll, q/Esc/h close",
+    "Viewer: Up/Down/j/k, Space/f/PageDown, b/PageUp, d/u (half page), g/Home top, G/End bottom, Left/Right scroll horizontally (text mode), Tab toggle text/hex, /,? search, n/N next/prev match, Esc clears a search then closes, q closes",
+    "This help screen: same less-style scrolling and /,?,n/N search as the viewer, q/Esc/h close (Esc clears a search first)",
+    "Log viewer (L/S-l): same less-style scrolling and /,?,n/N search as the viewer, q/Esc close (Esc clears a search first)",
 ];
 
 /// Builds the full listing: every bound action grouped by category (skipping

@@ -114,8 +114,14 @@ fn format_timestamp_prefix(timestamp: DateTime<Local>) -> String {
 /// rows get a blank hang-indent of the same width instead, so the message
 /// column stays aligned without repeating the timestamp. `is_error` is
 /// carried onto every wrapped row of an error line, so a wrapped error
-/// message stays red top to bottom.
-fn wrap_log_lines<'a>(log: impl Iterator<Item = &'a LogLine>, width: usize) -> Vec<(String, bool)> {
+/// message stays red top to bottom. `pub(crate)` (rather than private) so
+/// `App::run_log_search`/`log_search_step` can rewrap the log at
+/// `App::log_view_width` — the same width this was last rendered at — to
+/// search against exactly the rows the screen shows.
+pub(crate) fn wrap_log_lines<'a>(
+    log: impl Iterator<Item = &'a LogLine>,
+    width: usize,
+) -> Vec<(String, bool)> {
     if width == 0 {
         return Vec::new();
     }
@@ -178,26 +184,44 @@ fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
 /// mode is up (see `App::wants_mouse_capture`), a native terminal
 /// click-drag text selection only ever grabs log content, never a border
 /// glyph or the title.
-pub fn render_full(frame: &mut Frame, area: Rect, app: &App, scroll_from_bottom: usize) {
+pub fn render_full(frame: &mut Frame, area: Rect, app: &mut App, scroll_from_bottom: usize) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
+
+    // Cached so `App::run_log_search`/`log_search_step` (a keystroke, not a
+    // frame — `App` otherwise has no way to know the terminal width at
+    // all) can rewrap the log into exactly these same rows to search
+    // against. Same "stale until the first frame draws, harmless" idiom
+    // `App::pane_layout` already relies on for mouse hit-testing.
+    app.log_view_width = rows[0].width;
 
     let viewport = rows[0].height as usize;
     let wrapped = wrap_log_lines(app.log.iter(), rows[0].width as usize);
     let start = log_view_start(wrapped.len(), viewport, scroll_from_bottom);
     let end = (start + viewport).min(wrapped.len());
 
+    // While actively typing a search pattern, the matcher doesn't exist
+    // yet — only an `Active` search (see `super::viewer_view`'s identical
+    // reasoning) has anything to highlight.
+    let matcher = match &app.mode {
+        crate::mode::Mode::Log {
+            search: crate::mode::ViewerSearch::Active { pattern, .. },
+            ..
+        } => Some(crate::viewer::Matcher::build(pattern)),
+        _ => None,
+    };
+
     let lines: Vec<Line> = wrapped[start..end]
         .iter()
         .map(|(text, is_error)| {
-            let style = if *is_error {
-                Style::default().fg(Color::Red)
+            let base = super::viewer_view::styled_line(text, 0, usize::MAX, matcher.as_ref());
+            if *is_error {
+                base.patch_style(Style::default().fg(Color::Red))
             } else {
-                Style::default()
-            };
-            Line::styled(text.clone(), style)
+                base
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rows[0]);
@@ -208,9 +232,75 @@ pub fn render_full(frame: &mut Frame, area: Rect, app: &App, scroll_from_bottom:
     } else {
         format!("{}-{}/{total}", start + 1, end)
     };
-    let footer = format!(" Log  [{range_text}]  q/Esc:close");
+
+    if let crate::mode::Mode::Log {
+        search: crate::mode::ViewerSearch::Editing {
+            input, direction, ..
+        },
+        ..
+    } = &app.mode
+    {
+        render_search_input_line(frame, rows[1], *direction, input);
+        return;
+    }
+
+    let search_note = match &app.mode {
+        crate::mode::Mode::Log {
+            search:
+                crate::mode::ViewerSearch::Active {
+                    pattern,
+                    direction,
+                    matches,
+                    current,
+                    wrapped: search_wrapped,
+                },
+            ..
+        } => {
+            let prefix = match direction {
+                crate::mode::SearchDirection::Forward => '/',
+                crate::mode::SearchDirection::Backward => '?',
+            };
+            let wrap_note = if *search_wrapped {
+                "  (search wrapped)"
+            } else {
+                ""
+            };
+            format!(
+                "  {prefix}{pattern}  {}/{}{wrap_note}",
+                current + 1,
+                matches.len()
+            )
+        }
+        _ => String::new(),
+    };
+
+    let footer = format!(" Log  [{range_text}]{search_note}  /,?:search  q/Esc:close");
     let footer_style = Style::default().add_modifier(Modifier::REVERSED);
     frame.render_widget(Paragraph::new(footer).style(footer_style), rows[1]);
+}
+
+/// Draws the `/`/`?` search input line into `area` — mirrors
+/// `ui::viewer_view`'s identical helper (kept as a small, private
+/// duplicate rather than a shared export: `log_view`'s footer row has no
+/// other reason to depend on `viewer_view` beyond `styled_line`/
+/// `match_style`, which are already reused above and below).
+fn render_search_input_line(
+    frame: &mut Frame,
+    area: Rect,
+    direction: crate::mode::SearchDirection,
+    input: &crate::mode::LineEditor,
+) {
+    let label = match direction {
+        crate::mode::SearchDirection::Forward => "/",
+        crate::mode::SearchDirection::Backward => "?",
+    };
+    let text = format!("{label}{}", input.value());
+    let style = Style::default().add_modifier(Modifier::REVERSED);
+    frame.render_widget(Paragraph::new(text).style(style), area);
+
+    let col = area.x + UnicodeWidthStr::width(label) as u16 + input.cursor_display_col() as u16;
+    let col = col.min(area.x + area.width.saturating_sub(1));
+    frame.set_cursor_position((col, area.y));
 }
 
 /// The pure scroll math behind `render_full`: `scroll_from_bottom` rows
@@ -475,7 +565,7 @@ mod tests {
         let backend = TestBackend::new(30, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_full(frame, frame.area(), &app, 0))
+            .draw(|frame| render_full(frame, frame.area(), &mut app, 0))
             .unwrap();
 
         for cell in terminal.backend().buffer().content() {

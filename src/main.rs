@@ -13,6 +13,7 @@ mod mode;
 mod ops;
 mod pane;
 mod persist;
+mod search;
 mod settings;
 mod tasks;
 mod ui;
