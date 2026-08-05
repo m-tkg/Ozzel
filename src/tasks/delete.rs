@@ -2,6 +2,14 @@
 //! call (coarse before/after progress, per the plan — the crate doesn't
 //! expose per-file granularity); permanent-mode reports progress per
 //! target entry and is cancellable between entries.
+//!
+//! On macOS specifically, trash-mode uses the `NsFileManager` delete
+//! method rather than the crate's default (`Finder`, which shells out to
+//! `osascript` and asks the Finder app to do the move). The Finder/
+//! AppleScript path requires an Automation permission grant that a
+//! terminal app doesn't have by default, and fails outright without it
+//! ("The AppleScript exited with error") — `NsFileManager` calls
+//! `NSFileManager`'s trash API directly and needs no such permission.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,7 +47,7 @@ fn run_trash(id: TaskId, tx: &Sender<TaskEvent>, targets: &[PathBuf]) {
         detail: "moving to trash".to_string(),
     });
 
-    let result = trash::delete_all(targets);
+    let result = trash_all(targets);
     let finished = match result {
         Ok(()) => {
             let _ = tx.send(TaskEvent::Progress {
@@ -56,6 +64,26 @@ fn run_trash(id: TaskId, tx: &Sender<TaskEvent>, targets: &[PathBuf]) {
         id,
         result: finished,
     });
+}
+
+/// Moves `targets` to the OS trash. On macOS this explicitly selects the
+/// `NsFileManager` delete method (see the module doc comment above) instead
+/// of the crate's `Finder`/AppleScript default, which fails in a plain
+/// terminal without an Automation permission grant. Every other platform
+/// uses the crate's own default (`freedesktop.org` trash spec on Linux,
+/// the Windows shell API on Windows), which needs no such workaround.
+fn trash_all(targets: &[PathBuf]) -> Result<(), trash::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut ctx = trash::TrashContext::default();
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+        ctx.delete_all(targets)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        trash::delete_all(targets)
+    }
 }
 
 fn run_permanent(

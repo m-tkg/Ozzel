@@ -34,8 +34,9 @@ pub struct PaneColors {
 
 pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool, colors: PaneColors) {
     // The inactive pane dims when configured to (default on); its cursor
-    // row always stays at full brightness so it's never hard to read, even
-    // dimmed alongside a plain white background.
+    // row dims along with everything else (see the cursor-row style below)
+    // — it's still locatable since it's the only row with a background
+    // fill at all, just a dimmed one.
     let dim = !active && colors.dim_inactive;
     let cursor_color = if active {
         colors.cursor
@@ -82,33 +83,51 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, active: bool, colors: 
         .map(|(idx, item)| {
             let marked = matches!(item, VisibleItem::Entry(e) if pane.marks.contains(&e.path));
             let text = format_row(item, inner.width as usize, marked);
-            // The cursor row's bg/fg takes priority over the marked
-            // row's yellow fg when both apply — yellow-on-light-green
-            // reads poorly, and the row's own `*` prefix already marks
-            // "marked" unambiguously regardless of color. The cursor row
-            // is also exempt from dimming even in a dimmed (inactive) pane.
-            let style = if idx == cursor {
-                Style::default()
-                    .bg(cursor_color)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else if marked {
-                let base = Style::default().fg(Color::Yellow);
-                if dim {
-                    base.add_modifier(Modifier::DIM)
-                } else {
-                    base
-                }
-            } else if dim {
-                Style::default().add_modifier(Modifier::DIM)
-            } else {
-                Style::default()
-            };
+            let style = row_style(idx == cursor, marked, dim, cursor_color);
             ListItem::new(Line::styled(text, style))
         })
         .collect();
 
     frame.render_widget(List::new(rows), inner);
+}
+
+/// The style for one row, given whether it's the cursor row, whether it's
+/// marked, and whether the whole pane is currently dimmed. The cursor
+/// row's bg/fg takes priority over the marked row's yellow fg when both
+/// apply — yellow-on-light-green reads poorly, and the row's own `*`
+/// prefix already marks "marked" unambiguously regardless of color.
+/// Unlike an earlier round, the cursor row *does* dim along with the rest
+/// of an inactive dimmed pane now (user feedback: an undimmed cursor stood
+/// out too much against a dimmed pane) — it's still locatable since it's
+/// the only row keeping a background fill at all, dimmed or not.
+///
+/// The cursor row drops `BOLD` when dimmed rather than combining it with
+/// `DIM`: in the ANSI/VT100 model both attributes share the same terminal
+/// "intensity" slot (SGR 1 = bold, SGR 2 = faint, mutually exclusive, not
+/// independently stackable bits the way ratatui's `Modifier` bitflags
+/// suggest) — asking for both at once is at the mercy of which one a given
+/// terminal happens to apply last, which is exactly the ambiguity a
+/// deliberate "dim" request shouldn't be subject to.
+fn row_style(is_cursor: bool, marked: bool, dim: bool, cursor_color: Color) -> Style {
+    if is_cursor {
+        let base = Style::default().bg(cursor_color).fg(Color::Black);
+        if dim {
+            base.add_modifier(Modifier::DIM)
+        } else {
+            base.add_modifier(Modifier::BOLD)
+        }
+    } else if marked {
+        let base = Style::default().fg(Color::Yellow);
+        if dim {
+            base.add_modifier(Modifier::DIM)
+        } else {
+            base
+        }
+    } else if dim {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+    }
 }
 
 /// Where the viewport should start so that `cursor` is always visible.
@@ -237,6 +256,51 @@ fn pad_left_display(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_row_style_dims_when_pane_is_dimmed() {
+        // The bug-fix under test: the inactive pane's cursor row must dim
+        // along with the rest of the pane, not stay exempt.
+        let style = row_style(true, false, true, Color::White);
+        assert!(style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(style.bg, Some(Color::White));
+        assert_eq!(style.fg, Some(Color::Black));
+        // BOLD and DIM share the same ANSI "intensity" slot on a real
+        // terminal (SGR 1 vs SGR 2, mutually exclusive) — asking for both
+        // is unreliable, so the dimmed cursor row must drop BOLD rather
+        // than combine it with DIM.
+        assert!(!style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn cursor_row_style_does_not_dim_when_pane_is_not_dimmed() {
+        let style = row_style(true, false, false, Color::Rgb(0x90, 0xEE, 0x90));
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(style.bg, Some(Color::Rgb(0x90, 0xEE, 0x90)));
+    }
+
+    #[test]
+    fn marked_row_style_dims_when_pane_is_dimmed() {
+        let style = row_style(false, true, true, Color::White);
+        assert!(style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn plain_row_style_dims_when_pane_is_dimmed() {
+        let style = row_style(false, false, true, Color::White);
+        assert!(style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(style.bg, None);
+        assert_eq!(style.fg, None);
+    }
+
+    #[test]
+    fn plain_row_style_is_bare_when_not_dimmed() {
+        let style = row_style(false, false, false, Color::White);
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(style, Style::default());
+    }
 
     #[test]
     fn human_size_formats_common_ranges() {

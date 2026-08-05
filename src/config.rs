@@ -74,9 +74,9 @@ pub struct ColorsConfig {
         default = "default_cursor_inactive_color"
     )]
     pub cursor_inactive: Color,
-    /// Whether the inactive pane's non-cursor rows (and its border/header)
-    /// render dimmed. The cursor row itself always stays at full
-    /// brightness so it's never hard to read.
+    /// Whether the inactive pane's rows (including its cursor row) and its
+    /// border/header render dimmed. The cursor row stays locatable even
+    /// dimmed, since it's still the only row with a background fill.
     #[serde(default = "default_dim_inactive")]
     pub dim_inactive: bool,
 }
