@@ -11,7 +11,7 @@ use chrono::{Local, TimeZone};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ozzel::app::LogLine;
 use ozzel::pane::{Pane, SortKey};
-use ozzel::ui::log_view::wrap_log_lines;
+use ozzel::ui::log_view::{wrap_log_lines, wrap_log_lines_tail};
 use ozzel::virtual_dir::read_archive_dir_entries;
 
 // --- Pane::visible_entries (directory read + sort) -------------------------
@@ -88,11 +88,11 @@ fn make_log_lines(count: usize) -> Vec<LogLine> {
             } else {
                 format!("error {i}: operation failed")
             };
-            LogLine {
+            LogLine::new(
                 message,
-                is_error: i % 3 == 2,
-                timestamp: base + chrono::Duration::seconds(i as i64),
-            }
+                i % 3 == 2,
+                base + chrono::Duration::seconds(i as i64),
+            )
         })
         .collect()
 }
@@ -101,6 +101,19 @@ fn bench_wrap_log_lines(c: &mut Criterion) {
     let lines = make_log_lines(500);
     c.bench_function("wrap_log_lines_500_lines_width_80", |b| {
         b.iter(|| std::hint::black_box(wrap_log_lines(lines.iter(), 80)));
+    });
+}
+
+/// Phase 2's tail-first path (`ui::log_view::render_log_lines`, the bottom
+/// status-bar log panel): same 500-line log as `bench_wrap_log_lines`
+/// above, but only ever asking for the last 4 wrapped rows (a typical
+/// bottom-panel height) — the comparison that actually demonstrates the
+/// fix, since `bench_wrap_log_lines` intentionally keeps measuring the
+/// full-log-view/search path's unchanged cost (see `BASELINE.md`).
+fn bench_wrap_log_lines_tail_bottom_panel(c: &mut Criterion) {
+    let lines = make_log_lines(500);
+    c.bench_function("wrap_log_lines_tail_500_lines_width_80_need_4_rows", |b| {
+        b.iter(|| std::hint::black_box(wrap_log_lines_tail(lines.iter().rev(), 80, 4)));
     });
 }
 
@@ -187,6 +200,7 @@ criterion_group!(
     bench_pane_visible_entries,
     bench_pane_visible_entries_cached,
     bench_wrap_log_lines,
+    bench_wrap_log_lines_tail_bottom_panel,
     bench_archive_listing
 );
 criterion_main!(benches);

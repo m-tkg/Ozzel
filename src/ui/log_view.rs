@@ -14,6 +14,9 @@
 //! wrapped rows stay bottom-anchored even when that means an older line's
 //! wrapped continuation scrolls off the top first.
 
+use std::collections::VecDeque;
+use std::rc::Rc;
+
 use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -80,10 +83,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 /// stays visible even if that cuts an older line's wrapped continuation
 /// off the top.
 fn render_log_lines(frame: &mut Frame, area: Rect, app: &App, available_rows: usize) {
-    let wrapped = wrap_log_lines(app.log.iter(), area.width as usize);
-    let start = wrapped.len().saturating_sub(available_rows);
+    let wrapped = wrap_log_lines_tail(app.log.iter().rev(), area.width as usize, available_rows);
 
-    let lines: Vec<Line> = wrapped[start..]
+    let lines: Vec<Line> = wrapped
         .iter()
         .map(|(text, is_error)| {
             let style = if *is_error {
@@ -101,8 +103,10 @@ fn render_log_lines(frame: &mut Frame, area: Rect, app: &App, available_rows: us
 /// `TIMESTAMP_FORMAT`). Takes the timestamp as a plain value rather than
 /// calling `Local::now()` itself, so it stays a pure, directly-testable
 /// function — the actual "when" is captured once, at append time, by
-/// `App::log_push`.
-fn format_timestamp_prefix(timestamp: DateTime<Local>) -> String {
+/// `App::log_push`. `pub(crate)` so `LogLine::new` (`app.rs`) can format
+/// this once per line at append time (see its `formatted_timestamp` field)
+/// instead of every wrap.
+pub(crate) fn format_timestamp_prefix(timestamp: DateTime<Local>) -> String {
     timestamp.format(TIMESTAMP_FORMAT).to_string()
 }
 
@@ -131,7 +135,7 @@ pub fn wrap_log_lines<'a>(
     let hang_indent = " ".repeat(TIMESTAMP_PREFIX_WIDTH);
 
     log.flat_map(move |line| {
-        let prefix = format_timestamp_prefix(line.timestamp);
+        let prefix = line.formatted_timestamp.clone();
         let is_error = line.is_error;
         let hang_indent = hang_indent.clone();
         wrap_to_width(&line.message, message_width)
@@ -143,6 +147,51 @@ pub fn wrap_log_lines<'a>(
             })
     })
     .collect()
+}
+
+/// Tail-first sibling of `wrap_log_lines` for the bottom log panel, which
+/// only ever shows a handful of rows: walks `log` **newest to oldest**
+/// (pass `app.log.iter().rev()`) and stops as soon as `needed_rows` wrapped
+/// rows have been collected, instead of wrapping (and timestamp-prefixing)
+/// every one of the up-to-`LOG_CAPACITY` in-memory lines just to throw all
+/// but the last few away. Produces exactly the same rows, in the same
+/// order, that `wrap_log_lines(log, width)`'s last `needed_rows` entries
+/// would (see the equivalence tests below) — a perf path, not a behavior
+/// change. The full-frame log view (`render_full`) and its `/`/`?` search
+/// still go through `wrap_log_lines` proper: they need the *entire* wrapped
+/// log (to scroll/search through), so there's nothing to skip there.
+pub fn wrap_log_lines_tail<'a>(
+    log_newest_first: impl Iterator<Item = &'a LogLine>,
+    width: usize,
+    needed_rows: usize,
+) -> Vec<(String, bool)> {
+    if width == 0 || needed_rows == 0 {
+        return Vec::new();
+    }
+    let message_width = width.saturating_sub(TIMESTAMP_PREFIX_WIDTH);
+    let hang_indent = " ".repeat(TIMESTAMP_PREFIX_WIDTH);
+
+    // Rows accumulate oldest-to-newest as lines are consumed newest-to-
+    // oldest, so each line's rows are pushed to the *front* — a `VecDeque`
+    // makes that O(1) instead of an `insert(0, ...)` shuffle on a `Vec`.
+    let mut collected: VecDeque<(String, bool)> = VecDeque::new();
+    for line in log_newest_first {
+        let rows = wrap_to_width(&line.message, message_width);
+        for (i, row) in rows.into_iter().enumerate().rev() {
+            let indent = if i == 0 {
+                line.formatted_timestamp.as_str()
+            } else {
+                hang_indent.as_str()
+            };
+            collected.push_front((format!("{indent}{row}"), line.is_error));
+        }
+        if collected.len() >= needed_rows {
+            break;
+        }
+    }
+
+    let start = collected.len().saturating_sub(needed_rows);
+    collected.into_iter().skip(start).collect()
 }
 
 /// Hard-wraps `s` into chunks of at most `width` display columns, breaking
@@ -199,26 +248,36 @@ pub fn render_full(frame: &mut Frame, area: Rect, app: &mut App, scroll_from_bot
     // `App::pane_layout` already relies on for mouse hit-testing.
     app.log_view_width = rows[0].width;
 
+    // Pulled out as an owned value *before* `app.log_wrapped` below, which
+    // needs `app` mutably (it may rebuild and cache the wrap) — `search` is
+    // small to clone (its `matcher`, if any, is an `Rc` bump) and this way
+    // nothing here needs to juggle two live borrows of `app` at once. Like
+    // the `matcher` lookup this replaces, defaults to "no active search"
+    // rather than assuming the mode (callers only ever invoke this while
+    // `app.mode` is `Mode::Log`, but nothing here actually depends on that).
+    let search = match &app.mode {
+        crate::mode::Mode::Log { search, .. } => search.clone(),
+        _ => crate::mode::ViewerSearch::Idle,
+    };
+
     let viewport = rows[0].height as usize;
-    let wrapped = wrap_log_lines(app.log.iter(), rows[0].width as usize);
+    let wrapped = app.log_wrapped(rows[0].width);
     let start = log_view_start(wrapped.len(), viewport, scroll_from_bottom);
     let end = (start + viewport).min(wrapped.len());
 
     // While actively typing a search pattern, the matcher doesn't exist
     // yet — only an `Active` search (see `super::viewer_view`'s identical
-    // reasoning) has anything to highlight.
-    let matcher = match &app.mode {
-        crate::mode::Mode::Log {
-            search: crate::mode::ViewerSearch::Active { pattern, .. },
-            ..
-        } => Some(crate::viewer::Matcher::build(pattern)),
+    // reasoning) has anything to highlight. The matcher itself was compiled
+    // once by `crate::search::run`, not rebuilt here every frame.
+    let matcher = match &search {
+        crate::mode::ViewerSearch::Active { matcher, .. } => Some(Rc::clone(matcher)),
         _ => None,
     };
 
     let lines: Vec<Line> = wrapped[start..end]
         .iter()
         .map(|(text, is_error)| {
-            let base = super::viewer_view::styled_line(text, 0, usize::MAX, matcher.as_ref());
+            let base = super::viewer_view::styled_line(text, 0, usize::MAX, matcher.as_deref());
             if *is_error {
                 base.patch_style(Style::default().fg(Color::Red))
             } else {
@@ -235,27 +294,24 @@ pub fn render_full(frame: &mut Frame, area: Rect, app: &mut App, scroll_from_bot
         format!("{}-{}/{total}", start + 1, end)
     };
 
-    if let crate::mode::Mode::Log {
-        search: crate::mode::ViewerSearch::Editing {
-            input, direction, ..
-        },
-        ..
-    } = &app.mode
+    // `wrapped`'s last use was just above (`total`/the slice for `lines`),
+    // so `app` is no longer borrowed from here on — everything below reads
+    // `search` (already an owned copy) instead of `app.mode` again.
+    if let crate::mode::ViewerSearch::Editing {
+        input, direction, ..
+    } = &search
     {
         render_search_input_line(frame, rows[1], *direction, input);
         return;
     }
 
-    let search_note = match &app.mode {
-        crate::mode::Mode::Log {
-            search:
-                crate::mode::ViewerSearch::Active {
-                    pattern,
-                    direction,
-                    matches,
-                    current,
-                    wrapped: search_wrapped,
-                },
+    let search_note = match &search {
+        crate::mode::ViewerSearch::Active {
+            pattern,
+            direction,
+            matches,
+            current,
+            wrapped: search_wrapped,
             ..
         } => {
             let prefix = match direction {
@@ -351,11 +407,7 @@ mod tests {
     }
 
     fn log_line(message: &str, is_error: bool) -> LogLine {
-        LogLine {
-            message: message.to_string(),
-            is_error,
-            timestamp: test_timestamp(),
-        }
+        LogLine::new(message.to_string(), is_error, test_timestamp())
     }
 
     #[test]
@@ -535,6 +587,81 @@ mod tests {
         let available_rows = 10;
         let start = wrapped.len().saturating_sub(available_rows);
         assert_eq!(start, 0, "must not skip content when there's room to spare");
+    }
+
+    /// `wrap_log_lines_tail(log.iter().rev(), width, needed_rows)` must
+    /// produce exactly the same rows as taking `wrap_log_lines(log.iter(),
+    /// width)`'s own last `needed_rows` entries — the whole point of the
+    /// tail-first path is that it's a perf shortcut to the same answer, not
+    /// a different one.
+    fn assert_tail_matches_full_wrap(lines: &[LogLine], width: usize, needed_rows: usize) {
+        let full = wrap_log_lines(lines.iter(), width);
+        let expected_start = full.len().saturating_sub(needed_rows);
+        let expected = &full[expected_start..];
+
+        let tail = wrap_log_lines_tail(lines.iter().rev(), width, needed_rows);
+        assert_eq!(
+            tail, expected,
+            "tail-first wrap must match the full wrap's own tail slice"
+        );
+    }
+
+    #[test]
+    fn wrap_log_lines_tail_matches_the_full_wrap_tail_when_lines_wrap_across_multiple_rows() {
+        let lines: Vec<LogLine> = vec![
+            log_line("short one", false),
+            log_line(
+                "this is a much longer line that will wrap across several rows",
+                true,
+            ),
+            log_line("another short line", false),
+            log_line("yet another line, also fairly short", false),
+        ];
+        // message_width small enough that at least one line wraps.
+        assert_tail_matches_full_wrap(&lines, 30, 4);
+    }
+
+    #[test]
+    fn wrap_log_lines_tail_stops_early_without_touching_lines_entirely_trimmed_away() {
+        // Only the newest couple of (single-row) lines are ever needed —
+        // this exercises the early-`break` path directly, not just its
+        // output (a bug that read the whole log but still produced the
+        // right *slice* would pass `assert_tail_matches_full_wrap` too).
+        let lines: Vec<LogLine> = (1..=50)
+            .map(|n| log_line(&format!("line {n}"), false))
+            .collect();
+        let tail = wrap_log_lines_tail(lines.iter().rev(), 80, 2);
+        assert_eq!(
+            tail,
+            vec![
+                ("2024-01-02 03:04:05 line 49".to_string(), false),
+                ("2024-01-02 03:04:05 line 50".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_log_lines_tail_requesting_more_rows_than_exist_returns_everything() {
+        let lines: Vec<LogLine> = vec![log_line("only line", false)];
+        assert_tail_matches_full_wrap(&lines, 80, 10);
+    }
+
+    #[test]
+    fn wrap_log_lines_tail_zero_width_is_empty() {
+        let lines = [log_line("hello", false)];
+        assert!(wrap_log_lines_tail(lines.iter().rev(), 0, 5).is_empty());
+    }
+
+    #[test]
+    fn wrap_log_lines_tail_zero_needed_rows_is_empty() {
+        let lines = [log_line("hello", false)];
+        assert!(wrap_log_lines_tail(lines.iter().rev(), 80, 0).is_empty());
+    }
+
+    #[test]
+    fn wrap_log_lines_tail_empty_log_is_empty() {
+        let lines: [LogLine; 0] = [];
+        assert!(wrap_log_lines_tail(lines.iter().rev(), 80, 5).is_empty());
     }
 
     /// Every box-drawing glyph `Borders::ALL` might have drawn — used by

@@ -3,6 +3,7 @@
 //! `App::handle_prompt_key` / `App::handle_confirm_key`).
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -10,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::action::Action;
 use crate::keymap::KeyCombo;
 use crate::settings::Category;
+use crate::viewer::Matcher;
 
 /// What a `Mode::Prompt` is collecting text for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +103,13 @@ impl SearchDirection {
 /// until `Esc` (in plain, non-editing state) clears it back to `Idle`. The
 /// actual state-machine transitions live in `crate::search`, not on this
 /// type itself — this is pure data.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+// No `PartialEq`/`Eq` here (or on `Mode`, which embeds this in three
+// variants) — `matcher` below is a compiled `regex::Regex` under the hood,
+// which implements neither. Nothing actually compares a `Mode`/`ViewerSearch`
+// by value across the codebase (every existing "is it this variant" check is
+// `matches!`/pattern-match, never `==`), so dropping the derives costs
+// nothing real.
+#[derive(Debug, Clone, Default)]
 pub enum ViewerSearch {
     #[default]
     Idle,
@@ -116,12 +124,20 @@ pub enum ViewerSearch {
         previous: Box<ViewerSearch>,
     },
     Active {
-        /// The raw text as typed — re-compiled into a `viewer::Matcher` on
-        /// demand (by `n`/`N` navigation and by rendering, for
-        /// highlighting) rather than stored compiled, since a compiled
-        /// `regex::Regex` doesn't implement `PartialEq`/`Eq` and every
-        /// other `Mode` variant does.
+        /// The raw text as typed — kept alongside `matcher` (rather than
+        /// re-deriving it) purely for display (the footer's `/pattern`)
+        /// and so `n`/`N`'s wraparound bookkeeping has something `Debug`/
+        /// `Clone`-able to carry.
         pattern: String,
+        /// The compiled matcher for `pattern`, built once by
+        /// `crate::search::run` — every render of the viewer/help/log
+        /// screens while this search is active borrows this instead of
+        /// re-running `RegexBuilder::build` from scratch. `Rc` (not a bare
+        /// `Matcher`) so `ViewerSearch` can stay `Clone` without requiring
+        /// `Matcher: Clone` (a `regex::Regex` is, incidentally, `Clone`,
+        /// but `Rc::clone` is a refcount bump either way — cheaper, and one
+        /// less thing to keep true).
+        matcher: Rc<Matcher>,
         direction: SearchDirection,
         /// Line indices (text mode) or hex-dump row indices (hex mode)
         /// containing at least one match, ascending. Always non-empty —
@@ -183,7 +199,10 @@ pub enum PendingOp {
     Quit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+// See `ViewerSearch`'s doc comment for why this has no `PartialEq`/`Eq`:
+// `Viewer`/`Help`/`Log` all embed a `search: ViewerSearch`, which now holds
+// a compiled matcher.
+#[derive(Debug, Clone, Default)]
 pub enum Mode {
     #[default]
     Normal,

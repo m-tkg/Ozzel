@@ -8,23 +8,30 @@
 //! rows, so the search haystack and what's actually drawn can never drift
 //! apart.
 
+use std::rc::Rc;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-use crate::help::{self, HelpLine};
-use crate::keymap::Keymap;
+use crate::app::App;
+use crate::help::HelpLine;
 use crate::mode::{LineEditor, Mode, SearchDirection, ViewerSearch};
 use crate::viewer::Matcher;
 
-pub fn render(frame: &mut Frame, area: Rect, mode: &Mode, keymap: &Keymap) {
-    let Mode::Help { scroll, search } = mode else {
-        return;
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Pulled out as owned copies *before* `app.help_lines()` below (which
+    // needs `app` mutably — it may rebuild and cache the listing): `scroll`
+    // is `Copy`, and `search` is cheap to clone (its `matcher`, if any, is
+    // just an `Rc` bump) — this way nothing here has to juggle two live
+    // borrows of `app` at once.
+    let (scroll, search) = match &app.mode {
+        Mode::Help { scroll, search } => (*scroll, search.clone()),
+        _ => return,
     };
 
-    let lines = help::build_lines(keymap);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -32,46 +39,54 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode, keymap: &Keymap) {
 
     // While actively typing a search pattern, the matcher doesn't exist
     // yet — only an `Active` search (see `super::viewer_view`'s identical
-    // reasoning) has anything to highlight.
-    let matcher = match search {
-        ViewerSearch::Active { pattern, .. } => Some(Matcher::build(pattern)),
+    // reasoning) has anything to highlight. The matcher itself was compiled
+    // once by `crate::search::run`, not rebuilt here every frame.
+    let matcher = match &search {
+        ViewerSearch::Active { matcher, .. } => Some(Rc::clone(matcher)),
         _ => None,
     };
 
+    // Only rebuilt when the keymap itself changed (see `App::help_lines`) —
+    // not on every scroll/search keystroke against the already-open screen.
+    let lines = app.help_lines();
     let viewport_height = rows[0].height as usize;
     let visible: Vec<Line> = lines
         .iter()
-        .skip(*scroll)
+        .skip(scroll)
         .take(viewport_height)
-        .map(|line| render_line(line, matcher.as_ref()))
+        .map(|line| render_line(line, matcher.as_deref()))
         .collect();
     frame.render_widget(Paragraph::new(visible), rows[0]);
 
     let total = lines.len();
-    let bottom = (*scroll + viewport_height).min(total);
+    let bottom = (scroll + viewport_height).min(total);
     let range_text = if total == 0 {
         "0/0".to_string()
     } else {
-        format!("{}-{}/{}", *scroll + 1, bottom, total)
+        format!("{}-{}/{}", scroll + 1, bottom, total)
     };
 
+    // `lines`' last use was just above, so `app` is no longer borrowed from
+    // here on — everything below reads `search` (already an owned copy)
+    // instead of `app.mode` again.
     // A search input in progress takes over the footer row entirely, same
     // as the viewer's own footer does.
     if let ViewerSearch::Editing {
         input, direction, ..
-    } = search
+    } = &search
     {
         render_search_input_line(frame, rows[1], *direction, input);
         return;
     }
 
-    let search_note = match search {
+    let search_note = match &search {
         ViewerSearch::Active {
             pattern,
             direction,
             matches,
             current,
             wrapped,
+            ..
         } => {
             let prefix = match direction {
                 SearchDirection::Forward => '/',
@@ -149,6 +164,17 @@ fn render_line(line: &HelpLine, matcher: Option<&Matcher>) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+
+    fn test_app() -> App {
+        let dir = tempfile::tempdir().unwrap();
+        App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config::default(),
+        )
+        .unwrap()
+    }
 
     /// With mouse capture dynamically disabled while the help screen is
     /// up (see `App::wants_mouse_capture`), a native terminal click-drag
@@ -163,8 +189,8 @@ mod tests {
 
         const BORDER_GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼'];
 
-        let keymap = Keymap::defaults();
-        let mode = Mode::Help {
+        let mut app = test_app();
+        app.mode = Mode::Help {
             scroll: 0,
             search: ViewerSearch::Idle,
         };
@@ -172,7 +198,7 @@ mod tests {
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &mode, &keymap))
+            .draw(|frame| render(frame, frame.area(), &mut app))
             .unwrap();
 
         for cell in terminal.backend().buffer().content() {
@@ -189,11 +215,12 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let keymap = Keymap::defaults();
-        let mode = Mode::Help {
+        let mut app = test_app();
+        app.mode = Mode::Help {
             scroll: 0,
             search: ViewerSearch::Active {
                 pattern: "rename".to_string(),
+                matcher: Rc::new(Matcher::build("rename")),
                 direction: SearchDirection::Forward,
                 matches: vec![0],
                 current: 0,
@@ -204,7 +231,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &mode, &keymap))
+            .draw(|frame| render(frame, frame.area(), &mut app))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let has_reversed = buffer
@@ -219,15 +246,15 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let keymap = Keymap::defaults();
-        let mode = Mode::Help {
+        let mut app = test_app();
+        app.mode = Mode::Help {
             scroll: 0,
             search: ViewerSearch::Idle,
         };
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &mode, &keymap))
+            .draw(|frame| render(frame, frame.area(), &mut app))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let mut bottom = String::new();

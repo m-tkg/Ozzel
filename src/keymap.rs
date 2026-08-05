@@ -3,6 +3,7 @@
 //! (see `App::handle_prompt_key` / `App::handle_confirm_key`).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use serde::Deserialize;
@@ -106,8 +107,27 @@ fn parse_action(name: &str) -> Result<Action, KeymapError> {
     Action::deserialize(deserializer).map_err(|_| KeymapError::UnknownAction(name.to_string()))
 }
 
+/// Source for `Keymap::generation` — global rather than per-`Keymap` because
+/// what needs a unique id is each *instance* (see `generation`'s doc
+/// comment), not each mutation of one.
+static NEXT_KEYMAP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 pub struct Keymap {
     bindings: HashMap<KeyCombo, Action>,
+    /// A globally-unique id, assigned once in `defaults()` (the only
+    /// constructor — `merge_overrides`/`apply_bindings` only ever mutate an
+    /// in-progress instance before it's ever handed to an `App`, never one
+    /// already live). `App::keymap` is never mutated in place after that:
+    /// every binding change (`[keys]`/`[bindings]` reload, a settings-screen
+    /// rebind) goes through `build_keymap`, producing a brand new `Keymap`
+    /// that wholesale-replaces `self.keymap`. That makes a per-instance id
+    /// assigned once at construction exactly as good an invalidation key as
+    /// a counter bumped on every mutation would be — simpler, and it needs
+    /// no `&mut self` threading through `merge_overrides`/`apply_bindings`
+    /// beyond what they already do. Consulted by `App::help_lines`/
+    /// `App::settings_keybinding_lines` to cache keymap-derived render data
+    /// without it ever going stale relative to the live keymap.
+    generation: u64,
 }
 
 impl Keymap {
@@ -218,7 +238,17 @@ impl Keymap {
             let combo = KeyCombo::parse(combo).expect("built-in combo must parse");
             bindings.insert(combo, *action);
         }
-        Self { bindings }
+        Self {
+            bindings,
+            generation: NEXT_KEYMAP_GENERATION.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    /// This `Keymap` instance's unique id — see the field's own doc comment
+    /// for why an instance-level id (rather than a per-mutation counter) is
+    /// the right cache-invalidation key here.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Applies a config `[keys]` table on top of the defaults: a normal
@@ -1036,6 +1066,7 @@ mod tests {
 
         let mut rebuilt = Keymap {
             bindings: HashMap::new(),
+            generation: 0,
         };
         rebuilt.apply_bindings(&parsed.bindings).unwrap();
 

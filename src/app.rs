@@ -19,6 +19,7 @@ use crate::event::{
 };
 use crate::external::{self, ExternalRequest};
 use crate::filter::FilterSpec;
+use crate::help::HelpLine;
 use crate::keymap::{KeyCombo, Keymap};
 use crate::mode::{
     LineEditor, Mode, PendingOp, PromptKind, SearchDirection, SelectKind, SettingsEditor,
@@ -96,6 +97,28 @@ pub struct LogLine {
     /// area's rendering stays a pure function of already-stored data (see
     /// `ui::log_view::format_timestamp_prefix`).
     pub timestamp: DateTime<Local>,
+    /// `ui::log_view::format_timestamp_prefix(timestamp)`, computed once
+    /// here by `LogLine::new` rather than by every `wrap_log_lines`/
+    /// `wrap_log_lines_tail` call — with up to `LOG_CAPACITY` lines live,
+    /// re-running `chrono`'s `format` on every one of them every frame the
+    /// bottom log panel (or the full log view) draws was real, measurable
+    /// per-frame cost for something that never changes after the line is
+    /// appended. `pub(crate)` (not `pub`): read directly by `ui::log_view`,
+    /// but never constructed outside `LogLine::new`, which is what keeps it
+    /// in sync with `timestamp`.
+    pub(crate) formatted_timestamp: String,
+}
+
+impl LogLine {
+    pub fn new(message: String, is_error: bool, timestamp: DateTime<Local>) -> Self {
+        let formatted_timestamp = crate::ui::log_view::format_timestamp_prefix(timestamp);
+        Self {
+            message,
+            is_error,
+            timestamp,
+            formatted_timestamp,
+        }
+    }
 }
 
 pub struct App {
@@ -187,6 +210,41 @@ pub struct App {
     /// as `pane_layout`, so `ui::log_view::render_full` (a different
     /// module) can write it directly every frame.
     pub log_view_width: u16,
+    /// Bumped by `push_log_line` on every append — the invalidation key for
+    /// `log_wrap_cache` (see `log_wrapped`), so the full log view/search
+    /// don't re-wrap (and re-timestamp) the entire in-memory log on every
+    /// single frame it's open, only when it actually changed or the
+    /// terminal was resized.
+    log_generation: u64,
+    /// `log_wrapped`'s cache: the last `(log_generation, width)` this was
+    /// built at, plus the result. `None` until the first call.
+    #[allow(
+        clippy::type_complexity,
+        reason = "one-off cache tuple, not worth a named type"
+    )]
+    log_wrap_cache: Option<(u64, u16, Vec<(String, bool)>)>,
+    /// `App::help_lines`'s cache: the last `Keymap::generation` the help
+    /// screen's line listing (`crate::help::build_lines`) was built from,
+    /// plus the result — rebuilding that listing walks every bound action,
+    /// which only needs to happen again when the keymap itself changes
+    /// (config reload / a settings-screen rebind), not on every keystroke
+    /// scrolling or searching the already-open help screen.
+    help_lines_cache: Option<(u64, Vec<crate::help::HelpLine>)>,
+    /// `App::settings_keybinding_lines`'s cache, same
+    /// `Keymap::generation`-keyed story as `help_lines_cache` — the
+    /// settings screen's Keybindings category otherwise calls
+    /// `settings::combos_for` (a full scan of the keymap) for all
+    /// `Action::ALL` actions on every single frame it's shown, not just the
+    /// ones scrolled into view.
+    settings_keybinding_lines_cache: Option<(u64, Vec<String>)>,
+    /// `App::function_list_filtered_actions`'s cache, keyed by the exact
+    /// typed query string rather than a generation counter (there's no
+    /// single mutable "keymap" here to version — the query itself already
+    /// says everything needed to know whether the filtered list could have
+    /// changed): the command palette re-renders on every keystroke *and*
+    /// every plain cursor-up/down, but the filtered action list only
+    /// actually changes when the typed text does.
+    function_list_cache: Option<(String, Vec<Action>)>,
     /// Whether `main.rs`'s loop should call `terminal.draw` this
     /// iteration — the dirty flag behind Phase 1's "only redraw when
     /// something changed" performance fix. Starts `true` (the first frame
@@ -306,19 +364,23 @@ fn extension_key(path: &Path) -> Option<String> {
 }
 
 /// Appends one `LogLine` (capacity-capped, timestamped `Local::now()`) to
-/// `log` directly. A free function rather than an `&mut self` method so it
-/// can be called from inside a loop that already holds a `&mut self.panes`
-/// borrow (see `App::reload_both`) — `App::log_push` is a thin wrapper
-/// around this for the common case where no such conflict exists.
-fn push_log_line(log: &mut VecDeque<LogLine>, message: String, is_error: bool) {
+/// `log` directly, bumping `*generation` so any `(generation, width)`-keyed
+/// wrap cache (see `App::log_wrapped`) knows to rebuild. A free function
+/// rather than an `&mut self` method so it can be called from inside a loop
+/// that already holds a `&mut self.panes` borrow (see `App::reload_both`) —
+/// `App::log_push` is a thin wrapper around this for the common case where
+/// no such conflict exists.
+fn push_log_line(
+    log: &mut VecDeque<LogLine>,
+    generation: &mut u64,
+    message: String,
+    is_error: bool,
+) {
     if log.len() >= LOG_CAPACITY {
         log.pop_front();
     }
-    log.push_back(LogLine {
-        message,
-        is_error,
-        timestamp: Local::now(),
-    });
+    log.push_back(LogLine::new(message, is_error, Local::now()));
+    *generation = generation.wrapping_add(1);
 }
 
 /// Builds a `Keymap` from `config`: the compiled-in defaults, with `[keys]`
@@ -382,6 +444,11 @@ impl App {
             pending_delete_anchor: HashMap::new(),
             settings_config_path: None,
             log_view_width: DEFAULT_LOG_VIEW_WIDTH,
+            log_generation: 0,
+            log_wrap_cache: None,
+            help_lines_cache: None,
+            settings_keybinding_lines_cache: None,
+            function_list_cache: None,
             needs_redraw: true,
         })
     }
@@ -414,7 +481,7 @@ impl App {
     }
 
     fn log_push(&mut self, message: String, is_error: bool) {
-        push_log_line(&mut self.log, message, is_error);
+        push_log_line(&mut self.log, &mut self.log_generation, message, is_error);
     }
 
     pub fn log_info(&mut self, message: impl Into<String>) {
@@ -465,10 +532,15 @@ impl App {
             if let Err(err) = result {
                 // Can't call `self.log_error` here: `pane` already holds a
                 // `&mut self.panes` borrow, and a `&mut self` method call
-                // would conflict with it even though `log` is a disjoint
-                // field — so this goes through the free function instead,
-                // borrowing only `self.log` directly.
-                push_log_line(&mut self.log, err.to_string(), true);
+                // would conflict with it even though `log`/`log_generation`
+                // are disjoint fields — so this goes through the free
+                // function instead, borrowing only those two directly.
+                push_log_line(
+                    &mut self.log,
+                    &mut self.log_generation,
+                    err.to_string(),
+                    true,
+                );
             }
         }
     }
@@ -1635,14 +1707,58 @@ impl App {
         };
     }
 
+    /// The help screen's line listing (`crate::help::build_lines`), from a
+    /// cache keyed by `Keymap::generation` — rebuilt only when the keymap
+    /// itself changes (config reload / a settings-screen rebind), not on
+    /// every scroll/search keystroke against the already-open help screen.
+    /// `Keymap::generation`'s own doc comment explains why a
+    /// per-`Keymap`-*instance* id is enough of a cache key even though
+    /// nothing here ever mutates a `Keymap` in place.
+    pub(crate) fn help_lines(&mut self) -> &[crate::help::HelpLine] {
+        let generation = self.keymap.generation();
+        let stale = match &self.help_lines_cache {
+            Some((cached_gen, _)) => *cached_gen != generation,
+            None => true,
+        };
+        if stale {
+            self.help_lines_cache = Some((generation, crate::help::build_lines(&self.keymap)));
+        }
+        &self.help_lines_cache.as_ref().unwrap().1
+    }
+
+    /// The settings screen's Keybindings category listing — one formatted
+    /// `" {action:<20} {combos}"` line per `Action::ALL` entry — from a
+    /// cache keyed by `Keymap::generation`, same story as `help_lines`:
+    /// `settings::combos_for` scans the whole keymap per action, and
+    /// without this it was doing that for all ~44 actions on every single
+    /// frame the Keybindings list is on screen, not just when a binding
+    /// actually changed. `pub(crate)` so `ui::settings_view` can call it.
+    pub(crate) fn settings_keybinding_lines(&mut self) -> &[String] {
+        let generation = self.keymap.generation();
+        let stale = match &self.settings_keybinding_lines_cache {
+            Some((cached_gen, _)) => *cached_gen != generation,
+            None => true,
+        };
+        if stale {
+            let lines = Action::ALL
+                .iter()
+                .map(|action| {
+                    let combos = settings::combos_for(&self.keymap, *action).join(", ");
+                    format!(" {:<20} {combos}", action.config_name())
+                })
+                .collect();
+            self.settings_keybinding_lines_cache = Some((generation, lines));
+        }
+        &self.settings_keybinding_lines_cache.as_ref().unwrap().1
+    }
+
     /// Fixed keys for `Mode::Help`; never consults the keymap (it would be
     /// circular — this screen exists to document the keymap). Same
     /// `less`-style scroll/search keys as the viewer's text mode (see
     /// `Mode::Help`'s doc comment for the exact set); `q`/Esc/`h` close
     /// back to Normal (a first `Esc` while a search is active clears it
-    /// instead). The listing is rebuilt from `self.keymap` on every
-    /// keypress (cheap — a few dozen actions) rather than cached on
-    /// `Mode::Help`, so it can never go stale relative to the keymap.
+    /// instead). The listing (`self.help_lines()`) only actually gets
+    /// rebuilt when the keymap changes, not on every keypress here.
     fn handle_help_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         if let Mode::Help {
             search: ViewerSearch::Editing { .. },
@@ -1691,9 +1807,7 @@ impl App {
             return;
         }
 
-        let max_scroll = crate::help::build_lines(&self.keymap)
-            .len()
-            .saturating_sub(1);
+        let max_scroll = self.help_lines().len().saturating_sub(1);
         let Mode::Help { scroll, .. } = &mut self.mode else {
             return;
         };
@@ -1726,12 +1840,11 @@ impl App {
         }
     }
 
-    /// Runs a confirmed Help-screen search against
-    /// `help::build_display_lines`'s plain-text rendering of the current
-    /// keymap listing — see `run_viewer_search`'s doc comment for the
-    /// shared shape.
+    /// Runs a confirmed Help-screen search against `self.help_lines()`'s
+    /// plain-text rendering of the current keymap listing — see
+    /// `run_viewer_search`'s doc comment for the shared shape.
     fn run_help_search(&mut self, pattern: String, direction: SearchDirection) {
-        let haystack = crate::help::build_display_lines(&self.keymap);
+        let haystack: Vec<String> = self.help_lines().iter().map(HelpLine::text).collect();
         let Mode::Help { scroll, search } = &mut self.mode else {
             return;
         };
@@ -1862,6 +1975,28 @@ impl App {
         }
     }
 
+    /// The entire in-memory log wrapped at `width`, from a cache keyed by
+    /// `(log_generation, width)` (see their doc comments) — rebuilt only
+    /// when the log actually changed or the caller asks for a different
+    /// width, not on every call. `render_full` calls this every frame the
+    /// full log view is open; `run_log_search`/`log_search_step` each call
+    /// it once per search keystroke — both share the one cache slot, since
+    /// they're always asking about the same width (`self.log_view_width`,
+    /// the one `render_full` itself just wrote).
+    pub(crate) fn log_wrapped(&mut self, width: u16) -> &[(String, bool)] {
+        let stale = match &self.log_wrap_cache {
+            Some((cached_gen, cached_width, _)) => {
+                *cached_gen != self.log_generation || *cached_width != width
+            }
+            None => true,
+        };
+        if stale {
+            let wrapped = crate::ui::log_view::wrap_log_lines(self.log.iter(), width as usize);
+            self.log_wrap_cache = Some((self.log_generation, width, wrapped));
+        }
+        &self.log_wrap_cache.as_ref().unwrap().2
+    }
+
     /// Runs a confirmed Log-view search: rewraps the log at
     /// `self.log_view_width` (the width `ui::log_view::render_full` last
     /// actually rendered at — see its doc comment) into the exact same
@@ -1872,9 +2007,12 @@ impl App {
     /// height (which, unlike width, isn't cached anywhere — this
     /// conversion doesn't need it).
     fn run_log_search(&mut self, pattern: String, direction: SearchDirection) {
-        let wrapped =
-            crate::ui::log_view::wrap_log_lines(self.log.iter(), self.log_view_width as usize);
-        let haystack: Vec<String> = wrapped.iter().map(|(text, _)| text.clone()).collect();
+        let width = self.log_view_width;
+        let haystack: Vec<String> = self
+            .log_wrapped(width)
+            .iter()
+            .map(|(text, _)| text.clone())
+            .collect();
         let total = haystack.len();
 
         let from_index = {
@@ -1905,9 +2043,8 @@ impl App {
     }
 
     fn log_search_step(&mut self, reverse: bool) {
-        let wrapped =
-            crate::ui::log_view::wrap_log_lines(self.log.iter(), self.log_view_width as usize);
-        let total = wrapped.len();
+        let width = self.log_view_width;
+        let total = self.log_wrapped(width).len();
         let Mode::Log {
             scroll_from_bottom,
             search,
@@ -2024,14 +2161,29 @@ impl App {
     }
 
     /// Every action currently matching `Mode::FunctionList`'s typed query,
-    /// in display order. A free function of `&self.mode` rather than a
-    /// stored `Vec` on the mode itself, so the list can never go stale
-    /// relative to whatever's actually typed.
-    fn function_list_filtered_actions(&self) -> Vec<Action> {
-        let Mode::FunctionList { input, .. } = &self.mode else {
-            return Vec::new();
+    /// in display order — from a cache keyed by the exact typed query
+    /// string, rather than recomputed on every call. Derived from
+    /// `&self.mode` rather than a `Vec` stored on the mode itself, so the
+    /// list can never go stale relative to whatever's actually typed; the
+    /// cache just means a plain cursor Up/Down (which re-renders but never
+    /// changes the query) doesn't re-filter `Action::ALL` for nothing.
+    /// `pub(crate)` so `ui::function_list_view` can call it too, instead of
+    /// going straight to `crate::function_list::filter_actions` and missing
+    /// the cache.
+    pub(crate) fn function_list_filtered_actions(&mut self) -> &[Action] {
+        let query = match &self.mode {
+            Mode::FunctionList { input, .. } => input.value(),
+            _ => return &[],
         };
-        crate::function_list::filter_actions(&input.value())
+        let stale = match &self.function_list_cache {
+            Some((cached_query, _)) => *cached_query != query,
+            None => true,
+        };
+        if stale {
+            let actions = crate::function_list::filter_actions(&query);
+            self.function_list_cache = Some((query, actions));
+        }
+        &self.function_list_cache.as_ref().unwrap().1
     }
 
     /// Fixed keys for `Mode::FunctionList`; never consults the keymap (the
@@ -2047,13 +2199,11 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
-                let action = self
-                    .function_list_filtered_actions()
-                    .get(match &self.mode {
-                        Mode::FunctionList { cursor, .. } => *cursor,
-                        _ => return,
-                    })
-                    .copied();
+                let cursor = match &self.mode {
+                    Mode::FunctionList { cursor, .. } => *cursor,
+                    _ => return,
+                };
+                let action = self.function_list_filtered_actions().get(cursor).copied();
                 self.mode = Mode::Normal;
                 if let Some(action) = action {
                     self.dispatch(action);
@@ -3236,7 +3386,20 @@ impl App {
             }
             input.value()
         };
-        self.active_pane_mut().set_filter(FilterSpec::parse(&value));
+        // `FilterSpec::parse` compiles a `re:`-prefixed pattern as a regex
+        // — real cost on every keystroke, including ones (arrow keys, Home/
+        // End) that move the cursor without changing `value` at all. Since
+        // `parse` is a pure function of the raw string, and the active
+        // pane's current filter already remembers its own `raw`, comparing
+        // against that first skips the recompile whenever the text itself
+        // didn't actually change.
+        let unchanged = match &self.active_pane().filter {
+            Some(filter) => filter.raw == value,
+            None => value.is_empty(),
+        };
+        if !unchanged {
+            self.active_pane_mut().set_filter(FilterSpec::parse(&value));
+        }
     }
 
     /// `\`: opens the prefix-jump search line, remembering the cursor
@@ -4897,6 +5060,70 @@ mod tests {
         );
     }
 
+    /// `App::help_lines`/`App::settings_keybinding_lines` cache their
+    /// respective keymap-derived listings, keyed by `Keymap::generation` —
+    /// this pins the actual invalidation trigger (a config reload swapping
+    /// in a new `Keymap`, same as the test above) rather than just the
+    /// content, so a bug that served a stale cache across a real keymap
+    /// change would fail here even though both listings still *build*
+    /// correctly in isolation.
+    #[test]
+    fn help_lines_and_settings_keybinding_lines_reflect_a_reloaded_keymap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        let quit_row_before = app
+            .help_lines()
+            .iter()
+            .find(|l| matches!(l, HelpLine::Binding { action, .. } if *action == "quit"))
+            .cloned();
+        match &quit_row_before {
+            Some(HelpLine::Binding { keys, .. }) => assert!(keys.contains('q'), "keys: {keys}"),
+            other => panic!("expected a quit binding row, got {other:?}"),
+        }
+        let quit_index = Action::ALL.iter().position(|a| *a == Action::Quit).unwrap();
+        // Compare against the exact combos, not a raw substring check —
+        // `action.config_name()` is itself "quit" (contains a 'q'!), so a
+        // plain `.contains('q')`/`!.contains('q')` on the whole formatted
+        // line would pass or fail for the wrong reason.
+        let combos_before = settings::combos_for(&app.keymap, Action::Quit);
+        assert!(combos_before.iter().any(|c| c == "q"), "{combos_before:?}");
+        let quit_keybinding_line_before = app.settings_keybinding_lines()[quit_index].clone();
+        assert!(
+            quit_keybinding_line_before.contains(&combos_before.join(", ")),
+            "{quit_keybinding_line_before}"
+        );
+
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[keys]\n\"q\" = \"none\"\n\"z\" = \"quit\"\n").unwrap();
+        app.reload_config_from(&config_path);
+
+        let quit_row_after = app
+            .help_lines()
+            .iter()
+            .find(|l| matches!(l, HelpLine::Binding { action, .. } if *action == "quit"))
+            .cloned();
+        match &quit_row_after {
+            Some(HelpLine::Binding { keys, .. }) => {
+                assert!(keys.contains('z'), "keys: {keys}");
+                assert!(!keys.split(", ").any(|k| k == "q"), "keys: {keys}");
+            }
+            other => panic!("expected a quit binding row, got {other:?}"),
+        }
+        let combos_after = settings::combos_for(&app.keymap, Action::Quit);
+        assert!(combos_after.iter().any(|c| c == "z"), "{combos_after:?}");
+        assert!(!combos_after.iter().any(|c| c == "q"), "{combos_after:?}");
+        let quit_keybinding_line_after = app.settings_keybinding_lines()[quit_index].clone();
+        assert!(
+            quit_keybinding_line_after.contains(&combos_after.join(", ")),
+            "{quit_keybinding_line_after}"
+        );
+        assert_ne!(
+            quit_keybinding_line_before, quit_keybinding_line_after,
+            "the cache must not still be serving the pre-reload combos"
+        );
+    }
+
     #[test]
     fn reload_config_failure_keeps_the_old_config_and_keymap_and_logs() {
         let dir = tempfile::tempdir().unwrap();
@@ -5061,7 +5288,7 @@ mod tests {
                 assert_eq!(*scroll, 0);
                 assert_eq!(*h_scroll, 0);
                 assert!(!truncated);
-                assert_eq!(search, &ViewerSearch::Idle);
+                assert!(matches!(search, ViewerSearch::Idle));
             }
             other => panic!("expected Mode::Viewer, got {other:?}"),
         }
@@ -5493,11 +5720,37 @@ mod tests {
         type_into_viewer(&mut app, "filler");
         app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
 
-        assert_eq!(
-            search_of(&app),
-            before,
-            "canceling a new search must restore the previous one exactly"
-        );
+        // `ViewerSearch` has no `PartialEq` (its `matcher` is a compiled
+        // `regex::Regex` under the hood — see the type's own doc comment),
+        // so compare the fields that actually carry the search's identity
+        // directly instead.
+        match (&search_of(&app), &before) {
+            (
+                ViewerSearch::Active {
+                    pattern: p1,
+                    direction: d1,
+                    matches: m1,
+                    current: c1,
+                    wrapped: w1,
+                    ..
+                },
+                ViewerSearch::Active {
+                    pattern: p2,
+                    direction: d2,
+                    matches: m2,
+                    current: c2,
+                    wrapped: w2,
+                    ..
+                },
+            ) => {
+                assert_eq!(p1, p2, "canceling must restore the exact same pattern");
+                assert_eq!(d1, d2, "canceling must restore the exact same direction");
+                assert_eq!(m1, m2, "canceling must restore the exact same matches");
+                assert_eq!(c1, c2, "canceling must restore the exact same cursor");
+                assert_eq!(w1, w2, "canceling must restore the exact same wrap flag");
+            }
+            other => panic!("expected both to be an active search, got {other:?}"),
+        }
         assert_eq!(scroll_of(&app), 2, "canceling must not move the cursor");
         assert!(matches!(app.mode, Mode::Viewer { .. }), "must stay open");
     }
@@ -5515,7 +5768,7 @@ mod tests {
         assert!(matches!(search_of(&app), ViewerSearch::Active { .. }));
 
         app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(search_of(&app), ViewerSearch::Idle);
+        assert!(matches!(search_of(&app), ViewerSearch::Idle));
         assert!(
             matches!(app.mode, Mode::Viewer { .. }),
             "first Esc only clears highlights, stays open"
@@ -5535,7 +5788,7 @@ mod tests {
         app.handle_event(AppEvent::Input(KeyCode::Char('/'), KeyModifiers::NONE));
         app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(search_of(&app), ViewerSearch::Idle);
+        assert!(matches!(search_of(&app), ViewerSearch::Idle));
         assert_eq!(scroll_of(&app), 0);
         assert!(matches!(app.mode, Mode::Viewer { .. }));
     }
@@ -5551,7 +5804,7 @@ mod tests {
         type_into_viewer(&mut app, "nonexistent");
         app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(search_of(&app), ViewerSearch::Idle);
+        assert!(matches!(search_of(&app), ViewerSearch::Idle));
         assert_eq!(scroll_of(&app), 0, "no match must not move the cursor");
         assert!(
             app.log
@@ -6210,6 +6463,40 @@ mod tests {
             }
         ));
         assert!(app.log.back().unwrap().is_error);
+    }
+
+    /// `App::log_wrapped`'s `(log_generation, width)`-keyed cache must
+    /// rebuild on *either* trigger independently — a new log line at the
+    /// same width, or the same log at a different width — not just once at
+    /// startup.
+    #[test]
+    fn log_wrapped_cache_invalidates_on_a_new_line_or_a_different_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.log_info("first".to_string());
+
+        let first = app.log_wrapped(80).to_vec();
+        assert!(first.iter().any(|(text, _)| text.contains("first")));
+
+        app.log_info("second".to_string());
+        let after_append = app.log_wrapped(80).to_vec();
+        assert!(
+            after_append.iter().any(|(text, _)| text.contains("second")),
+            "a newly-appended line must show up, not a stale cached wrap: {after_append:?}"
+        );
+        assert_ne!(
+            first.len(),
+            after_append.len(),
+            "must reflect the new line, not a stale cache"
+        );
+
+        let narrow = app.log_wrapped(20).to_vec();
+        assert!(
+            narrow
+                .iter()
+                .all(|(text, _)| unicode_width::UnicodeWidthStr::width(text.as_str()) <= 20),
+            "a different width must be honored, not served from the width-80 cache: {narrow:?}"
+        );
     }
 
     // --- Round 5: copy_path ---------------------------------------------

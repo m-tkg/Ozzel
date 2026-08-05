@@ -49,6 +49,32 @@ Phase 1 で入れた変更: `FsEntry::name_lower`/`ext_lower` の事前計算（
 - `archive_listing/zip_100_entries` の +1.8% は `group_children` 側で追加した `lower_keys` 呼び出し1回分のコストで、ノイズと判別しづらいレベル（tar_gz 側は逆に -1.7% で相殺方向）。ここは元々ホットパスの対象外なので許容。
 - dirty flag + ポーリング延長（main.rs の `run` ループ）は criterion ベンチの対象外（イベントループ全体の挙動）。効果は `benches/BASELINE.md` の「アイドル CPU の手動計測手順」で確認すること — 本ラウンドでは自動テスト（`cargo test`）と `cargo run --release` での手動操作確認のみ実施し、アイドル CPU の実測値はまだ追記していない。
 
+## 結果（Phase 2 後、中央値）
+
+Phase 2 で入れた変更: ログ下部パネル（`ui::log_view::render_log_lines`）を全行 wrap → tail slice から、新設の `wrap_log_lines_tail`（末尾行から逆順に wrap し必要行数分だけで打ち切り）へ変更。`LogLine` にタイムスタンプ整形済み文字列（`formatted_timestamp`）を追加し `App::log_push` 時に一度だけ `chrono::format` する（`wrap_log_lines`/`wrap_log_lines_tail` 双方から恩恵、後者だけでなく前者＝フルログビュー/検索の経路も速くなっている）。加えて `App` に `(log_generation, width)` キーのフルログ wrap キャッシュ、`Keymap::generation`（生成時に一意 id を採番するだけ — 生成後は差し替えのみで in-place 変更されないため）キーの help/settings キーバインド行キャッシュ、typed query キーの function-list フィルタ結果キャッシュを追加。settings のカテゴリ一覧・function-list パレットは可視ウィンドウ分だけ `ListItem` を構築するよう変更（オフスクリーン分の `combos_for`/フォーマットを回避）。viewer の `slice_display_cols` は全 ASCII 行なら byte range の直接スライスに短絡（巨大な1行ファイルの横スクロール向け）。`/`/`?` 検索は `Matcher`（コンパイル済み regex）を `ViewerSearch::Active` に `Rc` で保持し、viewer/help/log 3画面とも描画毎の再コンパイルを廃止。filter 入力は生テキストが変わっていなければ `FilterSpec::parse` を再実行しない。実行環境は上記「実行環境」節と同一マシン・同一プロファイル（rustc 1.94.0、criterion 0.8.2）。
+
+`wrap_log_lines_tail_500_lines_width_80_need_4_rows` が今回の新規ベンチ（Phase 0/1 に対応ベンチなし）— ログ下部パネルの典型ケース（500行中、直近4行相当だけ必要）を模したもの。`pane_visible_entries/*` 系は Phase 2 で一切触っていないコード（`pane.rs`）だが、この日の計測で ±5〜11% ほど揺れており（`pane_visible_entries/1000_files/Name` を単体で再計測すると逆方向に -5.4% と出た）、マシン負荷由来のノイズと判断し無視してよい。
+
+| ベンチ | 対象 | Phase 1 後 中央値 | Phase 2 後 中央値 | 変化 |
+|---|---|---|---|---|
+| `wrap_log_lines_500_lines_width_80` | フルログビュー/検索が通る経路（全500行 wrap）。`formatted_timestamp` 事前計算の効果がそのまま乗る | 654.94 µs | 540.72 µs | -17.4%（chrono format の除去分） |
+| `wrap_log_lines_tail_500_lines_width_80_need_4_rows` | ログ下部パネルが実際に通る経路（末尾4行だけ必要）。Phase 0/1 に対応ベンチなし | — | 2.5848 µs | 参考: フル wrap 比 約 -99.5%（1/209） |
+| `pane_visible_entries/1000_files/Name` | 未変更コード（対照） | 1.3949 ms | 1.5003 ms（再計測で 1.4366 ms） | ノイズ内（この日の実行間ブレが ±5〜11%） |
+| `pane_visible_entries/1000_files/Ext` | 未変更コード（対照） | 1.4024 ms | 1.4187 ms | ノイズ内（+1.2%） |
+| `pane_visible_entries/10000_files/Name` | 未変更コード（対照） | 18.454 ms | 20.319 ms | ノイズ内（実行間ブレ、後述） |
+| `pane_visible_entries/10000_files/Ext` | 未変更コード（対照） | 18.394 ms | 19.970 ms | ノイズ内（実行間ブレ、後述） |
+| `pane_visible_entries_cached/1000_files/cache_hit` | 未変更コード（対照） | 342.87 ns | 347.14 ns | ノイズ内（+1.2%） |
+| `pane_visible_entries_cached/10000_files/cache_hit` | 未変更コード（対照） | 3.2360 µs | 3.2402 µs | 変化なし |
+| `archive_listing/zip_100_entries` | 未変更コード（対照） | 280.19 µs | 280.15 µs | 変化なし |
+| `archive_listing/tar_gz_100_entries` | 未変更コード（対照） | 100.58 µs | 101.92 µs | ノイズ内（+1.3%） |
+
+所見:
+
+- 本フェーズの主目的（ログ下部パネルの毎フレームコスト削減）は `wrap_log_lines_tail` ベンチで直接確認できる: 500行フル wrap 比で約 1/209（99.5%減）。実アプリでは毎フレーム（起動中ずっと）通る経路なので、体感上の効果は `pane_visible_entries` キャッシュヒット化（Phase 1）と並んで大きいはず。
+- `wrap_log_lines_500_lines_width_80`（フルログビュー/検索の経路、コード自体は「全行 wrap」のままで変えていない）も -17.4% 改善している — これは `LogLine::formatted_timestamp` の事前計算（`App::log_push` 時に一度だけ `chrono::format`、以降は `wrap_log_lines`/`wrap_log_lines_tail` とも文字列 clone のみ）の効果で、tail-first 化そのものとは別に効いている。
+- help/settings のキーバインド行キャッシュ、function-list のフィルタ結果キャッシュ、viewer/help/log の `Matcher` 再利用、filter 入力の再パース抑止は、いずれも「同じフレームを何度も再計算しない」系の変更で、criterion の単発呼び出しベンチでは測りにくい（呼ばれる頻度が減ることが効果の本体であって、1回あたりのコストはほぼ変えていない）。正しさは `cargo test`（キャッシュが実際のキーマップ変更/クエリ変更に追従することを検証する新規テスト込み）で担保 — 対話的な手動操作での体感確認は今回未実施。
+- `pane_visible_entries/*`・`pane_visible_entries_cached/*`・`archive_listing/*` は Phase 2 で一切触れていない対照群。`pane_visible_entries/10000_files/*` の Phase 1 比 +8〜10% は、`pane_visible_entries/1000_files/Name` を単体で再計測した際に -5.4% と逆方向に振れたことから、コード変更ではなくこの日の実行間ノイズ（他プロセスの負荷等）と判断した。
+
 ## アイドル CPU の手動計測手順
 
 自動化された計測ベンチではなく、実機での体感確認用の手順。

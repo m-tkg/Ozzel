@@ -44,7 +44,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
     if matches!(app.mode, Mode::Help { .. }) {
-        help_view::render(frame, area, &app.mode, &app.keymap);
+        help_view::render(frame, area, app);
         return;
     }
     if let Mode::Log {
@@ -131,7 +131,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         Mode::FunctionList { .. } => {
             render_status_bar(frame, rows[2], app);
-            function_list_view::render(frame, area, &app.mode);
+            function_list_view::render(frame, area, app);
         }
         Mode::Normal => render_status_bar(frame, rows[2], app),
         Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } | Mode::Settings { .. } => {

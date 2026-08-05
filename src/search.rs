@@ -20,6 +20,8 @@
 //! even though it's no longer viewer-only, rather than churning a rename
 //! across three views' worth of match arms for a purely cosmetic change).
 
+use std::rc::Rc;
+
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::mode::{LineEditor, SearchDirection, ViewerSearch};
@@ -129,7 +131,7 @@ pub fn run(
     direction: SearchDirection,
     from_index: usize,
 ) -> Result<usize, String> {
-    let matcher = Matcher::build(&pattern);
+    let matcher = Rc::new(Matcher::build(&pattern));
     let matches: Vec<usize> = haystack
         .iter()
         .enumerate()
@@ -146,6 +148,7 @@ pub fn run(
     let target = matches[current];
     *search = ViewerSearch::Active {
         pattern,
+        matcher,
         direction,
         matches,
         current,
@@ -243,6 +246,7 @@ mod tests {
     fn handle_input_key_esc_restores_the_previous_search() {
         let mut search = ViewerSearch::Active {
             pattern: "old".to_string(),
+            matcher: Rc::new(Matcher::build("old")),
             direction: SearchDirection::Forward,
             matches: vec![0],
             current: 0,
@@ -323,6 +327,7 @@ mod tests {
     fn step_advances_and_wraps() {
         let mut search = ViewerSearch::Active {
             pattern: "x".to_string(),
+            matcher: Rc::new(Matcher::build("x")),
             direction: SearchDirection::Forward,
             matches: vec![2, 5, 9],
             current: 2,
@@ -337,6 +342,7 @@ mod tests {
     fn step_reverse_steps_backward() {
         let mut search = ViewerSearch::Active {
             pattern: "x".to_string(),
+            matcher: Rc::new(Matcher::build("x")),
             direction: SearchDirection::Forward,
             matches: vec![2, 5, 9],
             current: 2,

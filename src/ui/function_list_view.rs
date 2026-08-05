@@ -13,6 +13,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::App;
 use crate::mode::Mode;
 
 /// How wide/tall the palette popup is, as a fraction of the full frame —
@@ -23,11 +24,17 @@ const WIDTH_DEN: u16 = 4;
 const HEIGHT_NUM: u16 = 3;
 const HEIGHT_DEN: u16 = 4;
 
-pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
-    let Mode::FunctionList { input, cursor } = mode else {
-        return;
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Pulled out as owned copies *before* `app.function_list_filtered_actions()`
+    // below (which needs `app` mutably — it may rebuild and cache the
+    // filtered list), same reasoning as `help_view`/`log_view`'s render
+    // functions.
+    let (cursor, input_value, cursor_display_col) = match &app.mode {
+        Mode::FunctionList { input, cursor } => {
+            (*cursor, input.value(), input.cursor_display_col())
+        }
+        _ => return,
     };
-    let actions = crate::function_list::filter_actions(&input.value());
 
     let width = (area.width * WIDTH_NUM / WIDTH_DEN).clamp(1, area.width);
     let height = (area.height * HEIGHT_NUM / HEIGHT_DEN).clamp(1, area.height);
@@ -48,30 +55,40 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    let input_text = format!("> {}", input.value());
+    let input_text = format!("> {input_value}");
     frame.render_widget(Paragraph::new(input_text), rows[0]);
-    let col = rows[0].x + 2 + input.cursor_display_col() as u16;
+    let col = rows[0].x + 2 + cursor_display_col as u16;
     frame.set_cursor_position((
         col.min(rows[0].x + rows[0].width.saturating_sub(1)),
         rows[0].y,
     ));
 
+    // Only rebuilt when `input_value` actually changed (see
+    // `App::function_list_filtered_actions`) — a plain cursor Up/Down
+    // doesn't re-filter `Action::ALL`.
+    let actions = app.function_list_filtered_actions();
     let name_width = actions
         .iter()
         .map(|a| UnicodeWidthStr::width(a.config_name()))
         .max()
         .unwrap_or(0);
-    let list_rows: Vec<ListItem> = actions
+    // Only the visible window's rows get formatted/allocated into
+    // `ListItem`s — same "don't build what's scrolled off screen" story as
+    // `ui::settings_view`'s own `windowed_range` use.
+    let window =
+        super::settings_view::windowed_range(actions.len(), cursor, rows[1].height as usize);
+    let list_rows: Vec<ListItem> = actions[window.clone()]
         .iter()
         .enumerate()
-        .map(|(idx, action)| {
+        .map(|(offset, action)| {
+            let idx = window.start + offset;
             let text = format!(
                 "{:width$}  {}",
                 action.config_name(),
                 action.description(),
                 width = name_width
             );
-            let style = if idx == *cursor {
+            let style = if idx == cursor {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()

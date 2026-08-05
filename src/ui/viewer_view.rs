@@ -56,9 +56,10 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
 
     // While actively typing a search pattern, the matcher doesn't exist
     // yet (nothing has been searched for) — only an `Active` search has
-    // anything to highlight.
+    // anything to highlight. The matcher itself was compiled once by
+    // `crate::search::run`, not rebuilt here every frame.
     let matcher = match search {
-        ViewerSearch::Active { pattern, .. } => Some(Matcher::build(pattern)),
+        ViewerSearch::Active { matcher, .. } => Some(matcher.as_ref()),
         _ => None,
     };
 
@@ -68,7 +69,7 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
                 .iter()
                 .skip(*scroll)
                 .take(viewport_height)
-                .map(|line| styled_line(line, *h_scroll, viewport_width, matcher.as_ref()))
+                .map(|line| styled_line(line, *h_scroll, viewport_width, matcher))
                 .collect();
             frame.render_widget(Paragraph::new(visible), rows[0]);
 
@@ -90,7 +91,7 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
                 .take(viewport_height)
                 .map(|(row_idx, chunk)| {
                     let line = viewer::format_hex_line(chunk, row_idx * HEX_BYTES_PER_LINE);
-                    styled_line(&line, 0, usize::MAX, matcher.as_ref())
+                    styled_line(&line, 0, usize::MAX, matcher)
                 })
                 .collect();
             frame.render_widget(Paragraph::new(visible), rows[0]);
@@ -127,6 +128,7 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
             matches,
             current,
             wrapped,
+            ..
         } => {
             let prefix = match direction {
                 SearchDirection::Forward => '/',
@@ -221,6 +223,20 @@ pub(super) fn styled_line(
 pub(super) fn slice_display_cols(line: &str, start_col: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
+    }
+    // Fast path: a pure-ASCII line (the common case — source code, logs,
+    // paths) has exactly one display column per byte, so the visible slice
+    // is a plain byte-range copy rather than a per-grapheme walk from
+    // column 0. Without this, opening a huge single-line minified-JS-style
+    // file and scrolling it horizontally re-walked the *entire* line from
+    // the start on every rendered row, every frame, just to find where
+    // `start_col` began. `.max(1)` on the grapheme path below means even an
+    // ASCII control character counts as width 1, matching this exactly.
+    if line.is_ascii() {
+        let len = line.len();
+        let start = start_col.min(len);
+        let end = start_col.saturating_add(width).min(len);
+        return line[start..end].to_string();
     }
     let end_col = start_col.saturating_add(width);
     let mut result = String::new();
@@ -493,6 +509,7 @@ mod tests {
             vec!["one", "needle here", "three", "needle again"],
             ViewerSearch::Active {
                 pattern: "needle".to_string(),
+                matcher: std::rc::Rc::new(Matcher::build("needle")),
                 direction: SearchDirection::Forward,
                 matches: vec![1, 3],
                 current: 0,
@@ -515,6 +532,7 @@ mod tests {
             vec!["needle one", "needle two"],
             ViewerSearch::Active {
                 pattern: "needle".to_string(),
+                matcher: std::rc::Rc::new(Matcher::build("needle")),
                 direction: SearchDirection::Forward,
                 matches: vec![0, 1],
                 current: 0,
@@ -531,6 +549,7 @@ mod tests {
             vec!["hello needle world"],
             ViewerSearch::Active {
                 pattern: "needle".to_string(),
+                matcher: std::rc::Rc::new(Matcher::build("needle")),
                 direction: SearchDirection::Forward,
                 matches: vec![0],
                 current: 0,
