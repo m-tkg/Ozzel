@@ -9,7 +9,7 @@
 
 mod function_list_view;
 mod help_view;
-mod log_view;
+pub(crate) mod log_view;
 mod modal;
 mod pane_view;
 mod settings_view;
@@ -45,8 +45,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         help_view::render(frame, area, &app.mode, &app.keymap);
         return;
     }
-    if let Mode::Log { scroll_from_bottom } = &app.mode {
-        log_view::render_full(frame, area, app, *scroll_from_bottom);
+    if let Mode::Log {
+        scroll_from_bottom, ..
+    } = &app.mode
+    {
+        let scroll_from_bottom = *scroll_from_bottom;
+        log_view::render_full(frame, area, app, scroll_from_bottom);
         return;
     }
     if matches!(app.mode, Mode::Settings { .. }) {

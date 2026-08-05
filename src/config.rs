@@ -180,7 +180,11 @@ impl Default for ColorsConfig {
 pub struct Config {
     pub delete_behavior: DeleteBehavior,
     /// Directory `GoHome` (`~`) jumps to; falls back to the OS home
-    /// directory when unset.
+    /// directory when unset. A leading `~`/`~/...` in the TOML value is
+    /// already expanded by the time this field is populated (see
+    /// `parse_config`/`expand_tilde`) — every reader of this field (this
+    /// doc comment included) can assume it's a real, directly `is_dir()`-
+    /// able path, not a literal tilde.
     pub home: Option<PathBuf>,
     /// Editor command `OpenEditor` (`e`) runs; falls back to `$EDITOR`.
     pub editor: Option<String>,
@@ -325,7 +329,22 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 /// the most common cause.
 fn parse_config(text: &str) -> Result<Config> {
     match toml::from_str::<Config>(text) {
-        Ok(config) => Ok(config),
+        Ok(mut config) => {
+            // Rust never expands `~` itself — `home = "~/work"` would
+            // otherwise be treated as the literal relative path `./~/work`
+            // and fail `begin_go_home`'s `is_dir()` check outright (a real
+            // field report: "not a directory: ~/work"). Expand it once,
+            // right here, so every consumer of `config.home` (`~`/`GoHome`,
+            // and the settings screen's `home` text editor, which reads
+            // this same field back after its own save-then-reload) always
+            // sees a real, `is_dir`-able path. No other `Config` field
+            // needs this: `[viewers]` commands run through a shell (see
+            // `external::build_viewer_cmdline`), which expands `~` itself.
+            config.home = config
+                .home
+                .map(|home| expand_tilde(&home, home_dir_for_expansion().as_deref()));
+            Ok(config)
+        }
         Err(err) => {
             let is_unknown_field = err.message().contains("unknown field");
             let mut error = anyhow::Error::new(err);
@@ -337,6 +356,49 @@ fn parse_config(text: &str) -> Result<Config> {
             }
             Err(error)
         }
+    }
+}
+
+/// The real OS home directory, for `expand_tilde` — same source
+/// `App::begin_go_home`'s own fallback uses (`directories::BaseDirs`), kept
+/// as its own tiny function purely so it reads as "the thing `expand_tilde`
+/// needs" at the call site above rather than an inline `directories::`
+/// reference.
+fn home_dir_for_expansion() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
+}
+
+/// Expands a leading `~` the way a shell would for the two forms ozzel
+/// actually needs to support: `~` alone (-> `home_dir` exactly) and
+/// `~/rest` (-> `home_dir.join(rest)`). Any other path — already absolute,
+/// relative without a leading `~`, or the `~user` form (a *different*
+/// user's home directory, which `directories::BaseDirs` has no way to look
+/// up and isn't worth the added complexity for) — is returned unchanged.
+/// `home_dir: None` (a platform where `BaseDirs` couldn't resolve one)
+/// also leaves the path unchanged, since there's nothing to expand it to.
+/// A pure, standalone function (rather than inlined into `parse_config`) so
+/// every case is directly unit-testable without going through TOML at all.
+pub fn expand_tilde(path: &Path, home_dir: Option<&Path>) -> PathBuf {
+    let Some(home_dir) = home_dir else {
+        return path.to_path_buf();
+    };
+    // `Path`'s `strip_prefix` compares whole *components*, not raw string
+    // bytes: `~/work`'s first component is exactly `~`, so this matches —
+    // but `~alice/x`'s first component is the single, indivisible token
+    // `~alice` (nothing splits `~` from `alice`, since there's no `/`
+    // between them), which never equals the component `~`, so
+    // `strip_prefix` itself already returns `Err` for any `~user` form —
+    // it falls straight into the early return above, out of scope by
+    // construction rather than by an extra check here.
+    let Ok(stripped) = path.strip_prefix("~") else {
+        return path.to_path_buf();
+    };
+    if stripped.as_os_str().is_empty() {
+        home_dir.to_path_buf()
+    } else if path.starts_with("~/") {
+        home_dir.join(stripped)
+    } else {
+        path.to_path_buf()
     }
 }
 
@@ -602,6 +664,110 @@ mod tests {
         assert_eq!(config.home, Some(PathBuf::from("/tmp")));
         assert_eq!(config.editor, Some("vim".to_string()));
         assert_eq!(config.keys.get("C-c"), Some(&"copy".to_string()));
+    }
+
+    // --- `expand_tilde` ---------------------------------------------------
+
+    #[test]
+    fn expand_tilde_bare_tilde_becomes_exactly_the_home_dir() {
+        let home = Path::new("/home/alice");
+        assert_eq!(expand_tilde(Path::new("~"), Some(home)), home);
+    }
+
+    #[test]
+    fn expand_tilde_tilde_slash_rest_joins_onto_the_home_dir() {
+        let home = Path::new("/home/alice");
+        assert_eq!(
+            expand_tilde(Path::new("~/work"), Some(home)),
+            PathBuf::from("/home/alice/work")
+        );
+        assert_eq!(
+            expand_tilde(Path::new("~/a/b/c"), Some(home)),
+            PathBuf::from("/home/alice/a/b/c")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_an_absolute_path_untouched() {
+        let home = Path::new("/home/alice");
+        assert_eq!(
+            expand_tilde(Path::new("/etc/hosts"), Some(home)),
+            PathBuf::from("/etc/hosts")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_a_relative_non_tilde_path_untouched() {
+        let home = Path::new("/home/alice");
+        assert_eq!(
+            expand_tilde(Path::new("some/relative/path"), Some(home)),
+            PathBuf::from("some/relative/path")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_the_tilde_user_form_untouched() {
+        // `~alice/x` names a *different* user's home directory —
+        // `directories::BaseDirs` has no way to resolve that, and it's out
+        // of scope by design (see `expand_tilde`'s doc comment).
+        let home = Path::new("/home/bob");
+        assert_eq!(
+            expand_tilde(Path::new("~alice/x"), Some(home)),
+            PathBuf::from("~alice/x")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_with_no_home_dir_leaves_everything_untouched() {
+        assert_eq!(
+            expand_tilde(Path::new("~/work"), None),
+            PathBuf::from("~/work")
+        );
+    }
+
+    #[test]
+    fn parse_config_expands_a_tilde_home() {
+        // Can't inject a fake home dir into `parse_config` itself (it
+        // resolves the real one via `directories::BaseDirs`), so this just
+        // checks the result is no longer literally `~/work` — the exact
+        // expansion (`~/rest` -> `home_dir.join(rest)`) is `expand_tilde`'s
+        // own, already-covered contract above.
+        let config = parse_config("home = \"~/work\"").unwrap();
+        let home = config.home.expect("home must still be set");
+        assert!(
+            !home.starts_with("~"),
+            "the leading ~ must have been expanded: {home:?}"
+        );
+        assert!(home.ends_with("work"), "{home:?}");
+    }
+
+    #[test]
+    fn parse_config_leaves_an_absolute_home_untouched() {
+        let config = parse_config("home = \"/tmp/somewhere\"").unwrap();
+        assert_eq!(config.home, Some(PathBuf::from("/tmp/somewhere")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn go_home_with_a_tilde_config_and_a_symlinked_target_jumps_through_the_symlink() {
+        // Mirrors the reported real-world case: `home = "~/work"` where
+        // `~/work` is itself a symlink to some other directory (e.g.
+        // Dropbox) — `expand_tilde` only rewrites the leading `~`; the
+        // existing symlink-follow navigation (`Path::is_dir()` already
+        // follows symlinks) must still work on whatever that expands to.
+        let home_dir = tempfile::tempdir().unwrap();
+        let real_target = tempfile::tempdir().unwrap();
+        std::fs::write(real_target.path().join("marker.txt"), b"hi").unwrap();
+        let link = home_dir.path().join("work");
+        std::os::unix::fs::symlink(real_target.path(), &link).unwrap();
+
+        let expanded = expand_tilde(Path::new("~/work"), Some(home_dir.path()));
+        assert_eq!(expanded, link);
+        assert!(
+            expanded.is_dir(),
+            "a symlink to a real dir must is_dir() = true"
+        );
+        assert!(expanded.join("marker.txt").is_file());
     }
 
     #[test]

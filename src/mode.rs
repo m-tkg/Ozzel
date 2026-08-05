@@ -88,13 +88,19 @@ impl SearchDirection {
     }
 }
 
-/// `less`-style incremental search state for `Mode::Viewer`. `Idle` is the
-/// steady state outside of any search; pressing `/` or `?` moves to
-/// `Editing` (a bottom input line, same UI pattern as `Filter`/
-/// `JumpSearch`); `Enter` there runs the search and — if it matched
-/// anything — moves to `Active`, which drives both the highlighted matches
-/// on screen and `n`/`N` navigation until `Esc` (in plain, non-editing
-/// viewer state) clears it back to `Idle`.
+/// `less`-style incremental search state, shared by every full-frame
+/// scrollable text view — `Mode::Viewer`, `Mode::Help`, and `Mode::Log` each
+/// carry their own `search: ViewerSearch` field (kept under this name
+/// rather than renamed to something viewer-agnostic, to avoid churning a
+/// rename across three views for a purely cosmetic change — see
+/// `crate::search`'s module doc comment). `Idle` is the steady state
+/// outside of any search; pressing `/` or `?` moves to `Editing` (a bottom
+/// input line, same UI pattern as `Filter`/`JumpSearch`); `Enter` there
+/// runs the search and — if it matched anything — moves to `Active`, which
+/// drives both the highlighted matches on screen and `n`/`N` navigation
+/// until `Esc` (in plain, non-editing state) clears it back to `Idle`. The
+/// actual state-machine transitions live in `crate::search`, not on this
+/// type itself — this is pure data.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ViewerSearch {
     #[default]
@@ -243,27 +249,45 @@ pub enum Mode {
         search: ViewerSearch,
     },
     /// The full-frame keybinding help screen (`h`/`?`). Fixed keys only
-    /// (see `App::handle_help_key`): Up/Down/PageUp/PageDown/Home/End
-    /// (`g`/`G` too) scroll, `q`/Esc/`h` closes back to the filer. The
+    /// (see `App::handle_help_key`): the same `less`-style scroll set the
+    /// viewer's text mode has (Up/Down/`j`/`k`, `Space`/`f`/PageDown,
+    /// `b`/PageUp, `d`/`u` half page, `g`/Home top, `G`/End bottom) plus
+    /// `/`/`?`/`n`/`N` search (see `search`, `crate::search`), `q`/Esc/`h`
+    /// closes back to the filer (a first `Esc` while a search is active
+    /// clears it instead, same two-step close the viewer has). The
     /// listing itself (`crate::help::build_lines`) is computed on demand
     /// from the live `Keymap`, never stored here, so it always reflects
     /// the current effective bindings.
     Help {
         /// Index of the first visible line.
         scroll: usize,
+        /// `less`-style `/`/`?` search state — see `ViewerSearch`. The
+        /// haystack it searches is `crate::help::build_display_lines`'s
+        /// output, rebuilt fresh per search the same way `scroll`'s own
+        /// clamping rebuilds `build_lines` fresh per keypress.
+        search: ViewerSearch,
     },
     /// The full-frame in-memory log viewer (`S-l`/`L`). Fixed keys only
-    /// (see `App::handle_log_view_key`), same scroll keys as the viewer's
-    /// text mode. `scroll_from_bottom` is measured in wrapped display rows
-    /// *up from the newest content* (0 = pinned to the bottom, which is
-    /// where this mode always opens) rather than a raw line index, since
-    /// how many rows the log wraps into depends on terminal width — a
-    /// width `App` has no access to; `ui::log_view::render_full` (which
-    /// does have it) is what actually turns this into a display offset and
-    /// clamps it, so this field can grow past the real maximum here with
-    /// no ill effect (see also `Home`'s use of `usize::MAX`).
+    /// (see `App::handle_log_view_key`), the same `less`-style scroll set
+    /// Help/the viewer have — mapped onto `scroll_from_bottom`'s inverted
+    /// sense (see below: "up"/`k`/`b` *increment* it, "down"/`j`/`f`
+    /// *decrement* it) — plus `/`/`?`/`n`/`N` search (see `search`), same
+    /// two-step `Esc` close as Help/the viewer. `scroll_from_bottom` is
+    /// measured in wrapped display rows *up from the newest content* (0 =
+    /// pinned to the bottom, which is where this mode always opens) rather
+    /// than a raw line index, since how many rows the log wraps into
+    /// depends on terminal width — a width `App` has no access to;
+    /// `ui::log_view::render_full` (which does have it) is what actually
+    /// turns this into a display offset and clamps it, so this field can
+    /// grow past the real maximum here with no ill effect (see also
+    /// `Home`'s use of `usize::MAX`). `App::log_view_width` caches that
+    /// same width (updated every `render_full` call, the same "stale
+    /// until the first frame, harmless" story `pane_layout` already
+    /// relies on) so a `/`/`?` search can rewrap the log the same way and
+    /// therefore search against exactly what's on screen.
     Log {
         scroll_from_bottom: usize,
+        search: ViewerSearch,
     },
     /// The command palette (`F`/`S-f`): a filterable, scrollable list of
     /// every action. Typing narrows the

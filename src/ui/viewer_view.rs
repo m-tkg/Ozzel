@@ -24,8 +24,10 @@ use crate::viewer::{self, HEX_BYTES_PER_LINE, Matcher};
 /// line — reverse video, same visual language the footer and the other
 /// modal input lines (`Filter`/`JumpSearch`/`Prompt`) already use for
 /// "this is drawing your attention," just without their red tint (that's
-/// reserved for warnings/errors, not matches).
-fn match_style() -> Style {
+/// reserved for warnings/errors, not matches). `pub(super)` so
+/// `ui::help_view`/`ui::log_view` render their own `/`/`?` match
+/// highlighting identically instead of redefining this style.
+pub(super) fn match_style() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 
@@ -176,8 +178,12 @@ fn render_search_input_line(
 /// unstyled/highlighted spans wherever `matcher` (`None` when there's no
 /// active search) matches — grapheme-safe, so a highlighted run never
 /// splits a multi-byte character. `width = usize::MAX` (hex mode, which
-/// never horizontally scrolls) behaves as "no clipping."
-fn styled_line(
+/// never horizontally scrolls) behaves as "no clipping." `pub(super)` so
+/// `ui::help_view`/`ui::log_view` (neither of which horizontally scrolls,
+/// so both always call this with `start_col: 0`) can highlight their own
+/// `/`/`?` matches without reimplementing the grapheme-safe span-splitting
+/// this does.
+pub(super) fn styled_line(
     line: &str,
     start_col: usize,
     width: usize,
