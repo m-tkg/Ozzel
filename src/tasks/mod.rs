@@ -51,17 +51,6 @@ pub(crate) const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
 /// `copy_move.rs` and `archive.rs`; one value now.
 pub(crate) const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Chunked read/write buffer size shared by every worker that streams file
-/// bytes through a manual `Read`/`Write` loop: copy/move's chunked-file
-/// path (`copy_move.rs`) and zip/tar create/extract (`archive.rs`). Was
-/// declared identically in both files; one value now.
-pub(crate) const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
-/// `Throttle` interval shared by every worker's `Progress` events — how
-/// often the UI's gauge actually needs to move, not how often a worker's
-/// inner loop makes forward progress. Was declared identically in
-/// `copy_move.rs` and `archive.rs`; one value now.
-pub(crate) const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
-
 /// Identifies one spawned task. Ordered by creation order (an incrementing
 /// counter), so a `BTreeMap<TaskId, _>` iterates tasks oldest-first —
 /// keeping gauge rows in a stable order across frames instead of the
