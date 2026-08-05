@@ -32,6 +32,18 @@ pub enum SymlinkTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FsEntry {
     pub name: String,
+    /// `name.to_lowercase()`, precomputed once at construction time rather
+    /// than on every comparison/filter/search call — see `pane::compare_entries`,
+    /// `FilterSpec::matches`'s caller, and `Pane::jump_matches`, all of
+    /// which used to allocate a fresh lowercased `String` per entry on
+    /// *every* invocation (multiple times per rendered frame, times two
+    /// panes).
+    pub name_lower: String,
+    /// `name`'s extension, lowercased — `""` when there is none, matching
+    /// `Path::extension()`'s own "no extension" case so `SortKey::Ext`
+    /// comparisons never need to special-case it. Precomputed for the same
+    /// reason as `name_lower`.
+    pub ext_lower: String,
     pub path: PathBuf,
     pub kind: EntryKind,
     pub size: u64,
@@ -126,6 +138,20 @@ fn is_executable_windows(kind: EntryKind, name: &str) -> bool {
     matches!(ext.as_str(), "exe" | "bat" | "cmd" | "ps1" | "com")
 }
 
+/// Lowercases `name` and extracts+lowercases its extension (`""` when
+/// there is none, matching `Path::extension()`'s own convention) — the two
+/// derived keys every `FsEntry` constructor precomputes once, see
+/// `FsEntry::name_lower`/`FsEntry::ext_lower`.
+pub fn lower_keys(name: &str) -> (String, String) {
+    let name_lower = name.to_lowercase();
+    let ext_lower = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    (name_lower, ext_lower)
+}
+
 /// Dotfile convention for "hidden". On Windows this deliberately ignores the
 /// filesystem's hidden attribute for now (per plan: "on Windows just dotfile
 /// for now") to keep the rule identical across platforms.
@@ -200,9 +226,12 @@ pub fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>> {
         let (unix_mode, is_executable): (Option<u32>, bool) =
             (None, is_executable_windows(kind, &name));
 
+        let (name_lower, ext_lower) = lower_keys(&name);
         entries.push(FsEntry {
             is_hidden: is_hidden_name(&name),
             name,
+            name_lower,
+            ext_lower,
             path: entry_path,
             kind,
             size: metadata.len(),

@@ -45,6 +45,14 @@ pub enum AppEvent {
     /// never occurs. Handled by `App::handle_mouse`.
     Mouse(MouseEvent),
     Task(TaskEvent),
+    /// The terminal was resized. Carries no data — `ui::draw` always reads
+    /// the current size fresh from the terminal on the next actual draw
+    /// (see `Terminal::draw`'s own autoresize); this variant exists purely
+    /// so `App::handle_event`'s dirty-flag tracking (`needs_redraw`) can
+    /// tell a resize apart from a `Tick` and force that next draw to
+    /// happen, rather than the new size sitting unrendered until some
+    /// unrelated input arrives.
+    Resize,
     Tick,
 }
 
@@ -52,8 +60,9 @@ pub enum AppEvent {
 /// `AppEvent`. Only `KeyEventKind::Press` is ever forwarded as `Input` —
 /// Windows also emits Release/Repeat key events, which would otherwise
 /// double-handle every keystroke — mouse events forward as `Mouse`
-/// (only ever produced when mouse capture is on), and anything else
-/// (resize, focus, paste) collapses to `Tick`.
+/// (only ever produced when mouse capture is on), a terminal resize
+/// forwards as `Resize`, and anything else (focus, paste) collapses to
+/// `Tick`.
 pub fn read_event(timeout: Duration) -> Result<AppEvent> {
     if event::poll(timeout)? {
         match event::read()? {
@@ -64,6 +73,7 @@ pub fn read_event(timeout: Duration) -> Result<AppEvent> {
                 ..
             }) => return Ok(AppEvent::Input(code, modifiers)),
             Event::Mouse(mouse_event) => return Ok(AppEvent::Mouse(mouse_event)),
+            Event::Resize(_, _) => return Ok(AppEvent::Resize),
             _ => {}
         }
     }

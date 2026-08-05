@@ -813,6 +813,8 @@ mod tests {
         let (unix_mode, readonly) = (None, false);
         let entry = FsEntry {
             name: "run.sh".to_string(),
+            name_lower: "run.sh".to_string(),
+            ext_lower: "sh".to_string(),
             path: PathBuf::from("run.sh"),
             kind: EntryKind::File,
             size: 10,
@@ -836,8 +838,11 @@ mod tests {
 
     fn symlink_entry(name: &str, target: crate::entry::SymlinkTarget) -> FsEntry {
         use std::path::PathBuf;
+        let (name_lower, ext_lower) = crate::entry::lower_keys(name);
         FsEntry {
             name: name.to_string(),
+            name_lower,
+            ext_lower,
             path: PathBuf::from(name),
             kind: EntryKind::Symlink,
             size: 11,
@@ -876,8 +881,11 @@ mod tests {
 
     fn entry_for_test(name: &str, kind: EntryKind) -> FsEntry {
         use std::path::PathBuf;
+        let (name_lower, ext_lower) = crate::entry::lower_keys(name);
         FsEntry {
             name: name.to_string(),
+            name_lower,
+            ext_lower,
             path: PathBuf::from(name),
             kind,
             size: 0,

@@ -2,9 +2,11 @@
 //! cursor, sort/filter state, and the memory of where the cursor should
 //! land when returning to a directory from one of its children.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::Result;
 
@@ -99,6 +101,28 @@ pub struct Pane {
     /// which is what makes every other cwd-keyed mechanism (history,
     /// `App::navigate`, `:`'s cwd) keep working unmodified.
     pub virtual_dir: Option<VirtualDir>,
+    /// Cache of `visible_entries()`'s sorted+filtered index list into
+    /// `entries` (an `Rc` so a cache hit is a refcount bump, not a `Vec`
+    /// clone). `None` means "stale, recompute on next call".
+    ///
+    /// Invalidated *explicitly* at every mutation site that can change
+    /// what's visible or its order — `entries` (`reload`/`enter_virtual`/
+    /// `virtual_descend`/`virtual_go_parent`), `filter` (`set_filter`,
+    /// and the same directory-changing methods above which also reset
+    /// it), `show_hidden` (`toggle_hidden`), and `sort`/`ascending`
+    /// (`cycle_sort`; `ascending` currently has no setter) — rather than
+    /// via a version counter on those fields: every one of those mutations
+    /// already lives in this handful of `Pane` methods, so an explicit
+    /// `invalidate_visible_cache()` call at each is exhaustively
+    /// auditable, and a version counter would just move the same "did I
+    /// remember" risk onto the same call sites without removing it.
+    /// `marks` deliberately does *not* invalidate this — marking never
+    /// changes what's visible or its order, only how a row is drawn.
+    /// `RefCell` rather than a plain field because `visible_entries` must
+    /// stay `&self` (it's called from many read-only call sites across the
+    /// app); invalidation always happens from a `&mut self` method, so it
+    /// uses `RefCell::get_mut` (no runtime borrow check) instead.
+    visible_cache: RefCell<Option<Rc<Vec<usize>>>>,
 }
 
 impl Pane {
@@ -116,9 +140,16 @@ impl Pane {
             back: Vec::new(),
             forward: Vec::new(),
             virtual_dir: None,
+            visible_cache: RefCell::new(None),
         };
         pane.reload()?;
         Ok(pane)
+    }
+
+    /// Marks the `visible_entries()` cache stale — see `visible_cache`'s
+    /// doc comment for exactly which mutations require this.
+    fn invalidate_visible_cache(&mut self) {
+        *self.visible_cache.get_mut() = None;
     }
 
     /// True while this pane is browsing inside a `.zip` archive (Virtual
@@ -139,6 +170,7 @@ impl Pane {
             Some(vd) => virtual_dir::read_archive_dir_entries(&vd.archive_path, &vd.inner)?,
             None => read_dir_entries(&self.cwd)?,
         };
+        self.invalidate_visible_cache();
         self.clamp_cursor();
         Ok(())
     }
@@ -211,13 +243,41 @@ impl Pane {
     /// before files) with a synthetic `..` row prepended unless `cwd` is
     /// the filesystem root (`..` is never subject to either filter).
     pub fn visible_entries(&self) -> Vec<VisibleItem<'_>> {
+        let indices = self.visible_indices();
+
+        let mut items = Vec::with_capacity(indices.len() + 1);
+        // A virtual pane always shows ".." regardless of the real `cwd`'s
+        // root-ness: at the archive root, ".." is what exits back to the
+        // real directory (see `virtual_go_parent`), which is always
+        // possible even if `cwd` itself happens to be the filesystem
+        // root.
+        if !self.is_root() || self.virtual_dir.is_some() {
+            items.push(VisibleItem::Parent);
+        }
+        items.extend(
+            indices
+                .iter()
+                .map(|&i| VisibleItem::Entry(&self.entries[i])),
+        );
+        items
+    }
+
+    /// The sorted+filtered indices into `entries` that `visible_entries`
+    /// renders (never including the synthetic `..` row, which has no
+    /// index) — cached in `visible_cache`, recomputed (filter + full sort)
+    /// only on a cache miss.
+    fn visible_indices(&self) -> Rc<Vec<usize>> {
+        if let Some(cached) = self.visible_cache.borrow().as_ref() {
+            return Rc::clone(cached);
+        }
+
         let mut indices: Vec<usize> = self
             .entries
             .iter()
             .enumerate()
             .filter(|(_, e)| self.show_hidden || !e.is_hidden)
             .filter(|(_, e)| match &self.filter {
-                Some(spec) => spec.matches(&e.name),
+                Some(spec) => spec.matches(&e.name, &e.name_lower),
                 None => true,
             })
             .map(|(i, _)| i)
@@ -232,21 +292,9 @@ impl Pane {
             )
         });
 
-        let mut items = Vec::with_capacity(indices.len() + 1);
-        // A virtual pane always shows ".." regardless of the real `cwd`'s
-        // root-ness: at the archive root, ".." is what exits back to the
-        // real directory (see `virtual_go_parent`), which is always
-        // possible even if `cwd` itself happens to be the filesystem
-        // root.
-        if !self.is_root() || self.virtual_dir.is_some() {
-            items.push(VisibleItem::Parent);
-        }
-        items.extend(
-            indices
-                .into_iter()
-                .map(|i| VisibleItem::Entry(&self.entries[i])),
-        );
-        items
+        let indices = Rc::new(indices);
+        *self.visible_cache.borrow_mut() = Some(Rc::clone(&indices));
+        indices
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -325,6 +373,7 @@ impl Pane {
         self.cursor = 0;
         self.marks.clear();
         self.filter = None;
+        self.invalidate_visible_cache();
         Ok(())
     }
 
@@ -339,6 +388,7 @@ impl Pane {
         self.cursor = 0;
         self.marks.clear();
         self.filter = None;
+        self.invalidate_visible_cache();
         Ok(())
     }
 
@@ -374,6 +424,7 @@ impl Pane {
         self.entries = entries;
         self.marks.clear();
         self.filter = None;
+        self.invalidate_visible_cache();
 
         let memory_key = vd.archive_path.join(virtual_dir::inner_display(&new_inner));
         self.cursor_memory.insert(memory_key, leaving_name.clone());
@@ -454,15 +505,33 @@ impl Pane {
 
     pub fn cycle_sort(&mut self) {
         self.sort = self.sort.next();
+        self.invalidate_visible_cache();
+    }
+
+    /// The entry under the cursor, or `None` if the cursor is on `..` or
+    /// the pane is empty — the single resolution point every `selected_entry_*`
+    /// convenience accessor below is a thin wrapper over, and what callers
+    /// needing more than one of those fields at once (e.g. `App::begin_open`)
+    /// should call directly instead of stacking several accessor calls (each
+    /// of which independently walks `visible_entries()`/the cursor).
+    pub fn selected_entry(&self) -> Option<&FsEntry> {
+        match self.visible_entries_cached_at_cursor() {
+            Some(VisibleItem::Entry(e)) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Resolves `visible_entries().get(self.cursor)` — pulled out purely so
+    /// `selected_entry` and the accessors that predate it share one call
+    /// site rather than each re-deriving the same lookup.
+    fn visible_entries_cached_at_cursor(&self) -> Option<VisibleItem<'_>> {
+        self.visible_entries().get(self.cursor).copied()
     }
 
     /// The name of the entry under the cursor, or `None` if the cursor is
     /// on `..` or the pane is empty.
     pub fn selected_entry_name(&self) -> Option<String> {
-        match self.visible_entries().get(self.cursor) {
-            Some(VisibleItem::Entry(e)) => Some(e.name.clone()),
-            _ => None,
-        }
+        self.selected_entry().map(|e| e.name.clone())
     }
 
     /// The full path of the entry under the cursor (file or directory),
@@ -470,20 +539,14 @@ impl Pane {
     /// `OpenDefault`/`OpenEditor`, which act on whatever's selected
     /// regardless of kind.
     pub fn selected_entry_path(&self) -> Option<PathBuf> {
-        match self.visible_entries().get(self.cursor) {
-            Some(VisibleItem::Entry(e)) => Some(e.path.clone()),
-            _ => None,
-        }
+        self.selected_entry().map(|e| e.path.clone())
     }
 
     /// The kind of the entry under the cursor, or `None` for `..`/empty.
     /// Used to decide whether `Enter` should navigate (dirs) or open with
     /// the OS default handler (everything else).
     pub fn selected_entry_kind(&self) -> Option<EntryKind> {
-        match self.visible_entries().get(self.cursor) {
-            Some(VisibleItem::Entry(e)) => Some(e.kind),
-            _ => None,
-        }
+        self.selected_entry().map(|e| e.kind)
     }
 
     /// Whether the cursor is on something `Enter`/`o` should *navigate*
@@ -497,10 +560,7 @@ impl Pane {
     /// `fs::symlink_metadata` independently — see `FsEntry::symlink_target`'s
     /// doc comment).
     pub fn selected_entry_is_dir_like(&self) -> Option<bool> {
-        match self.visible_entries().get(self.cursor) {
-            Some(VisibleItem::Entry(e)) => Some(e.is_dir_like()),
-            _ => None,
-        }
+        self.selected_entry().map(|e| e.is_dir_like())
     }
 
     /// Indices (into `visible_entries()`) of every real entry whose name
@@ -519,9 +579,7 @@ impl Pane {
             .iter()
             .enumerate()
             .filter_map(|(i, item)| match item {
-                VisibleItem::Entry(e) if e.name.to_lowercase().starts_with(&prefix_lower) => {
-                    Some(i)
-                }
+                VisibleItem::Entry(e) if e.name_lower.starts_with(&prefix_lower) => Some(i),
                 _ => None,
             })
             .collect()
@@ -616,6 +674,7 @@ impl Pane {
 
     pub fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
+        self.invalidate_visible_cache();
         self.clamp_cursor();
     }
 
@@ -623,6 +682,7 @@ impl Pane {
     /// the cursor, since the visible list may have just shrunk.
     pub fn set_filter(&mut self, filter: Option<FilterSpec>) {
         self.filter = filter;
+        self.invalidate_visible_cache();
         self.clamp_cursor();
     }
 
@@ -649,25 +709,15 @@ fn compare_entries(a: &FsEntry, b: &FsEntry, sort: SortKey, ascending: bool) -> 
         };
     }
 
-    let name_cmp = || a.name.to_lowercase().cmp(&b.name.to_lowercase());
+    let name_cmp = || a.name_lower.cmp(&b.name_lower);
     let ord = match sort {
         SortKey::Name => name_cmp(),
         SortKey::Size => a.size.cmp(&b.size).then_with(name_cmp),
         SortKey::MTime => a.mtime.cmp(&b.mtime).then_with(name_cmp),
-        SortKey::Ext => extension_lower(&a.name)
-            .cmp(&extension_lower(&b.name))
-            .then_with(name_cmp),
+        SortKey::Ext => a.ext_lower.cmp(&b.ext_lower).then_with(name_cmp),
     };
 
     if ascending { ord } else { ord.reverse() }
-}
-
-fn extension_lower(name: &str) -> String {
-    Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -677,8 +727,11 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     fn entry(name: &str, kind: EntryKind, size: u64, mtime_offset_secs: u64) -> FsEntry {
+        let (name_lower, ext_lower) = crate::entry::lower_keys(name);
         FsEntry {
             name: name.to_string(),
+            name_lower,
+            ext_lower,
             path: PathBuf::from(name),
             kind,
             size,
@@ -1153,5 +1206,93 @@ mod tests {
 
         // ...but it's still a valid transfer target.
         assert_eq!(pane.marked_or_cursor(), vec![pane.cwd.join("summary.txt")]);
+    }
+
+    // --- `visible_entries` cache correctness --------------------------
+    //
+    // These don't (and can't, from outside the module) inspect
+    // `visible_cache` directly — they instead prove the *externally
+    // observable contract* the cache must never break: two consecutive
+    // calls agree while nothing has changed (a cache hit must return the
+    // same thing a fresh computation would), and every mutation that's
+    // supposed to invalidate it (`reload`, `set_filter`, `toggle_hidden`,
+    // `cycle_sort`) is actually reflected on the very next call.
+
+    fn visible_names(pane: &Pane) -> Vec<String> {
+        pane.visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                VisibleItem::Entry(e) => Some(e.name.clone()),
+                VisibleItem::Parent => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repeated_calls_with_no_mutation_return_the_same_result() {
+        let (_dir, pane) = pane_with_files(&["b.txt", "a.txt", "c.txt"]);
+        let first = visible_names(&pane);
+        let second = visible_names(&pane);
+        let third = visible_names(&pane);
+        assert_eq!(first, vec!["a.txt", "b.txt", "c.txt"]);
+        assert_eq!(first, second, "a cache hit must match a fresh computation");
+        assert_eq!(second, third);
+    }
+
+    #[test]
+    fn cache_reflects_a_reload_that_adds_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(visible_names(&pane), vec!["a.txt"]);
+
+        // Populate the cache, then change the directory out from under it
+        // and reload — a stale cache would still show only "a.txt".
+        fs::write(dir.path().join("b.txt"), b"x").unwrap();
+        pane.reload().unwrap();
+        assert_eq!(visible_names(&pane), vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn cache_reflects_a_filter_change() {
+        let (_dir, mut pane) = pane_with_files(&["report.txt", "summary.txt"]);
+        assert_eq!(visible_names(&pane), vec!["report.txt", "summary.txt"]);
+
+        pane.set_filter(FilterSpec::parse("report"));
+        assert_eq!(visible_names(&pane), vec!["report.txt"]);
+
+        pane.set_filter(None);
+        assert_eq!(visible_names(&pane), vec!["report.txt", "summary.txt"]);
+    }
+
+    #[test]
+    fn cache_reflects_a_hidden_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".secret"), b"x").unwrap();
+        fs::write(dir.path().join("visible.txt"), b"x").unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+
+        assert_eq!(visible_names(&pane), vec!["visible.txt"]);
+        pane.toggle_hidden();
+        assert_eq!(visible_names(&pane), vec![".secret", "visible.txt"]);
+        pane.toggle_hidden();
+        assert_eq!(visible_names(&pane), vec!["visible.txt"]);
+    }
+
+    #[test]
+    fn cache_reflects_a_sort_change() {
+        // Named so name-order and size-order disagree: name-ascending is
+        // "a.txt, z.txt", but "a.txt" is the bigger file, so size-ascending
+        // must flip to "z.txt, a.txt" — a stale cache would still show the
+        // name-sorted order.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), vec![0u8; 1000]).unwrap();
+        fs::write(dir.path().join("z.txt"), b"1").unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+
+        assert_eq!(visible_names(&pane), vec!["a.txt", "z.txt"]);
+        pane.cycle_sort(); // Name -> Size
+        assert_eq!(pane.sort, SortKey::Size);
+        assert_eq!(visible_names(&pane), vec!["z.txt", "a.txt"]);
     }
 }
