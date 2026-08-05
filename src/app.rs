@@ -10,7 +10,7 @@ use anyhow::Context as _;
 use directories::BaseDirs;
 
 use crate::action::Action;
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::entry::EntryKind;
 use crate::event::{AppEvent, KeyCode, KeyModifiers, TaskEvent};
 use crate::external::{self, ExternalRequest};
@@ -103,19 +103,33 @@ pub struct App {
     /// takes this after each event and, if present, suspends the TUI to
     /// run it via `external::run_suspended`.
     pub pending_external: Option<ExternalRequest>,
+    /// Set alongside `pending_external` by `,` (edit_config) specifically:
+    /// `main.rs`'s loop checks this right after the queued editor exits
+    /// and, if set, calls `reload_config` — a plain bool rather than
+    /// folding it into `ExternalRequest` itself, since every other
+    /// external command has nothing to do afterward.
+    pub pending_config_reload: bool,
+}
+
+/// Builds a `Keymap` from `config`: the compiled-in defaults, with `[keys]`
+/// merged in and then `[bindings]` applied on top (so `[bindings]` wins on
+/// any combo both sections mention — see `Keymap::apply_bindings`). Shared
+/// by `App::new` (startup) and `App::apply_reloaded_config` (`,`'s live
+/// reload), so the two can never build a keymap two different ways.
+fn build_keymap(config: &Config) -> anyhow::Result<Keymap> {
+    let mut keymap = Keymap::default_dyna();
+    keymap
+        .merge_overrides(&config.keys)
+        .context("invalid [keys] entry in config")?;
+    keymap
+        .apply_bindings(&config.bindings)
+        .context("invalid [bindings] entry in config")?;
+    Ok(keymap)
 }
 
 impl App {
     pub fn new(left: PathBuf, right: PathBuf, config: Config) -> anyhow::Result<Self> {
-        let mut keymap = Keymap::default_dyna();
-        keymap
-            .merge_overrides(&config.keys)
-            .context("invalid [keys] entry in config")?;
-        // Applied after [keys] so [bindings] wins on any combo both
-        // sections happen to mention (see `Keymap::apply_bindings`).
-        keymap
-            .apply_bindings(&config.bindings)
-            .context("invalid [bindings] entry in config")?;
+        let keymap = build_keymap(&config)?;
         let (tx, task_rx) = mpsc::channel();
 
         Ok(Self {
@@ -132,6 +146,7 @@ impl App {
             bookmarks: Bookmarks::default(),
             bookmarks_dirty: false,
             pending_external: None,
+            pending_config_reload: false,
         })
     }
 
@@ -392,6 +407,10 @@ impl App {
                 self.begin_help();
                 Ok(())
             }
+            Action::EditConfig => {
+                self.begin_edit_config();
+                Ok(())
+            }
             Action::Quit => {
                 self.begin_quit();
                 Ok(())
@@ -630,6 +649,93 @@ impl App {
             cwd,
             pause_after: false,
         });
+    }
+
+    /// `,` (edit_config): opens ozzel's own config file in an editor,
+    /// creating it from the bundled template first if it doesn't exist yet
+    /// (see `config::ensure_config_file_exists`). Unlike `OpenEditor`, this
+    /// falls back to a hardcoded `vim` when neither `config.editor` nor
+    /// `$EDITOR` is set, since a user reaching for "edit my config" wants
+    /// it to just work rather than error out. Queues `pending_config_reload`
+    /// alongside the suspend request so `main.rs`'s loop reloads the config
+    /// live once the editor exits (see `reload_config`).
+    fn begin_edit_config(&mut self) {
+        let Some(path) = config::config_path() else {
+            self.log_error("could not determine the config file location on this platform");
+            return;
+        };
+        self.begin_edit_config_at(path);
+    }
+
+    /// Core of `begin_edit_config`, taking the path explicitly so tests can
+    /// point it at a tempdir file instead of the real XDG-resolved
+    /// location (which `cargo test` must never read from or write to).
+    fn begin_edit_config_at(&mut self, path: PathBuf) {
+        if let Err(err) = config::ensure_config_file_exists(&path) {
+            self.log_error(format!("failed to create config file: {err}"));
+            return;
+        }
+
+        let editor = self
+            .config
+            .editor
+            .clone()
+            .or_else(|| std::env::var("EDITOR").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "vim".to_string());
+
+        let cmdline = format!(
+            "{editor} {}",
+            external::shell_quote(&path.to_string_lossy())
+        );
+        let cwd = self.active_pane().cwd.clone();
+        self.pending_external = Some(ExternalRequest {
+            cmdline,
+            cwd,
+            pause_after: false,
+        });
+        self.pending_config_reload = true;
+    }
+
+    /// Re-reads and re-parses the config file at the real, XDG-resolved
+    /// location `config::load` uses at startup. Called by `main.rs`'s loop
+    /// right after the `,` (edit_config) editor exits.
+    pub fn reload_config(&mut self) {
+        let Some(path) = config::config_path() else {
+            self.log_error("could not determine the config file location on this platform");
+            return;
+        };
+        self.reload_config_from(&path);
+    }
+
+    /// Core of `reload_config`, taking the path explicitly so tests can
+    /// point it at a tempdir file. On a parse error, the *old* config and
+    /// keymap are left completely untouched and the error is logged — this
+    /// is the one config-error path that must never hard-fail, since the
+    /// app is already running (unlike the startup load in `main.rs`, which
+    /// is allowed to bail before the terminal is even touched).
+    fn reload_config_from(&mut self, path: &Path) {
+        match config::load_from_path(path) {
+            Ok(new_config) => self.apply_reloaded_config(new_config),
+            Err(err) => self.log_error(format!("config reload failed: {err}")),
+        }
+    }
+
+    /// Rebuilds the keymap from `new_config` and, only if that succeeds,
+    /// swaps both `self.config` and `self.keymap` in and logs success.
+    /// `[keys]`/`[bindings]` errors surface here exactly like a malformed
+    /// startup config would (same `build_keymap` used by `App::new`), but
+    /// unlike startup, a bad keymap here must not touch the running app's
+    /// state at all — the old config/keymap stay live.
+    fn apply_reloaded_config(&mut self, new_config: Config) {
+        match build_keymap(&new_config) {
+            Ok(new_keymap) => {
+                self.config = new_config;
+                self.keymap = new_keymap;
+                self.log_info("config reloaded");
+            }
+            Err(err) => self.log_error(format!("config reload failed: {err}")),
+        }
     }
 
     fn begin_open_default(&mut self) {
@@ -1820,6 +1926,175 @@ mod tests {
             app.log
                 .iter()
                 .any(|l| l.is_error && l.message.contains("not on a file"))
+        );
+    }
+
+    #[test]
+    fn edit_config_creates_the_template_when_missing_and_queues_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                editor: Some("vim".to_string()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        // Nested + missing: exercises both the create_dir_all and the
+        // template-writing halves of ensure_config_file_exists.
+        let config_path = dir.path().join("nested").join("config.toml");
+        assert!(!config_path.exists());
+
+        app.begin_edit_config_at(config_path.clone());
+
+        assert!(
+            config_path.exists(),
+            "must create the file from the template"
+        );
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            written.contains("delete_behavior"),
+            "should be the examples/config.toml template, got: {written}"
+        );
+
+        let req = app
+            .pending_external
+            .take()
+            .expect("expected a pending external request");
+        assert!(req.cmdline.starts_with("vim "), "cmdline: {}", req.cmdline);
+        assert!(req.cmdline.contains("config.toml"));
+        assert!(!req.pause_after);
+        assert!(
+            app.pending_config_reload,
+            "must queue a reload for after the editor exits"
+        );
+    }
+
+    #[test]
+    fn edit_config_does_not_overwrite_an_existing_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "delete_behavior = \"permanent\"").unwrap();
+
+        app.begin_edit_config_at(config_path.clone());
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "delete_behavior = \"permanent\"",
+            "an existing config file must be left untouched"
+        );
+    }
+
+    #[test]
+    fn edit_config_falls_back_to_vim_when_no_editor_or_env_var_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        // No `config.editor` set — this is exactly the case OpenEditor
+        // would refuse ("no editor configured"), but edit_config must
+        // still work out of the box per the user's request.
+        let mut app = test_app(dir.path(), dir.path());
+        // Isolate from whatever $EDITOR happens to be set in the test
+        // environment, so this assertion is deterministic everywhere.
+        // SAFETY: single-threaded w.r.t. this var within this test process
+        // is not guaranteed by the test harness, but no other test reads
+        // or depends on $EDITOR, so this is safe in practice.
+        unsafe {
+            std::env::remove_var("EDITOR");
+        }
+
+        app.begin_edit_config_at(dir.path().join("config.toml"));
+
+        let req = app.pending_external.unwrap();
+        assert!(
+            req.cmdline.starts_with("vim "),
+            "must fall back to a hardcoded vim, cmdline: {}",
+            req.cmdline
+        );
+    }
+
+    #[test]
+    fn reload_config_success_swaps_the_keymap_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        // Not bound by default; proves the *new* config's keymap is the one
+        // actually in effect afterward, not just re-parsed and discarded.
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+            None
+        );
+
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[keys]\n\"z\" = \"quit\"\n").unwrap();
+        app.reload_config_from(&config_path);
+
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+            Some(Action::Quit),
+            "the reloaded config's [keys] override must take effect immediately"
+        );
+        assert!(
+            app.log
+                .iter()
+                .any(|l| !l.is_error && l.message == "config reloaded"),
+            "log: {:?}",
+            app.log
+        );
+    }
+
+    #[test]
+    fn reload_config_failure_keeps_the_old_config_and_keymap_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Permanent,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "delete_behavior = [not valid").unwrap();
+        app.reload_config_from(&config_path);
+
+        assert_eq!(
+            app.config.delete_behavior,
+            crate::config::DeleteBehavior::Permanent,
+            "a parse error must leave the old config completely untouched"
+        );
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.starts_with("config reload failed")),
+            "log: {:?}",
+            app.log
+        );
+    }
+
+    #[test]
+    fn reload_config_bad_keys_entry_keeps_the_old_keymap_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        let original_quit = app.keymap.resolve(KeyCode::Char('q'), KeyModifiers::NONE);
+
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[keys]\n\"q\" = \"not_a_real_action\"\n").unwrap();
+        app.reload_config_from(&config_path);
+
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('q'), KeyModifiers::NONE),
+            original_quit,
+            "an invalid [keys] action name must leave the old keymap untouched"
+        );
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.is_error && l.message.starts_with("config reload failed")),
+            "log: {:?}",
+            app.log
         );
     }
 

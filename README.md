@@ -9,6 +9,7 @@
 - コピー・移動は（削除と同様）実行前に確認ダイアログを表示（設定でオフ可能。ただし上書き衝突がある場合は常に確認）
 - TOML 設定ファイルによるキーバインドの完全な再定義（`[keys]`: キー→アクション、`[bindings]`: アクション→キーの配列、の両方式に対応）
 - 現在の実効キーバインド一覧を表示するヘルプ画面（`h` / `?`）
+- 設定ファイルをその場で編集して即座に反映できるショートカット（`,`。未作成ならテンプレートから新規作成し、保存後は再起動なしで設定を再読み込み）
 - 複数ファイルのマーク（Space）とマーク一括操作
 - インクリメンタル絞込・検索（部分一致、`re:` プレフィックスで正規表現）
 - コピー・移動・削除・zip 圧縮/展開はバックグラウンドスレッドで非同期実行し、進捗バーを表示しながら他の操作も継続可能
@@ -171,8 +172,11 @@ OS 既定のアプリでファイル・ディレクトリを開く動作（`open
 | --- | --- |
 | `:` | コマンドラインの入力プロンプトを表示し、確定すると TUI を退避してシェル経由でコマンドを実行（終了後 “press any key” で待機してから復帰） |
 | `e` | カーソル位置のファイルを設定のエディタ（未設定なら `$EDITOR`）で開く。TUI は退避するが、エディタは自前で画面制御するため終了後は即座に復帰 |
+| `,` | `ozzel` 自身の設定ファイルをエディタで開く（`e` と同じく即座に復帰）。ファイルがまだ存在しない場合は、必要なディレクトリごと `examples/config.toml` と同内容のテンプレートから新規作成してから開く |
 
 `:` で起動したコマンド実行中に子プロセス内で Ctrl+C を押した場合、子プロセスだけが中断され `ozzel` 自体は生存します（子プロセスには専用のプロセスグループを与え、ターミナルのフォアグラウンドグループとして扱っています）。
+
+**`,` は設定ファイルを開くエディタの決め方が `e` と少し異なります。** `config.editor` → `$EDITOR` →（どちらも未設定なら）`vim` の順に決まり、`e` と違って「エディタ未設定」がエラーになりません（設定ファイルを編集するためのキーが、設定なしでは使えないのでは本末転倒なため）。エディタを終了すると設定ファイルを再読み込みし、パースに成功すればキーバインド・配色・削除挙動などをその場で反映してログに「config reloaded」と表示します（アプリの再起動は不要です）。再読み込み時に TOML が不正だった場合は、他の設定エラーと違ってアプリを終了させず、エラーをログに表示したうえで**それまでの設定・キーバインドを保持したまま**動作を続けます（起動時の不正な設定はハードエラーですが、実行中の再読み込みでアプリを落とすわけにはいかないためです）。
 
 ### その他
 
@@ -253,7 +257,7 @@ delete = ["d", "S-d"]
 
 ### アクション名一覧（`[keys]` の右辺 / `[bindings]` の左辺に指定できる値）
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `enter`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `filter`, `clear_filter`, `zip_marked`, `unzip`, `history_jump`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `view`, `help`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `enter`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `filter`, `clear_filter`, `zip_marked`, `unzip`, `history_jump`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `view`, `help`, `edit_config`, `quit`
 
 この一覧に対応する現在の実効キーバインドは、アプリ内のヘルプ画面（`h`/`?`）でいつでも確認できます。
 

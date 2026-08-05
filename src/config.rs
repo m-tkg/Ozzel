@@ -8,13 +8,19 @@
 //! usually means the user just made a typo they'd want to know about.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer};
 
 use crate::color;
+
+/// The starter template written into a missing config file (see
+/// `ensure_config_file_exists`) — literally `examples/config.toml`,
+/// embedded via `include_str!` so the shipped example and the one a
+/// first-time user gets from `,` (edit_config) can never drift apart.
+const CONFIG_TEMPLATE: &str = include_str!("../examples/config.toml");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -174,14 +180,40 @@ pub fn load() -> Result<Config> {
     let Some(path) = config_path() else {
         return Ok(Config::default());
     };
+    load_from_path(&path)
+}
+
+/// Core of `load`, taking the path explicitly — factored out so both
+/// `load` (the real, XDG-resolved location) and `App::reload_config`
+/// (which needs an injectable path for its own testability, since the
+/// live-reload it drives has to point at a tempdir file in tests) share
+/// exactly one parse path.
+pub fn load_from_path(path: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
 
-    let text = std::fs::read_to_string(&path)
+    let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
     toml::from_str(&text)
         .with_context(|| format!("failed to parse config file: {}", path.display()))
+}
+
+/// Ensures `path`'s parent directories and the file itself exist, writing
+/// `CONFIG_TEMPLATE` if the file is missing (never overwrites an existing
+/// one). Called by `App::begin_edit_config` right before opening the
+/// config file in an editor, so a first-time user gets a real, documented
+/// starting point instead of an empty file (or an error from the editor
+/// failing to open a nonexistent path whose parent directory doesn't even
+/// exist yet).
+pub fn ensure_config_file_exists(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, CONFIG_TEMPLATE)
 }
 
 #[cfg(test)]
@@ -370,5 +402,61 @@ mod tests {
     #[test]
     fn none_when_neither_xdg_nor_home_resolve() {
         assert_eq!(unix_config_path(None, None), None);
+    }
+
+    #[test]
+    fn load_from_path_missing_file_is_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.toml");
+        let config = load_from_path(&path).unwrap();
+        assert_eq!(config.delete_behavior, DeleteBehavior::Trash);
+    }
+
+    #[test]
+    fn load_from_path_parses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "delete_behavior = \"permanent\"").unwrap();
+        let config = load_from_path(&path).unwrap();
+        assert_eq!(config.delete_behavior, DeleteBehavior::Permanent);
+    }
+
+    #[test]
+    fn load_from_path_malformed_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "delete_behavior = [not valid").unwrap();
+        assert!(load_from_path(&path).is_err());
+    }
+
+    #[test]
+    fn ensure_config_file_exists_creates_parent_dirs_and_writes_the_template() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nested path: the parent directory doesn't exist yet either,
+        // exercising the create_dir_all half of the fix.
+        let path = dir.path().join("nested").join("ozzel").join("config.toml");
+        assert!(!path.exists());
+
+        ensure_config_file_exists(&path).unwrap();
+
+        assert!(path.exists());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, CONFIG_TEMPLATE);
+        // The template itself must still be valid, parseable config, same
+        // guarantee `example_config_toml_parses_cleanly` checks for the
+        // file on disk — this checks the *embedded* copy specifically.
+        let _: Config = toml::from_str(&written).expect("template must parse as valid Config");
+    }
+
+    #[test]
+    fn ensure_config_file_exists_does_not_overwrite_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "delete_behavior = \"permanent\"").unwrap();
+
+        ensure_config_file_exists(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "delete_behavior = \"permanent\"");
     }
 }

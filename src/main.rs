@@ -207,6 +207,14 @@ fn run(
             }
             app.drain_tasks();
             app.refresh_panes();
+
+            // `,` (edit_config) queues this alongside the suspend request
+            // itself; reload only after the editor has actually exited, so
+            // the new config takes effect immediately without a restart.
+            if app.pending_config_reload {
+                app.pending_config_reload = false;
+                app.reload_config();
+            }
         }
 
         if app.bookmarks_dirty {

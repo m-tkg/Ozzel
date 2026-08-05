@@ -127,11 +127,13 @@ impl Keymap {
     /// `S-h`/`H`, which now means history), `:` runs a shell command (TUI
     /// suspended), `e` opens the cursor file in an editor (suspended, no
     /// pause), `x`/`o` open the cursor entry in the built-in text viewer,
-    /// and `q`/Ctrl+C quit. `S-up`/`S-down` jump straight to the top/bottom
-    /// of the pane (same as Home/End, kept bound too), and `S-enter` opens
-    /// the cursor entry with the OS default-app handler -- most terminals
-    /// can only report Shift+Enter distinctly from Enter when the kitty
-    /// keyboard protocol is active (see `main.rs`'s `keyboard_enhancement`
+    /// `,` opens ozzel's own config file in an editor and reloads it live
+    /// once the editor exits (see `App::begin_edit_config`), and `q`/Ctrl+C
+    /// quit. `S-up`/`S-down` jump straight to the top/bottom of the pane
+    /// (same as Home/End, kept bound too), and `S-enter` opens the cursor
+    /// entry with the OS default-app handler -- most terminals can only
+    /// report Shift+Enter distinctly from Enter when the kitty keyboard
+    /// protocol is active (see `main.rs`'s `keyboard_enhancement`
     /// handling); without it, `S-enter` arrives as plain Enter and falls
     /// back to the built-in viewer. `OpenDefault` is otherwise a valid
     /// action but unbound on any other key by default — rebind it via
@@ -181,6 +183,7 @@ impl Keymap {
             ("e", OpenEditor),
             ("x", View),
             ("o", View),
+            (",", EditConfig),
             ("q", Quit),
             ("C-c", Quit),
         ];
@@ -452,6 +455,15 @@ mod tests {
         assert_eq!(
             km.resolve(KeyCode::Char('o'), KeyModifiers::NONE),
             Some(Action::View)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_comma_to_edit_config() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char(','), KeyModifiers::NONE),
+            Some(Action::EditConfig)
         );
     }
 

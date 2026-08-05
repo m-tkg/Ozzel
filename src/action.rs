@@ -46,6 +46,10 @@ pub enum Action {
     /// Opens the full-frame keybinding help screen (`Mode::Help`); see
     /// `crate::help`.
     Help,
+    /// Opens ozzel's own config file in an editor (creating it from a
+    /// starter template first if it doesn't exist yet), then reloads the
+    /// config live once the editor exits. See `App::begin_edit_config`.
+    EditConfig,
     Quit,
 }
 
@@ -93,7 +97,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -129,6 +133,7 @@ impl Action {
         Action::OpenDefault,
         Action::View,
         Action::Help,
+        Action::EditConfig,
         Action::Quit,
     ];
 
@@ -143,7 +148,7 @@ impl Action {
             Rename | Mkdir | Delete | Copy | Move | ZipMarked | Unzip => ActionCategory::FileOps,
             Filter | ClearFilter => ActionCategory::Filter,
             HistoryJump | BookmarkJump | BookmarkAdd | GoHome => ActionCategory::Jumps,
-            CommandLine | OpenEditor | OpenDefault | View => ActionCategory::External,
+            CommandLine | OpenEditor | OpenDefault | View | EditConfig => ActionCategory::External,
             Help | Quit => ActionCategory::Misc,
         }
     }
@@ -187,6 +192,7 @@ impl Action {
             OpenDefault => "Open the cursor entry with the OS default app",
             View => "Open the cursor file in the built-in viewer",
             Help => "Show this help screen",
+            EditConfig => "Edit the config file (created from a template if missing)",
             Quit => "Quit ozzel",
         }
     }
@@ -234,6 +240,7 @@ impl Action {
             FocusRight => "focus_right",
             Quit => "quit",
             Help => "help",
+            EditConfig => "edit_config",
         }
     }
 }
