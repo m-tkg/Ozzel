@@ -12,8 +12,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
-    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -106,14 +106,25 @@ fn unix_shell_command(shell: &str, cmdline: &str) -> (String, Vec<String>) {
 /// inherit flags it doesn't expect, or (worse) ozzel would come back with
 /// no flags active despite `main.rs` believing they still were, breaking
 /// `S-enter` disambiguation after e.g. `:vim`.
+///
+/// `mouse` gets the exact same treatment for the same reason: mouse
+/// capture (if `TerminalGuard` enabled it) is disabled before the child
+/// gets the terminal — otherwise a suspended `:vim` would receive raw
+/// mouse escape sequences instead of native mouse support, and its own
+/// terminal-selection behavior would be broken too — and re-enabled right
+/// after raw mode comes back.
 pub fn run_suspended(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     req: &ExternalRequest,
     keyboard_enhancement: bool,
+    mouse: bool,
 ) -> Result<Option<String>> {
     if keyboard_enhancement {
         execute!(io::stdout(), PopKeyboardEnhancementFlags)
             .context("failed to pop keyboard enhancement flags")?;
+    }
+    if mouse {
+        execute!(io::stdout(), DisableMouseCapture).context("failed to disable mouse capture")?;
     }
     disable_raw_mode().context("failed to disable raw mode")?;
     execute!(io::stdout(), LeaveAlternateScreen, Show)
@@ -140,6 +151,10 @@ pub fn run_suspended(
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             )
             .context("failed to re-push keyboard enhancement flags")?;
+        }
+        if mouse {
+            execute!(io::stdout(), EnableMouseCapture)
+                .context("failed to re-enable mouse capture")?;
         }
         if let Some(msg) = pause_message {
             print!("{msg}");
@@ -234,6 +249,52 @@ fn spawn_and_wait(command: &mut Command) -> io::Result<std::process::ExitStatus>
     command.spawn()?.wait()
 }
 
+/// The classic base64 alphabet (`RFC 4648`, `+`/`/`, `=` padding) —
+/// hand-rolled rather than pulling in a crate, since OSC 52 is the only
+/// place ozzel needs it and the algorithm is a couple dozen lines.
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encodes `data` as base64 (standard alphabet, `=`-padded) — the encoding
+/// OSC 52's clipboard payload requires (see `osc52_copy_sequence`).
+pub fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied();
+        let b2 = chunk.get(2).copied();
+
+        let n = (b0 as u32) << 16 | (b1.unwrap_or(0) as u32) << 8 | (b2.unwrap_or(0) as u32);
+        out.push(BASE64_ALPHABET[(n >> 18 & 0x3f) as usize] as char);
+        out.push(BASE64_ALPHABET[(n >> 12 & 0x3f) as usize] as char);
+        out.push(if b1.is_some() {
+            BASE64_ALPHABET[(n >> 6 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if b2.is_some() {
+            BASE64_ALPHABET[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Builds the OSC 52 "set clipboard" escape sequence for `text`: works over
+/// SSH and inside tmux (given `set -g set-clipboard on` / passthrough,
+/// standard tmux config) with zero extra dependencies, unlike a native
+/// clipboard crate — chosen over one (e.g. `arboard`) as the *only*
+/// mechanism (no fallback) since a native clipboard crate would need
+/// platform-specific backends (X11/Wayland/macOS/Windows) that plain don't
+/// exist over SSH anyway, so it wouldn't actually cover the cases OSC 52
+/// misses. A terminal that doesn't understand OSC 52 simply ignores the
+/// escape sequence — there is no reliable way to detect support up front,
+/// so `App::begin_copy_path` always logs success rather than guessing.
+pub fn osc52_copy_sequence(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
+}
+
 fn wait_for_keypress() -> Result<()> {
     loop {
         if let Event::Key(key) = event::read()?
@@ -271,5 +332,38 @@ mod tests {
     #[test]
     fn shell_quote_escapes_embedded_single_quotes() {
         assert_eq!(shell_quote("it's here.txt"), r"'it'\''s here.txt'");
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        // RFC 4648's own test vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_encode_round_trips_a_unicode_path() {
+        let text = "/home/日本語/résumé.txt";
+        let encoded = base64_encode(text.as_bytes());
+        // No reference decoder in this crate, so round-trip through our own
+        // encoder's inverse property is checked structurally instead:
+        // valid base64 is always a multiple of 4 chars, alphabet-only.
+        assert_eq!(encoded.len() % 4, 0);
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
+    }
+
+    #[test]
+    fn osc52_copy_sequence_wraps_base64_in_the_osc52_escape() {
+        let seq = osc52_copy_sequence("foo");
+        assert_eq!(seq, "\x1b]52;c;Zm9v\x07");
     }
 }

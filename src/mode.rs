@@ -22,6 +22,13 @@ pub enum PromptKind {
     },
     /// Collecting a `:`-command line to run with the TUI suspended.
     Command,
+    /// Collecting the new name for `duplicate` (`c`): prefilled with the
+    /// cursor entry's current name, committed as a copy of `source` under
+    /// the typed name in the *same* directory. `source` is captured at
+    /// prompt-open time, same story as `ZipName`'s `targets`.
+    Duplicate {
+        source: PathBuf,
+    },
 }
 
 /// Which jump menu a `Mode::Select` is showing — `d` (delete) only makes
@@ -146,6 +153,28 @@ pub enum Mode {
     Help {
         /// Index of the first visible line.
         scroll: usize,
+    },
+    /// The full-frame in-memory log viewer (`S-l`/`L`). Fixed keys only
+    /// (see `App::handle_log_view_key`), same scroll keys as the viewer's
+    /// text mode. `scroll_from_bottom` is measured in wrapped display rows
+    /// *up from the newest content* (0 = pinned to the bottom, which is
+    /// where this mode always opens) rather than a raw line index, since
+    /// how many rows the log wraps into depends on terminal width — a
+    /// width `App` has no access to; `ui::log_view::render_full` (which
+    /// does have it) is what actually turns this into a display offset and
+    /// clamps it, so this field can grow past the real maximum here with
+    /// no ill effect (see also `Home`'s use of `usize::MAX`).
+    Log {
+        scroll_from_bottom: usize,
+    },
+    /// The command palette (`F`/`S-f`, dyna's "Function List"): a
+    /// filterable, scrollable list of every action. Typing narrows the
+    /// list (see `crate::function_list::filter_actions`); `cursor` indexes
+    /// into that *filtered* list, not `Action::ALL`, so it's clamped
+    /// relative to whatever the current `input` matches.
+    FunctionList {
+        input: LineEditor,
+        cursor: usize,
     },
 }
 

@@ -43,6 +43,31 @@ delete_behavior = "trash"
 # 即座に終了します（タスク実行中の確認はこの設定に関わらず常に表示されます）。
 confirm_quit = true
 
+# --- 終了時のディレクトリ書き出し（--cwd-file） -----------------------------
+# デフォルト true: `ozzel --cwd-file <path>` で起動していた場合、終了時に
+# フォーカスしていたペインのディレクトリを <path> へ書き出します。
+# false にすると、--cwd-file を指定していても一切書き出しません
+# （--cwd-file を他用途で使いたい場合の完全なオプトアウト用）。
+# シェル側の連携方法は README.md の「終了時にシェルの cd を追従させる」を
+# 参照してください。
+quit_cd = true
+
+# --- マウス操作 -------------------------------------------------------------
+# デフォルト true: クリックでのペイン/カーソル移動、ホイールでのスクロール、
+# ドラッグでの範囲マーク、ダブルクリックでの open が有効になります。
+# false にすると、マウスキャプチャを一切有効化しません（ターミナル本来の
+# テキスト選択がそのまま使えます）。true のままターミナルのネイティブな
+# テキスト選択をしたい場合は、多くのターミナルで Shift キーを押しながら
+# ドラッグすると選択できます（TUI アプリの一般的な作法です）。
+mouse = true
+
+# --- パーミッション列 -------------------------------------------------------
+# デフォルト true: 各行の名前の隣に `drwxr-xr-x` 形式（Windows では
+# 簡易表示の `rw-`/`ro-`/`rwd` 等）のパーミッション列を表示します。
+# ペイン幅が狭いときは、名前列が潰れる前にこの列が自動的に非表示になります。
+# false にすると常に非表示にします。
+show_permissions = true
+
 # --- 色 -------------------------------------------------------------------
 [colors]
 # カーソル行の背景色。名前付きの ratatui カラー（大文字小文字を区別しない。
@@ -64,6 +89,14 @@ cursor_inactive = "white"
 # 表示するかどうか。デフォルトは true。false にすると両ペインとも常に
 # 通常の明るさで表示されます。
 dim_inactive = true
+
+# 種別ごとの行の色（カーソル行以外に適用されます。指定できる値は cursor と
+# 同じです）。ある行が複数の種別に該当する場合（例: 隠しディレクトリ）は
+# hidden > executable > directory の優先順位で1色だけが使われます。
+# マークされた行の色（黄色）は常にこれらより優先されます。
+directory = "cyan"
+hidden = "red"
+executable = "yellow"
 
 # --- キーバインドの上書き -----------------------------------------------
 # 左辺: キーの組み合わせ（"C-" = Ctrl, "S-" = Shift, "A-" = Alt を
@@ -89,9 +122,10 @@ dim_inactive = true
 # cursor_up, cursor_down, focus_left, focus_right, page_up, page_down,
 # top, bottom, switch_pane, open, parent, cycle_sort, toggle_hidden,
 # swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
-# filter, clear_filter, zip_marked, unzip, history_jump, bookmark_jump,
+# duplicate, copy_path, filter, clear_filter, zip_marked, unzip,
+# history_jump, history_back, history_forward, bookmark_jump,
 # bookmark_add, go_home, command_line, open_editor, open_default,
-# help, edit_config, quit
+# help, edit_config, show_log, function_list, quit
 
 # --- キーバインドの上書き（逆向き記法・デフォルトの全キーバインド一覧） ---
 # [keys] とは逆に、左辺がアクション名、右辺がキーの組み合わせの配列です。
@@ -132,11 +166,15 @@ mkdir = ["K"]
 delete = ["D", "d"]
 copy = ["C"]
 move = ["M"]
+duplicate = ["c"]
+copy_path = ["y"]
 zip_marked = ["p"]
 unzip = ["u"]
 filter = ["/", "f"]
 clear_filter = ["Esc"]
 history_jump = ["H"]
+history_back = ["S-Left"]
+history_forward = ["S-Right"]
 bookmark_jump = ["b"]
 bookmark_add = ["B"]
 go_home = ["~"]
@@ -145,4 +183,6 @@ open_editor = ["e"]
 open_default = ["S-Enter"]
 edit_config = [","]
 help = ["?", "h"]
+show_log = ["L"]
+function_list = ["F"]
 quit = ["C-c", "q"]

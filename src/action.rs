@@ -33,11 +33,24 @@ pub enum Action {
     Delete,
     Copy,
     Move,
+    /// Copies the cursor entry to a new name in the *same* directory,
+    /// prompting for the name first (prefilled with the current one). See
+    /// `App::begin_duplicate`.
+    Duplicate,
+    /// Copies the cursor entry's absolute path to the system clipboard
+    /// (via an OSC 52 terminal escape — see `App::begin_copy_path`).
+    CopyPath,
     Filter,
     ClearFilter,
     ZipMarked,
     Unzip,
     HistoryJump,
+    /// Per-pane "back" in a browser-style history stack — the reverse of
+    /// whatever cwd change was made last (see `App::record_history_if_changed`).
+    /// Distinct from `HistoryJump`'s persisted MRU menu.
+    HistoryBack,
+    /// The reverse of `HistoryBack`.
+    HistoryForward,
     BookmarkJump,
     BookmarkAdd,
     GoHome,
@@ -53,6 +66,13 @@ pub enum Action {
     /// starter template first if it doesn't exist yet), then reloads the
     /// config live once the editor exits. See `App::begin_edit_config`.
     EditConfig,
+    /// Opens the full-frame in-memory log viewer (`Mode::Log`); see
+    /// `App::begin_show_log`.
+    ShowLog,
+    /// Opens the command-palette (`Mode::FunctionList`) — dyna's "Function
+    /// List": a filterable list of every action, executable by name. See
+    /// `App::begin_function_list`.
+    FunctionList,
     Quit,
 }
 
@@ -100,7 +120,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 42] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -123,11 +143,15 @@ impl Action {
         Action::Delete,
         Action::Copy,
         Action::Move,
+        Action::Duplicate,
+        Action::CopyPath,
         Action::ZipMarked,
         Action::Unzip,
         Action::Filter,
         Action::ClearFilter,
         Action::HistoryJump,
+        Action::HistoryBack,
+        Action::HistoryForward,
         Action::BookmarkJump,
         Action::BookmarkAdd,
         Action::GoHome,
@@ -136,6 +160,8 @@ impl Action {
         Action::OpenDefault,
         Action::Help,
         Action::EditConfig,
+        Action::ShowLog,
+        Action::FunctionList,
         Action::Quit,
     ];
 
@@ -147,11 +173,15 @@ impl Action {
                 ActionCategory::Movement
             }
             Mark | MarkAll => ActionCategory::Marks,
-            Rename | Mkdir | Delete | Copy | Move | ZipMarked | Unzip => ActionCategory::FileOps,
+            Rename | Mkdir | Delete | Copy | Move | Duplicate | CopyPath | ZipMarked | Unzip => {
+                ActionCategory::FileOps
+            }
             Filter | ClearFilter => ActionCategory::Filter,
-            HistoryJump | BookmarkJump | BookmarkAdd | GoHome => ActionCategory::Jumps,
+            HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
+                ActionCategory::Jumps
+            }
             CommandLine | OpenEditor | OpenDefault | EditConfig => ActionCategory::External,
-            Help | Quit => ActionCategory::Misc,
+            Help | ShowLog | FunctionList | Quit => ActionCategory::Misc,
         }
     }
 
@@ -181,11 +211,15 @@ impl Action {
             Delete => "Delete marked entries (or the cursor entry)",
             Copy => "Copy marked entries (or the cursor entry) to the other pane",
             Move => "Move marked entries (or the cursor entry) to the other pane",
+            Duplicate => "Copy the cursor entry to a new name in the same directory",
+            CopyPath => "Copy the cursor entry's absolute path to the clipboard",
             ZipMarked => "Zip marked entries (or the cursor entry)",
             Unzip => "Unzip the cursor .zip file",
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
             HistoryJump => "Open the directory history menu",
+            HistoryBack => "Go back to the previous directory in this pane",
+            HistoryForward => "Go forward to the next directory in this pane",
             BookmarkJump => "Open the bookmarks menu",
             BookmarkAdd => "Bookmark the current directory",
             GoHome => "Jump to the home directory",
@@ -194,6 +228,8 @@ impl Action {
             OpenDefault => "Open the cursor entry with the OS default app",
             Help => "Show this help screen",
             EditConfig => "Edit the config file (created from a template if missing)",
+            ShowLog => "Show the full in-memory log",
+            FunctionList => "Open the command palette (search and run any action)",
             Quit => "Quit ozzel",
         }
     }
@@ -225,11 +261,15 @@ impl Action {
             Delete => "delete",
             Copy => "copy",
             Move => "move",
+            Duplicate => "duplicate",
+            CopyPath => "copy_path",
             Filter => "filter",
             ClearFilter => "clear_filter",
             ZipMarked => "zip_marked",
             Unzip => "unzip",
             HistoryJump => "history_jump",
+            HistoryBack => "history_back",
+            HistoryForward => "history_forward",
             BookmarkJump => "bookmark_jump",
             BookmarkAdd => "bookmark_add",
             GoHome => "go_home",
@@ -241,6 +281,8 @@ impl Action {
             Quit => "quit",
             Help => "help",
             EditConfig => "edit_config",
+            ShowLog => "show_log",
+            FunctionList => "function_list",
         }
     }
 }

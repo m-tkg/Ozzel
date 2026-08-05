@@ -23,6 +23,7 @@ pub fn render_prompt_line(frame: &mut Frame, area: Rect, mode: &Mode) {
         PromptKind::Mkdir => "New directory: ",
         PromptKind::ZipName { .. } => "Zip as: ",
         PromptKind::Command => ": ",
+        PromptKind::Duplicate { .. } => "Duplicate as: ",
     };
     render_input_line(frame, area, label, input, None);
 }

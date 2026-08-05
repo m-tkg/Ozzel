@@ -142,7 +142,12 @@ impl Keymap {
     /// handling); without it, `S-enter` arrives as plain Enter and falls
     /// back to the built-in viewer. `OpenDefault` is otherwise a valid
     /// action but unbound on any other key by default — rebind it via
-    /// `[keys]` to get the old behavior back.
+    /// `[keys]` to get the old behavior back. `S-left`/`S-right` walk this
+    /// pane's own browser-style back/forward stack (distinct from `S-h`'s
+    /// persisted MRU menu), `c` duplicates the cursor entry under a new
+    /// name in the same directory, `y` copies its absolute path to the
+    /// clipboard, `S-l` (capital `L`) opens the full in-memory log, and
+    /// `S-f` (capital `F`) opens the function-list command palette.
     pub fn default_dyna() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -160,6 +165,8 @@ impl Keymap {
             ("end", Bottom),
             ("S-up", Top),
             ("S-down", Bottom),
+            ("S-left", HistoryBack),
+            ("S-right", HistoryForward),
             ("tab", SwitchPane),
             ("enter", Open),
             ("S-enter", OpenDefault),
@@ -177,6 +184,8 @@ impl Keymap {
             ("D", Delete),
             ("C", Copy),
             ("M", Move),
+            ("c", Duplicate),
+            ("y", CopyPath),
             ("f", Filter),
             ("/", Filter),
             ("esc", ClearFilter),
@@ -192,6 +201,8 @@ impl Keymap {
             ("e", OpenEditor),
             ("o", Open),
             (",", EditConfig),
+            ("L", ShowLog),
+            ("F", FunctionList),
             ("q", Quit),
             ("C-c", Quit),
         ];
@@ -446,7 +457,14 @@ mod tests {
             km.resolve(KeyCode::Char('C'), KeyModifiers::SHIFT),
             Some(Action::Copy)
         );
-        assert_eq!(km.resolve(KeyCode::Char('c'), KeyModifiers::NONE), None);
+        // Plain `c` is `duplicate` (round 5); `S-c`/`C` (shift) stays `copy`,
+        // checked above — the two never collide since `KeyCombo` treats a
+        // bare lowercase letter and its shifted uppercase form as distinct
+        // combos (see `KeyCombo::parse`'s doc comment).
+        assert_eq!(
+            km.resolve(KeyCode::Char('c'), KeyModifiers::NONE),
+            Some(Action::Duplicate)
+        );
     }
 
     #[test]
@@ -483,6 +501,53 @@ mod tests {
         assert_eq!(
             km.resolve(KeyCode::Char('p'), KeyModifiers::NONE),
             Some(Action::ZipMarked)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_history_back_and_forward_to_shift_arrows() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Left, KeyModifiers::SHIFT),
+            Some(Action::HistoryBack)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Right, KeyModifiers::SHIFT),
+            Some(Action::HistoryForward)
+        );
+        // Plain (unshifted) Left/Right must stay untouched by this binding.
+        assert_ne!(
+            km.resolve(KeyCode::Left, KeyModifiers::NONE),
+            Some(Action::HistoryBack)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_duplicate_and_copy_path() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('c'), KeyModifiers::NONE),
+            Some(Action::Duplicate)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('y'), KeyModifiers::NONE),
+            Some(Action::CopyPath)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_show_log_and_function_list_to_shifted_letters() {
+        // Bound via the bare uppercase form ("L"/"F"), not "S-l"/"S-f" —
+        // see `default_dyna`'s doc comment on why only the former actually
+        // matches a real terminal's Shift+letter key report.
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('L'), KeyModifiers::SHIFT),
+            Some(Action::ShowLog)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('F'), KeyModifiers::SHIFT),
+            Some(Action::FunctionList)
         );
     }
 

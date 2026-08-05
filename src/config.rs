@@ -50,6 +50,41 @@ fn default_dim_inactive() -> bool {
     true
 }
 
+/// Cyan (水色) for directories — the dyna-filer-esque convention this app
+/// otherwise follows throughout.
+fn default_directory_color() -> Color {
+    Color::Cyan
+}
+
+/// Red for hidden entries — wins over `executable`/`directory` when an
+/// entry is more than one of these at once (see `entry_type_color`).
+fn default_hidden_color() -> Color {
+    Color::Red
+}
+
+/// Yellow for executable files. Collides visually with the existing
+/// "marked" row color (also yellow) — resolved by giving `marked` priority
+/// over any type color (see `ui::pane_view::row_style`), so this is only
+/// ever seen on an unmarked row.
+fn default_executable_color() -> Color {
+    Color::Yellow
+}
+
+/// The permissions column (`drwxr-xr-x` / a compact Windows fallback) is
+/// shown by default; set `show_permissions = false` to reclaim the columns
+/// for a wider name column instead.
+fn default_show_permissions() -> bool {
+    true
+}
+
+/// Mouse capture is enabled by default (click/wheel/drag — see
+/// `App::handle_mouse`). Set `mouse = false` to leave the terminal's native
+/// text selection usable instead (the standard TUI trade-off: with capture
+/// on, hold Shift for native selection).
+fn default_mouse() -> bool {
+    true
+}
+
 /// Copy/Move confirm before spawning by default — same "ask before doing
 /// something that touches the filesystem" posture as Delete. A top-level
 /// `confirm_operations = false` skips that confirm when there's no
@@ -65,6 +100,14 @@ fn default_confirm_operations() -> bool {
 /// setting, since a detached worker thread gets killed outright if the
 /// process exits while it's still writing.
 fn default_confirm_quit() -> bool {
+    true
+}
+
+/// `--cwd-file` is written on quit by default (when the flag was given at
+/// all — see `main.rs`). A top-level `quit_cd = false` opts out entirely,
+/// for a user who passes `--cwd-file` for some other integration and never
+/// wants ozzel touching it.
+fn default_quit_cd() -> bool {
     true
 }
 
@@ -95,6 +138,29 @@ pub struct ColorsConfig {
     /// dimmed, since it's still the only row with a background fill.
     #[serde(default = "default_dim_inactive")]
     pub dim_inactive: bool,
+    /// Non-cursor directory rows' fg color. Precedence when an entry is
+    /// more than one of directory/hidden/executable at once: hidden wins
+    /// over executable wins over directory (see `entry_type_color`).
+    #[serde(
+        deserialize_with = "deserialize_color",
+        default = "default_directory_color"
+    )]
+    pub directory: Color,
+    /// Non-cursor hidden-entry rows' fg color; highest precedence of the
+    /// three type colors.
+    #[serde(
+        deserialize_with = "deserialize_color",
+        default = "default_hidden_color"
+    )]
+    pub hidden: Color,
+    /// Non-cursor executable-file rows' fg color (unix: any `x` bit on a
+    /// regular file; Windows: a PATHEXT-ish extension — see
+    /// `entry::is_executable`).
+    #[serde(
+        deserialize_with = "deserialize_color",
+        default = "default_executable_color"
+    )]
+    pub executable: Color,
 }
 
 impl Default for ColorsConfig {
@@ -103,6 +169,9 @@ impl Default for ColorsConfig {
             cursor: default_cursor_color(),
             cursor_inactive: default_cursor_inactive_color(),
             dim_inactive: default_dim_inactive(),
+            directory: default_directory_color(),
+            hidden: default_hidden_color(),
+            executable: default_executable_color(),
         }
     }
 }
@@ -130,6 +199,22 @@ pub struct Config {
     /// reason.
     #[serde(default = "default_confirm_quit")]
     pub confirm_quit: bool,
+    /// Whether quitting writes the focused pane's cwd to `--cwd-file` (if
+    /// that flag was given at all — this only opts *out* when it was).
+    /// See `main.rs`'s `write_cwd_file` and the README's shell wrapper.
+    #[serde(default = "default_quit_cd")]
+    pub quit_cd: bool,
+    /// Whether the permissions column (`drwxr-xr-x` / Windows fallback)
+    /// renders at all — see `ui::pane_view`. Dropped automatically under a
+    /// narrow pane width regardless of this setting; this is the "never
+    /// show it even when there's room" opt-out.
+    #[serde(default = "default_show_permissions")]
+    pub show_permissions: bool,
+    /// Whether mouse capture is enabled at startup (`EnableMouseCapture`) —
+    /// see `main.rs`'s `TerminalGuard` and `App::handle_mouse`. `false`
+    /// leaves the terminal's native text selection usable instead.
+    #[serde(default = "default_mouse")]
+    pub mouse: bool,
     /// `combo -> action_name`; `"none"` unbinds. Applied to the default
     /// keymap first (see `App::new`).
     pub keys: HashMap<String, String>,
@@ -150,6 +235,9 @@ impl Default for Config {
             editor: None,
             confirm_operations: default_confirm_operations(),
             confirm_quit: default_confirm_quit(),
+            quit_cd: default_quit_cd(),
+            show_permissions: default_show_permissions(),
+            mouse: default_mouse(),
             keys: HashMap::new(),
             bindings: HashMap::new(),
             colors: ColorsConfig::default(),
@@ -293,7 +381,36 @@ mod tests {
         assert!(config.colors.dim_inactive);
         assert!(config.confirm_operations);
         assert!(config.confirm_quit);
+        assert!(config.quit_cd);
+        assert!(config.show_permissions);
+        assert!(config.mouse);
+        assert_eq!(config.colors.directory, Color::Cyan);
+        assert_eq!(config.colors.hidden, Color::Red);
+        assert_eq!(config.colors.executable, Color::Yellow);
         assert!(config.bindings.is_empty());
+    }
+
+    #[test]
+    fn show_permissions_can_be_set_to_false() {
+        let config: Config = toml::from_str("show_permissions = false").unwrap();
+        assert!(!config.show_permissions);
+    }
+
+    #[test]
+    fn mouse_can_be_set_to_false() {
+        let config: Config = toml::from_str("mouse = false").unwrap();
+        assert!(!config.mouse);
+    }
+
+    #[test]
+    fn colors_directory_hidden_executable_accept_named_colors() {
+        let config: Config = toml::from_str(
+            "[colors]\ndirectory = \"blue\"\nhidden = \"magenta\"\nexecutable = \"green\"",
+        )
+        .unwrap();
+        assert_eq!(config.colors.directory, Color::Blue);
+        assert_eq!(config.colors.hidden, Color::Magenta);
+        assert_eq!(config.colors.executable, Color::Green);
     }
 
     #[test]
@@ -306,6 +423,18 @@ mod tests {
     fn confirm_quit_absent_defaults_to_true() {
         let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
         assert!(config.confirm_quit);
+    }
+
+    #[test]
+    fn quit_cd_can_be_set_to_false() {
+        let config: Config = toml::from_str("quit_cd = false").unwrap();
+        assert!(!config.quit_cd);
+    }
+
+    #[test]
+    fn quit_cd_absent_defaults_to_true() {
+        let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
+        assert!(config.quit_cd);
     }
 
     #[test]

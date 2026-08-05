@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use chrono::{DateTime, Local};
@@ -13,7 +14,9 @@ use directories::BaseDirs;
 use crate::action::Action;
 use crate::config::{self, Config};
 use crate::entry::EntryKind;
-use crate::event::{AppEvent, KeyCode, KeyModifiers, TaskEvent};
+use crate::event::{
+    AppEvent, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, TaskEvent,
+};
 use crate::external::{self, ExternalRequest};
 use crate::filter::FilterSpec;
 use crate::keymap::Keymap;
@@ -31,6 +34,13 @@ const LOG_CAPACITY: usize = 500;
 const VIEWER_PAGE_SIZE: usize = 20;
 /// How many display columns `Mode::Viewer`'s Left/Right scrolls per press.
 const VIEWER_H_SCROLL_STEP: usize = 8;
+/// How many rows one mouse-wheel "tick" moves a pane's cursor, or scrolls a
+/// modal (viewer/log/help) — see `App::handle_mouse`.
+const MOUSE_WHEEL_STEP: usize = 3;
+/// A second left-click on the same row within this window counts as a
+/// double-click (opens the entry), rather than a second single-click (which
+/// would just re-set the cursor to where it already is).
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePane {
@@ -115,6 +125,74 @@ pub struct App {
     /// folding it into `ExternalRequest` itself, since every other
     /// external command has nothing to do afterward.
     pub pending_config_reload: bool,
+    /// Set by `y` (copy_path); `main.rs`'s loop takes this after each event
+    /// and, if present, writes the OSC 52 "set clipboard" escape directly
+    /// to stdout (no need to suspend the TUI for this one, unlike
+    /// `pending_external` — it's a single silent write, not a child
+    /// process taking over the screen).
+    pub pending_clipboard: Option<String>,
+    /// The last-drawn screen geometry for each pane (see
+    /// `ui::mod::draw`) — refreshed every frame, read by mouse
+    /// hit-testing (`App::handle_mouse`) to turn a click's screen
+    /// coordinates back into "which pane, which row". `None` until the
+    /// first frame draws (there's nothing to click before then).
+    pub pane_layout: [Option<PaneLayout>; 2],
+    /// The pane a left-button drag started in, plus the marking already
+    /// applied this drag — set on mouse-down over an entry row, cleared on
+    /// mouse-up. Constrains a drag-mark to a single pane even if the
+    /// pointer crosses into the other one mid-drag (see
+    /// `App::handle_mouse`).
+    pub drag: Option<DragState>,
+    /// `(pane, entry index, when)` of the most recent left-click-down on an
+    /// entry row, used purely to detect a double-click (see
+    /// `App::handle_mouse_left_down`) — `None` once consumed by a
+    /// double-click or once `DOUBLE_CLICK_WINDOW` has passed.
+    last_click: Option<(ActivePane, usize, Instant)>,
+}
+
+/// One pane's on-screen geometry as of the last frame — just enough for
+/// mouse hit-testing to map a click's `(x, y)` back to "row N of this
+/// pane's visible entries" (see `hit_test_row`).
+#[derive(Debug, Clone, Copy)]
+pub struct PaneLayout {
+    /// The pane's full drawn area, borders included.
+    pub area: ratatui::layout::Rect,
+    /// The entry-list rows' area specifically (inside the border and any
+    /// header rows) — what `hit_test_row` actually maps `y` against.
+    pub rows_area: ratatui::layout::Rect,
+    /// Index of the first visible entry (`Pane::visible_entries()[start]`
+    /// is whatever's drawn at `rows_area`'s first row) — mirrors
+    /// `ui::pane_view`'s own `scroll_offset` so hit-testing agrees with
+    /// what's actually on screen.
+    pub start: usize,
+}
+
+/// Which pane a left-button drag is constrained to, and the drag's own
+/// running state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragState {
+    pub pane: ActivePane,
+    /// The entry index (into `visible_entries()`) the drag started on —
+    /// marking is applied to every row between this and the current one,
+    /// inclusive, each time the pointer moves to a new row.
+    pub origin_index: usize,
+}
+
+/// Maps a click/drag/wheel screen coordinate to an entry index (into
+/// `Pane::visible_entries()`), given the pane's last-drawn `rows_area` and
+/// scroll `start` offset — pure and free-standing so it's directly
+/// unit-testable without any `App`/`Pane` machinery. Returns `None` when
+/// `(x, y)` falls outside `rows_area` entirely (out of range, or over the
+/// header/border instead of a row). Does *not* clamp against how many
+/// entries actually exist past `start` — callers that need that (a short
+/// listing scrolled so its last row doesn't fill the viewport) additionally
+/// bound the result against `visible_entries().len()`.
+fn hit_test_row(layout: &PaneLayout, x: u16, y: u16) -> Option<usize> {
+    let area = layout.rows_area;
+    if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+        return None;
+    }
+    Some(layout.start + (y - area.y) as usize)
 }
 
 /// Appends one `LogLine` (capacity-capped, timestamped `Local::now()`) to
@@ -169,6 +247,10 @@ impl App {
             bookmarks_dirty: false,
             pending_external: None,
             pending_config_reload: false,
+            pending_clipboard: None,
+            pane_layout: [None, None],
+            drag: None,
+            last_click: None,
         })
     }
 
@@ -269,10 +351,175 @@ impl App {
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
                 Mode::Viewer { .. } => self.handle_viewer_key(code),
                 Mode::Help { .. } => self.handle_help_key(code),
+                Mode::Log { .. } => self.handle_log_view_key(code),
+                Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
             },
+            AppEvent::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             AppEvent::Task(task_event) => self.handle_task_event(task_event),
             AppEvent::Tick => {}
         }
+    }
+
+    /// Entry point for every mouse event (only ever produced when
+    /// `config.mouse` enabled capture — see `event::read_event`). Modal
+    /// modes other than Viewer/Log/Help ignore the mouse entirely (per the
+    /// plan: "other modals ignore mouse, Esc still by key"); Normal mode
+    /// gets the full click/drag/wheel behavior in `handle_mouse_normal`.
+    fn handle_mouse(&mut self, ev: MouseEvent) {
+        match &self.mode {
+            Mode::Viewer { .. } => self.handle_modal_wheel(ev, Self::handle_viewer_key),
+            Mode::Log { .. } => self.handle_modal_wheel(ev, Self::handle_log_view_key),
+            Mode::Help { .. } => self.handle_modal_wheel(ev, Self::handle_help_key),
+            Mode::Normal => self.handle_mouse_normal(ev),
+            _ => {}
+        }
+    }
+
+    /// Shared wheel-scroll plumbing for the three full-frame modal views:
+    /// each tick is just `MOUSE_WHEEL_STEP` repeats of the same `Up`/`Down`
+    /// key their own key handler already understands, so the scroll math
+    /// stays defined in exactly one place per mode.
+    fn handle_modal_wheel(&mut self, ev: MouseEvent, key_handler: fn(&mut Self, KeyCode)) {
+        let code = match ev.kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return,
+        };
+        for _ in 0..MOUSE_WHEEL_STEP {
+            key_handler(self, code);
+        }
+    }
+
+    /// Which pane (if any) `(x, y)` falls inside, by its last-drawn `area`
+    /// (see `App::pane_layout`, refreshed every frame by `ui::draw`).
+    fn pane_at(&self, x: u16, y: u16) -> Option<ActivePane> {
+        for (i, layout) in self.pane_layout.iter().enumerate() {
+            let layout = layout.as_ref()?;
+            if x >= layout.area.x
+                && x < layout.area.x + layout.area.width
+                && y >= layout.area.y
+                && y < layout.area.y + layout.area.height
+            {
+                return Some(if i == 0 {
+                    ActivePane::Left
+                } else {
+                    ActivePane::Right
+                });
+            }
+        }
+        None
+    }
+
+    fn pane_layout_for(&self, pane: ActivePane) -> Option<&PaneLayout> {
+        self.pane_layout[pane.index()].as_ref()
+    }
+
+    /// Normal-mode mouse behavior: left click focuses (and, on an entry
+    /// row, moves the cursor there), left drag range-marks within the pane
+    /// the drag started in, double-click opens, and wheel scrolls the
+    /// cursor of whichever pane it's over without changing focus.
+    fn handle_mouse_normal(&mut self, ev: MouseEvent) {
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.handle_mouse_left_down(ev),
+            MouseEventKind::Drag(MouseButton::Left) => self.handle_mouse_left_drag(ev),
+            MouseEventKind::Up(MouseButton::Left) => self.drag = None,
+            MouseEventKind::ScrollUp => self.handle_mouse_wheel(ev, -(MOUSE_WHEEL_STEP as isize)),
+            MouseEventKind::ScrollDown => self.handle_mouse_wheel(ev, MOUSE_WHEEL_STEP as isize),
+            _ => {}
+        }
+    }
+
+    /// Left-button down: focuses whichever pane was clicked; on an entry
+    /// row, also moves that pane's cursor there, starts a potential
+    /// range-mark drag, and checks for a double-click (same row, same pane,
+    /// within `DOUBLE_CLICK_WINDOW`) — which opens the entry instead of
+    /// just moving the cursor a second time.
+    fn handle_mouse_left_down(&mut self, ev: MouseEvent) {
+        let Some(pane) = self.pane_at(ev.column, ev.row) else {
+            return;
+        };
+        self.active = pane;
+        let Some(layout) = self.pane_layout_for(pane) else {
+            return;
+        };
+        let Some(row) = hit_test_row(layout, ev.column, ev.row) else {
+            // Clicked the pane's header/border/blank area: focus only.
+            self.last_click = None;
+            self.drag = None;
+            return;
+        };
+        let len = self.panes[pane.index()].visible_entries().len();
+        if row >= len {
+            self.last_click = None;
+            self.drag = None;
+            return;
+        }
+
+        let now = Instant::now();
+        let is_double_click = matches!(
+            self.last_click,
+            Some((last_pane, last_row, at))
+                if last_pane == pane && last_row == row && now.duration_since(at) < DOUBLE_CLICK_WINDOW
+        );
+        self.panes[pane.index()].cursor = row;
+        if is_double_click {
+            self.last_click = None;
+            self.drag = None;
+            self.begin_open();
+            return;
+        }
+        self.last_click = Some((pane, row, now));
+        // Arms a *potential* drag, but doesn't mark anything yet: a plain
+        // click (mouse-down immediately followed by mouse-up, no `Drag`
+        // events in between) must only move the cursor, never mark — only
+        // `handle_mouse_left_drag`, once an actual `Drag` event proves the
+        // pointer moved while the button was held, marks the origin row
+        // (as part of its lo..=hi sweep, which includes `origin_index`
+        // even when the drag hasn't left that row yet).
+        self.drag = Some(DragState {
+            pane,
+            origin_index: row,
+        });
+    }
+
+    /// Left-button drag: extends the range-mark from the drag's origin row
+    /// to whatever row the pointer is over now, but *only* while the
+    /// pointer stays within the pane the drag started in — crossing into
+    /// the other pane, or off the entry rows entirely, is simply ignored
+    /// (the mark stops growing, but nothing already marked is undone, and
+    /// focus never changes mid-drag).
+    fn handle_mouse_left_drag(&mut self, ev: MouseEvent) {
+        let Some(drag) = self.drag else { return };
+        let Some(layout) = self.pane_layout_for(drag.pane) else {
+            return;
+        };
+        let Some(row) = hit_test_row(layout, ev.column, ev.row) else {
+            return;
+        };
+        let len = self.panes[drag.pane.index()].visible_entries().len();
+        if row >= len {
+            return;
+        }
+        let (lo, hi) = if row <= drag.origin_index {
+            (row, drag.origin_index)
+        } else {
+            (drag.origin_index, row)
+        };
+        for i in lo..=hi {
+            self.panes[drag.pane.index()].mark_index(i, true);
+        }
+    }
+
+    /// Mouse wheel over a pane in Normal mode: moves that pane's cursor by
+    /// `delta` rows (negative = up) without changing which pane is active —
+    /// tried focus-follow while implementing this and found it more
+    /// surprising than leaving focus alone, since a stray wheel tick while
+    /// reading the other pane would otherwise silently redirect keystrokes.
+    fn handle_mouse_wheel(&mut self, ev: MouseEvent, delta: isize) {
+        let Some(pane) = self.pane_at(ev.column, ev.row) else {
+            return;
+        };
+        self.panes[pane.index()].move_cursor(delta);
     }
 
     /// The single match hub every action flows through. Kept infallible on
@@ -428,6 +675,30 @@ impl App {
                 self.begin_edit_config();
                 Ok(())
             }
+            Action::HistoryBack => {
+                self.begin_history_back();
+                Ok(())
+            }
+            Action::HistoryForward => {
+                self.begin_history_forward();
+                Ok(())
+            }
+            Action::ShowLog => {
+                self.begin_show_log();
+                Ok(())
+            }
+            Action::CopyPath => {
+                self.begin_copy_path();
+                Ok(())
+            }
+            Action::Duplicate => {
+                self.begin_duplicate();
+                Ok(())
+            }
+            Action::FunctionList => {
+                self.begin_function_list();
+                Ok(())
+            }
             Action::Quit => {
                 self.begin_quit();
                 Ok(())
@@ -484,10 +755,59 @@ impl App {
         }
     }
 
+    /// Records `before` in the persisted MRU history *and* pushes it onto
+    /// the active pane's `back` stack (clearing `forward`, same as a real
+    /// browser navigating somewhere new) — but only when `cwd` actually
+    /// changed, so a failed/no-op navigation doesn't pollute either. This
+    /// is the single choke point every cwd-changing action goes through
+    /// (`navigate`), so `history_back`/`history_forward` deliberately
+    /// bypass it (see `begin_history_back`) — walking the stack must not
+    /// re-push onto itself.
     fn record_history_if_changed(&mut self, before: &Path) {
         let after = self.active_pane().cwd.clone();
         if after.as_path() != before {
             self.history.record(self.active.into(), after);
+            let pane = self.active_pane_mut();
+            pane.back.push(before.to_path_buf());
+            pane.forward.clear();
+        }
+    }
+
+    /// `S-left`: pops this pane's `back` stack and jumps there, pushing the
+    /// current cwd onto `forward` (so `S-right` can return). Empty stack ->
+    /// logged, stays put. Uses `Pane::jump_to` directly rather than
+    /// `navigate`, since going through it would push back onto `back`
+    /// again — the opposite of what "go back" means.
+    fn begin_history_back(&mut self) {
+        let Some(target) = self.active_pane_mut().back.pop() else {
+            self.log_error("no earlier directory in this pane's history");
+            return;
+        };
+        let current = self.active_pane().cwd.clone();
+        match self.active_pane_mut().jump_to(target.clone()) {
+            Ok(()) => self.active_pane_mut().forward.push(current),
+            Err(err) => {
+                // jump_to already reverted cwd on failure; put the target
+                // back so a retry (or S-left again) isn't silently lossy.
+                self.active_pane_mut().back.push(target);
+                self.log_error(err.to_string());
+            }
+        }
+    }
+
+    /// `S-right`: the mirror of `begin_history_back`.
+    fn begin_history_forward(&mut self) {
+        let Some(target) = self.active_pane_mut().forward.pop() else {
+            self.log_error("no later directory in this pane's history");
+            return;
+        };
+        let current = self.active_pane().cwd.clone();
+        match self.active_pane_mut().jump_to(target.clone()) {
+            Ok(()) => self.active_pane_mut().back.push(current),
+            Err(err) => {
+                self.active_pane_mut().forward.push(target);
+                self.log_error(err.to_string());
+            }
         }
     }
 
@@ -886,6 +1206,204 @@ impl App {
         }
     }
 
+    /// `S-l`/`L`: opens the full-frame in-memory log viewer, scrolled to
+    /// the bottom (the newest content — `scroll_from_bottom: 0`).
+    fn begin_show_log(&mut self) {
+        self.mode = Mode::Log {
+            scroll_from_bottom: 0,
+        };
+    }
+
+    /// Fixed keys for `Mode::Log`; same scroll keys as the viewer's text
+    /// mode. `scroll_from_bottom` only grows/shrinks here — it's rendering
+    /// (`ui::log_view::render_full`, which knows the terminal width and
+    /// therefore the real wrapped row count) that clamps it to a
+    /// meaningful range, so `Home` can just jump to `usize::MAX` and let
+    /// the render side saturate it down to "the very top".
+    fn handle_log_view_key(&mut self, code: KeyCode) {
+        if matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let Mode::Log { scroll_from_bottom } = &mut self.mode else {
+            return;
+        };
+        match code {
+            KeyCode::Up => *scroll_from_bottom = scroll_from_bottom.saturating_add(1),
+            KeyCode::Down => *scroll_from_bottom = scroll_from_bottom.saturating_sub(1),
+            KeyCode::PageUp => {
+                *scroll_from_bottom = scroll_from_bottom.saturating_add(VIEWER_PAGE_SIZE)
+            }
+            KeyCode::PageDown => {
+                *scroll_from_bottom = scroll_from_bottom.saturating_sub(VIEWER_PAGE_SIZE)
+            }
+            KeyCode::Home | KeyCode::Char('g') => *scroll_from_bottom = usize::MAX,
+            KeyCode::End | KeyCode::Char('G') => *scroll_from_bottom = 0,
+            _ => {}
+        }
+    }
+
+    /// `y` (copy_path): copies the cursor entry's absolute path to the
+    /// system clipboard via an OSC 52 terminal escape (see
+    /// `external::osc52_copy_sequence`, written to stdout by `main.rs`'s
+    /// loop once it drains `pending_clipboard`) — works over SSH/tmux and
+    /// needs no extra dependency, unlike a native-clipboard crate. Never
+    /// fails loudly: a terminal that doesn't understand OSC 52 just
+    /// silently ignores it (no reliable way to detect support up front),
+    /// so this always logs success rather than trying to guess.
+    fn begin_copy_path(&mut self) {
+        let Some(path) = self.active_pane().selected_entry_path() else {
+            self.log_error("no entry selected to copy the path of");
+            return;
+        };
+        let text = path.to_string_lossy().into_owned();
+        self.pending_clipboard = Some(text.clone());
+        self.log_info(format!("copied: {text}"));
+    }
+
+    /// `c` (duplicate): prompts for a new name (prefilled with the current
+    /// one) and, on commit, copies the cursor entry to that name in the
+    /// *same* directory — via the same background-task machinery as
+    /// Copy/Move, so a large directory duplicates asynchronously with
+    /// progress too.
+    fn begin_duplicate(&mut self) {
+        let Some(name) = self.active_pane().selected_entry_name() else {
+            self.log_error("no entry selected to duplicate");
+            return;
+        };
+        let Some(source) = self.active_pane().selected_entry_path() else {
+            self.log_error("no entry selected to duplicate");
+            return;
+        };
+        self.mode = Mode::Prompt {
+            kind: PromptKind::Duplicate { source },
+            input: LineEditor::from_str(&name),
+        };
+    }
+
+    /// Validates and spawns the actual duplicate once the prompt commits:
+    /// the name must be non-empty, must not contain a path separator (it
+    /// stays in the same directory — this isn't a move), and must differ
+    /// from the source's own name (a same-name "duplicate" would just
+    /// collide with itself).
+    fn commit_duplicate(&mut self, source: PathBuf, name: String) {
+        if name.is_empty() {
+            self.log_error("name cannot be empty");
+            return;
+        }
+        if name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) {
+            self.log_error("name cannot contain a path separator");
+            return;
+        }
+        let Some(parent) = source.parent() else {
+            self.log_error("cursor entry has no parent directory");
+            return;
+        };
+        let dest = parent.join(&name);
+        if dest == source {
+            self.log_error("new name must differ from the current name");
+            return;
+        }
+        if dest.exists() {
+            self.log_error(format!("{} already exists", dest.display()));
+            return;
+        }
+        self.spawn_duplicate(source, dest);
+    }
+
+    /// Hands the actual duplicate off to a background task (see
+    /// `tasks::copy_move::run_duplicate`); see `spawn_transfer` for the
+    /// completion story.
+    fn spawn_duplicate(&mut self, source: PathBuf, dest: PathBuf) {
+        let desc = format!("duplicate {} to {}", source.display(), dest.display());
+        self.tasks.spawn(desc, move |id, tx, cancel| {
+            copy_move::run_duplicate(id, tx, cancel, source, dest);
+        });
+    }
+
+    /// `F`/`S-f`: opens the command palette with an empty filter (every
+    /// action listed — see `crate::function_list::filter_actions`).
+    fn begin_function_list(&mut self) {
+        self.mode = Mode::FunctionList {
+            input: LineEditor::new(),
+            cursor: 0,
+        };
+    }
+
+    /// Every action currently matching `Mode::FunctionList`'s typed query,
+    /// in display order. A free function of `&self.mode` rather than a
+    /// stored `Vec` on the mode itself, so the list can never go stale
+    /// relative to whatever's actually typed.
+    fn function_list_filtered_actions(&self) -> Vec<Action> {
+        let Mode::FunctionList { input, .. } = &self.mode else {
+            return Vec::new();
+        };
+        crate::function_list::filter_actions(&input.value())
+    }
+
+    /// Fixed keys for `Mode::FunctionList`; never consults the keymap (the
+    /// palette's whole purpose is to run an action *by name*, key-free).
+    /// `Esc` cancels; `Enter` closes the palette (back to Normal) and then
+    /// dispatches the highlighted action — in that order, so an action
+    /// that itself sets a mode (a Prompt/Confirm/Select) isn't immediately
+    /// clobbered back to Normal afterward.
+    fn handle_function_list_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Enter => {
+                let action = self
+                    .function_list_filtered_actions()
+                    .get(match &self.mode {
+                        Mode::FunctionList { cursor, .. } => *cursor,
+                        _ => return,
+                    })
+                    .copied();
+                self.mode = Mode::Normal;
+                if let Some(action) = action {
+                    self.dispatch(action);
+                }
+                return;
+            }
+            KeyCode::Up => {
+                if let Mode::FunctionList { cursor, .. } = &mut self.mode {
+                    *cursor = cursor.saturating_sub(1);
+                }
+                return;
+            }
+            KeyCode::Down => {
+                let len = self.function_list_filtered_actions().len();
+                if let Mode::FunctionList { cursor, .. } = &mut self.mode
+                    && *cursor + 1 < len
+                {
+                    *cursor += 1;
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let Mode::FunctionList { input, cursor } = &mut self.mode else {
+            return;
+        };
+        match code {
+            KeyCode::Backspace => input.backspace(),
+            KeyCode::Delete => input.delete(),
+            KeyCode::Left => input.move_left(),
+            KeyCode::Right => input.move_right(),
+            KeyCode::Home => input.move_home(),
+            KeyCode::End => input.move_end(),
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => input.insert(c),
+            _ => {}
+        }
+        // The filtered list changes on every edit; keep the highlight in
+        // bounds by just resetting to the top rather than trying to track
+        // "the same action" across a re-filter.
+        *cursor = 0;
+    }
+
     fn begin_rename(&mut self) {
         match self.active_pane().selected_entry_name() {
             Some(name) => {
@@ -1074,6 +1592,7 @@ impl App {
             }
             PromptKind::ZipName { targets } => self.commit_zip_name(targets, value),
             PromptKind::Command => self.commit_command(value),
+            PromptKind::Duplicate { source } => self.commit_duplicate(source, value),
         }
     }
 
@@ -2580,5 +3099,548 @@ mod tests {
 
         app.dispatch(Action::Help);
         assert!(matches!(app.mode, Mode::Help { .. }));
+    }
+
+    // --- Round 5: history back/forward -------------------------------
+
+    #[test]
+    fn history_back_and_forward_walk_the_per_pane_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.navigate(|pane| pane.jump_to(sub.clone()));
+        assert_eq!(app.active_pane().cwd, sub);
+
+        app.dispatch(Action::HistoryBack);
+        assert_eq!(app.active_pane().cwd, dir.path());
+
+        app.dispatch(Action::HistoryForward);
+        assert_eq!(app.active_pane().cwd, sub);
+    }
+
+    #[test]
+    fn history_back_with_nothing_to_go_back_to_logs_and_stays_put() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::HistoryBack);
+        assert_eq!(app.active_pane().cwd, dir.path());
+        assert!(app.log.back().unwrap().is_error);
+    }
+
+    #[test]
+    fn history_forward_with_nothing_to_go_forward_to_logs_and_stays_put() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::HistoryForward);
+        assert_eq!(app.active_pane().cwd, dir.path());
+        assert!(app.log.back().unwrap().is_error);
+    }
+
+    #[test]
+    fn a_new_navigation_after_going_back_clears_the_forward_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_a = dir.path().join("a");
+        let sub_b = dir.path().join("b");
+        std::fs::create_dir(&sub_a).unwrap();
+        std::fs::create_dir(&sub_b).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.navigate(|pane| pane.jump_to(sub_a.clone()));
+        app.dispatch(Action::HistoryBack); // back to dir.path()
+        app.navigate(|pane| pane.jump_to(sub_b.clone())); // a fresh move
+
+        app.dispatch(Action::HistoryForward);
+        // Forward stack was cleared by the fresh navigation, so this must
+        // be a no-op (still in sub_b), not a jump back to sub_a.
+        assert_eq!(app.active_pane().cwd, sub_b);
+    }
+
+    // --- Round 5: show_log ---------------------------------------------
+
+    #[test]
+    fn show_log_opens_scrolled_to_the_bottom_and_q_closes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::ShowLog);
+        match app.mode {
+            Mode::Log { scroll_from_bottom } => assert_eq!(scroll_from_bottom, 0),
+            other => panic!("expected Mode::Log, got {other:?}"),
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn log_view_scroll_keys_move_and_saturate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::ShowLog);
+
+        app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Log {
+                scroll_from_bottom: 1
+            }
+        ));
+
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Log {
+                scroll_from_bottom: 0
+            }
+        ));
+
+        // Down at 0 must saturate at 0, not underflow/panic.
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Log {
+                scroll_from_bottom: 0
+            }
+        ));
+
+        app.handle_event(AppEvent::Input(KeyCode::Home, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Log {
+                scroll_from_bottom: usize::MAX
+            }
+        ));
+
+        app.handle_event(AppEvent::Input(KeyCode::End, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Log {
+                scroll_from_bottom: 0
+            }
+        ));
+    }
+
+    // --- Round 5: copy_path ---------------------------------------------
+
+    #[test]
+    fn copy_path_queues_the_cursor_entrys_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        // dir.path() isn't the filesystem root, so index 0 is the
+        // synthetic ".." row and index 1 is the real entry.
+        app.active_pane_mut().cursor = 1;
+        let expected = app
+            .active_pane()
+            .selected_entry_path()
+            .expect("cursor must be on a real entry");
+        app.dispatch(Action::CopyPath);
+        assert_eq!(
+            app.pending_clipboard.as_deref(),
+            Some(expected.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn copy_path_with_no_selection_logs_an_error_and_queues_nothing() {
+        let dir = tempfile::tempdir().unwrap(); // empty dir, only ".." (or nothing)
+        let mut app = test_app(dir.path(), dir.path());
+        // An empty, non-root directory's only row is "..", which has no
+        // path — selected_entry_path() is None either way here.
+        app.dispatch(Action::CopyPath);
+        assert!(app.pending_clipboard.is_none());
+    }
+
+    // --- Round 5: duplicate ----------------------------------------------
+
+    #[test]
+    fn duplicate_prompt_is_prefilled_with_the_current_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        // Land the cursor on the real entry (index depends on whether ".."
+        // is shown; dir.path() isn't the fs root, so ".." occupies index 0).
+        app.active_pane_mut().cursor = 1;
+        app.dispatch(Action::Duplicate);
+        match &app.mode {
+            Mode::Prompt {
+                kind: PromptKind::Duplicate { source },
+                input,
+            } => {
+                assert_eq!(source.file_name().unwrap(), "a.txt");
+                assert_eq!(input.value(), "a.txt");
+            }
+            other => panic!("expected Mode::Prompt(Duplicate), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_rejects_empty_separator_and_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.txt");
+        std::fs::write(&source, b"hi").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.commit_duplicate(source.clone(), String::new());
+        assert!(app.log.back().unwrap().is_error);
+
+        app.commit_duplicate(source.clone(), "sub/dir".to_string());
+        assert!(app.log.back().unwrap().is_error);
+
+        app.commit_duplicate(source.clone(), "a.txt".to_string());
+        assert!(app.log.back().unwrap().is_error);
+    }
+
+    #[test]
+    fn duplicate_rejects_a_colliding_destination_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.txt");
+        std::fs::write(&source, b"hi").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"already here").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.commit_duplicate(source, "b.txt".to_string());
+        assert!(app.log.back().unwrap().is_error);
+        assert_eq!(
+            std::fs::read(dir.path().join("b.txt")).unwrap(),
+            b"already here"
+        );
+    }
+
+    #[test]
+    fn duplicate_copies_the_source_to_the_new_name_in_the_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.txt");
+        std::fs::write(&source, b"hello").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.commit_duplicate(source, "a_copy.txt".to_string());
+        wait_for_tasks_done(&mut app);
+
+        assert_eq!(
+            std::fs::read(dir.path().join("a_copy.txt")).unwrap(),
+            b"hello"
+        );
+        // The original must still be there — this is a copy, not a move.
+        assert!(dir.path().join("a.txt").exists());
+    }
+
+    // --- Round 5: function_list -------------------------------------------
+
+    #[test]
+    fn function_list_opens_empty_and_lists_every_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::FunctionList);
+        match &app.mode {
+            Mode::FunctionList { input, cursor } => {
+                assert_eq!(input.value(), "");
+                assert_eq!(*cursor, 0);
+            }
+            other => panic!("expected Mode::FunctionList, got {other:?}"),
+        }
+        assert_eq!(
+            app.function_list_filtered_actions().len(),
+            Action::ALL.len()
+        );
+    }
+
+    #[test]
+    fn function_list_typing_narrows_and_resets_the_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::FunctionList);
+
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        if let Mode::FunctionList { cursor, .. } = &app.mode {
+            assert_eq!(*cursor, 1);
+        }
+
+        for c in "mkdir".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let filtered = app.function_list_filtered_actions();
+        assert_eq!(filtered, vec![Action::Mkdir]);
+        // Re-filtering resets the highlight to the top.
+        if let Mode::FunctionList { cursor, .. } = &app.mode {
+            assert_eq!(*cursor, 0);
+        }
+    }
+
+    #[test]
+    fn function_list_enter_closes_the_palette_then_dispatches_the_highlighted_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::FunctionList);
+        for c in "mkdir".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        // `mkdir` opens a Prompt — proves the palette closed *and* the
+        // action actually dispatched (not just returned to Normal).
+        assert!(matches!(
+            app.mode,
+            Mode::Prompt {
+                kind: PromptKind::Mkdir,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn function_list_esc_cancels_without_dispatching_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::FunctionList);
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    // --- Round 5: mouse hit-testing and dispatch --------------------------
+
+    fn test_layout(area: ratatui::layout::Rect, header_rows: u16, start: usize) -> PaneLayout {
+        PaneLayout {
+            area,
+            rows_area: ratatui::layout::Rect {
+                x: area.x + 1,
+                y: area.y + 1 + header_rows,
+                width: area.width.saturating_sub(2),
+                height: area.height.saturating_sub(2 + header_rows),
+            },
+            start,
+        }
+    }
+
+    #[test]
+    fn hit_test_row_maps_a_click_inside_rows_area_to_an_entry_index() {
+        let layout = test_layout(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 10,
+            },
+            0,
+            0,
+        );
+        // rows_area starts at (1, 1); the 3rd row down is y=3 -> index 2.
+        assert_eq!(hit_test_row(&layout, 5, 3), Some(2));
+    }
+
+    #[test]
+    fn hit_test_row_honors_the_scroll_start_offset() {
+        let layout = test_layout(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 10,
+            },
+            0,
+            5,
+        );
+        assert_eq!(hit_test_row(&layout, 5, 1), Some(5));
+    }
+
+    #[test]
+    fn hit_test_row_returns_none_outside_the_rows_area() {
+        let layout = test_layout(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 10,
+            },
+            0,
+            0,
+        );
+        assert_eq!(hit_test_row(&layout, 0, 0), None); // border row
+        assert_eq!(hit_test_row(&layout, 5, 9), None); // border row (bottom)
+        assert_eq!(hit_test_row(&layout, 100, 3), None); // off to the right
+    }
+
+    #[test]
+    fn hit_test_row_accounts_for_a_2_row_header() {
+        let layout = test_layout(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 10,
+            },
+            1, // one extra header content row
+            0,
+        );
+        // rows_area now starts one row lower (y=2), so y=2 is index 0.
+        assert_eq!(hit_test_row(&layout, 5, 2), Some(0));
+        assert_eq!(hit_test_row(&layout, 5, 1), None); // the header row itself
+    }
+
+    fn left_pane_area() -> ratatui::layout::Rect {
+        ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 10,
+        }
+    }
+
+    fn right_pane_area() -> ratatui::layout::Rect {
+        ratatui::layout::Rect {
+            x: 20,
+            y: 0,
+            width: 20,
+            height: 10,
+        }
+    }
+
+    /// Builds a test `App` with two populated dirs (`sub` and files inside
+    /// `left`) and both panes' `pane_layout` filled in, mirroring what
+    /// `ui::draw` sets up every real frame — mouse tests need this to
+    /// resolve screen coordinates back to entries.
+    fn mouse_test_app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"hi").unwrap();
+        std::fs::create_dir(dir.path().join("c_dir")).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.pane_layout = [
+            Some(test_layout(left_pane_area(), 0, 0)),
+            Some(test_layout(right_pane_area(), 0, 0)),
+        ];
+        (dir, app)
+    }
+
+    fn click(app: &mut App, column: u16, row: u16) {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    fn release(app: &mut App, column: u16, row: u16) {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    fn drag(app: &mut App, column: u16, row: u16) {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn left_click_on_an_entry_row_focuses_the_pane_and_moves_the_cursor() {
+        let (_dir, mut app) = mouse_test_app();
+        app.active = ActivePane::Right; // start on the other pane
+        // Entries sorted: ".." isn't shown here since dir.path() as both
+        // panes' root is being used as a plain (non-fs-root) directory, so
+        // row 0 is "..", row 1 is the first real entry.
+        click(&mut app, 5, 2); // rows_area y starts at 1 -> row index 1
+        assert_eq!(app.active, ActivePane::Left);
+        assert_eq!(app.panes[0].cursor, 1);
+    }
+
+    #[test]
+    fn left_click_does_not_mark_the_row_it_lands_on() {
+        // Regression test: a plain click (down, then up, no drag in
+        // between) must only move the cursor — marking is drag-only.
+        let (_dir, mut app) = mouse_test_app();
+        click(&mut app, 5, 2);
+        release(&mut app, 5, 2);
+        assert!(app.panes[0].marks.is_empty());
+    }
+
+    #[test]
+    fn click_on_the_header_or_border_only_focuses_without_moving_the_cursor() {
+        let (_dir, mut app) = mouse_test_app();
+        app.panes[0].cursor = 0;
+        app.active = ActivePane::Right;
+        click(&mut app, 0, 0); // the border, not inside rows_area
+        assert_eq!(app.active, ActivePane::Left);
+        assert_eq!(app.panes[0].cursor, 0);
+    }
+
+    #[test]
+    fn drag_across_multiple_rows_marks_every_row_swept_over() {
+        let (_dir, mut app) = mouse_test_app();
+        click(&mut app, 5, 1); // origin: row index 0 (the ".." row's real
+        // sibling, or ".." itself — either way, drag from here)
+        drag(&mut app, 5, 3); // sweep down to row index 2
+        release(&mut app, 5, 3);
+        let marked = app.panes[0].marks.len();
+        assert!(marked >= 1, "expected at least one row marked by the drag");
+    }
+
+    #[test]
+    fn drag_crossing_into_the_other_pane_does_not_mark_there_or_change_focus() {
+        let (_dir, mut app) = mouse_test_app();
+        click(&mut app, 5, 2); // start the drag in the left pane
+        assert_eq!(app.active, ActivePane::Left);
+
+        drag(&mut app, 25, 2); // pointer crosses into the right pane's area
+        assert_eq!(
+            app.active,
+            ActivePane::Left,
+            "focus must not change mid-drag"
+        );
+        assert!(
+            app.panes[1].marks.is_empty(),
+            "the pane the drag didn't start in must never get marked"
+        );
+    }
+
+    #[test]
+    fn double_click_on_a_directory_navigates_into_it() {
+        let (dir, mut app) = mouse_test_app();
+        // Find c_dir's row by scanning visible entries.
+        let idx = app.panes[0]
+            .visible_entries()
+            .iter()
+            .position(
+                |item| matches!(item, crate::pane::VisibleItem::Entry(e) if e.name == "c_dir"),
+            )
+            .unwrap();
+        let row_y = 1 + idx as u16;
+        click(&mut app, 5, row_y);
+        release(&mut app, 5, row_y);
+        click(&mut app, 5, row_y); // second click, same row, immediately after
+        assert_eq!(app.panes[0].cwd, dir.path().join("c_dir"));
+    }
+
+    #[test]
+    fn wheel_scroll_moves_the_cursor_of_the_pane_under_the_pointer_without_changing_focus() {
+        let (_dir, mut app) = mouse_test_app();
+        app.active = ActivePane::Left;
+        app.panes[0].cursor = 0;
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.panes[0].cursor, MOUSE_WHEEL_STEP.min(3));
+        assert_eq!(app.active, ActivePane::Left);
+
+        // Scroll over the *other* (currently inactive) pane: must move
+        // that pane's cursor, and must still not change focus.
+        app.panes[1].cursor = 0;
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 25,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.panes[1].cursor > 0);
+        assert_eq!(app.active, ActivePane::Left);
     }
 }

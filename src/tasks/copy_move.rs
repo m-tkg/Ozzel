@@ -101,6 +101,40 @@ pub fn run_move(
     run_transfer(id, tx, cancel, sources, dest_dir, TransferMode::Move);
 }
 
+/// Worker entry point for `duplicate` (`c`): copies `source` to an exact
+/// `dest` path (unlike `run_copy`/`run_move`, which copy *into* a
+/// directory, keeping the source's own name) — reuses `copy_one` directly,
+/// since it already takes an exact destination. Single-item, so there's no
+/// per-source loop or failure-count summary to build.
+pub fn run_duplicate(
+    id: TaskId,
+    tx: Sender<TaskEvent>,
+    cancel: Arc<AtomicBool>,
+    source: PathBuf,
+    dest: PathBuf,
+) {
+    let total = path_size(&source);
+    let mut throttle = Throttle::new(PROGRESS_MIN_INTERVAL);
+    let mut ctx = TransferCtx {
+        tx: &tx,
+        id,
+        cancel: &cancel,
+        done_bytes: 0,
+        total_bytes: total,
+        throttle: &mut throttle,
+    };
+
+    let result = match copy_one(&mut ctx, &source, &dest) {
+        Ok(()) => Ok(format!("duplicated to {}", dest.display())),
+        Err(OpOutcome::Cancelled) => {
+            finish_cancelled(&tx, id);
+            return;
+        }
+        Err(OpOutcome::Failed(msg)) => Err(format!("{}: {msg}", source.display())),
+    };
+    let _ = tx.send(TaskEvent::Finished { id, result });
+}
+
 fn run_transfer(
     id: TaskId,
     tx: Sender<TaskEvent>,

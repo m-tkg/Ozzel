@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyEvent, KeyEventKind};
-pub use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+pub use ratatui::crossterm::event::{
+    KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::tasks::TaskId;
 
@@ -37,6 +39,11 @@ pub enum TaskEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppEvent {
     Input(KeyCode, KeyModifiers),
+    /// Forwarded only when mouse capture is enabled (`config.mouse`, see
+    /// `main.rs`'s `TerminalGuard`) — with capture off, crossterm never
+    /// reports mouse events in the first place, so this variant simply
+    /// never occurs. Handled by `App::handle_mouse`.
+    Mouse(MouseEvent),
     Task(TaskEvent),
     Tick,
 }
@@ -44,18 +51,21 @@ pub enum AppEvent {
 /// Polls the terminal for up to `timeout` and returns a normalized
 /// `AppEvent`. Only `KeyEventKind::Press` is ever forwarded as `Input` —
 /// Windows also emits Release/Repeat key events, which would otherwise
-/// double-handle every keystroke — and anything that is not a key press
-/// (mouse, resize, focus, paste) collapses to `Tick`.
+/// double-handle every keystroke — mouse events forward as `Mouse`
+/// (only ever produced when mouse capture is on), and anything else
+/// (resize, focus, paste) collapses to `Tick`.
 pub fn read_event(timeout: Duration) -> Result<AppEvent> {
-    if event::poll(timeout)?
-        && let Event::Key(KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            ..
-        }) = event::read()?
-    {
-        return Ok(AppEvent::Input(code, modifiers));
+    if event::poll(timeout)? {
+        match event::read()? {
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            }) => return Ok(AppEvent::Input(code, modifiers)),
+            Event::Mouse(mouse_event) => return Ok(AppEvent::Mouse(mouse_event)),
+            _ => {}
+        }
     }
     Ok(AppEvent::Tick)
 }

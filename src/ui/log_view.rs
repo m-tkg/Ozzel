@@ -2,9 +2,11 @@
 //! reserving one row per currently-running background task for a progress
 //! gauge (`desc [####----] 43% current_file`).
 //!
-//! Every log line is prefixed with the compact local timestamp it was
-//! appended at (`MM-dd HH:MM:SS `, captured once by `App::log_push` — see
-//! `format_timestamp_prefix`), and long lines wrap across multiple rows
+//! Every log line is prefixed with the local timestamp it was appended at
+//! (`YYYY-MM-dd HH:MM:SS `, captured once by `App::log_push` — see
+//! `format_timestamp_prefix`; the year was added so a log spanning
+//! midnight on New Year's Eve, or one simply read back much later, is
+//! never ambiguous), and long lines wrap across multiple rows
 //! (width-aware, grapheme-safe — see `wrap_to_width`) rather than getting
 //! clipped at the right edge. A wrapped line's continuation rows hang-
 //! indent by the timestamp prefix's width instead of repeating it, so the
@@ -24,15 +26,16 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, LogLine};
 use crate::tasks::RunningTask;
 
-/// `strftime`-style format for a log line's timestamp prefix: 2-digit
-/// month/day/hour/minute/second, fixed punctuation, always exactly
-/// `TIMESTAMP_PREFIX_WIDTH` display columns wide (ASCII-only, so char
-/// count and display width are the same).
-const TIMESTAMP_FORMAT: &str = "%m-%d %H:%M:%S ";
-/// Display width of `TIMESTAMP_FORMAT`'s output (e.g. `"08-05 14:03:22 "`)
-/// — doubles as the hang-indent width for a wrapped line's continuation
-/// rows, so the message column lines up under the first row's.
-const TIMESTAMP_PREFIX_WIDTH: usize = 15;
+/// `strftime`-style format for a log line's timestamp prefix: 4-digit
+/// year, 2-digit month/day/hour/minute/second, fixed punctuation, always
+/// exactly `TIMESTAMP_PREFIX_WIDTH` display columns wide (ASCII-only, so
+/// char count and display width are the same).
+const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S ";
+/// Display width of `TIMESTAMP_FORMAT`'s output (e.g.
+/// `"2026-08-05 14:03:22 "`) — doubles as the hang-indent width for a
+/// wrapped line's continuation rows, so the message column lines up under
+/// the first row's.
+const TIMESTAMP_PREFIX_WIDTH: usize = 20;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().title("Log").borders(Borders::ALL);
@@ -160,6 +163,55 @@ fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
     rows
 }
 
+/// `L`/`S-l`: renders the *entire* in-memory log (all `LOG_CAPACITY` lines,
+/// not just the tail that fits in the status area's fixed 4 rows) as a
+/// full-frame takeover, scrolled per `scroll_from_bottom` — see
+/// `Mode::Log`'s doc comment for why that's stored as "rows scrolled up
+/// from the newest content" rather than an absolute index: only this
+/// function actually knows the terminal width (and therefore the real
+/// wrapped row count) needed to turn it into a concrete start offset (see
+/// `log_view_start`).
+pub fn render_full(frame: &mut Frame, area: Rect, app: &App, scroll_from_bottom: usize) {
+    let block = Block::default()
+        .title("Log (q/Esc to close)")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 {
+        return;
+    }
+    let wrapped = wrap_log_lines(app.log.iter(), inner.width as usize);
+    let viewport = inner.height as usize;
+    let start = log_view_start(wrapped.len(), viewport, scroll_from_bottom);
+    let end = (start + viewport).min(wrapped.len());
+
+    let lines: Vec<Line> = wrapped[start..end]
+        .iter()
+        .map(|(text, is_error)| {
+            let style = if *is_error {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+            };
+            Line::styled(text.clone(), style)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The pure scroll math behind `render_full`: `scroll_from_bottom` rows
+/// scrolled up from the bottom-anchored position (`total_rows.saturating_sub(viewport)`),
+/// saturating at `0` (the very top) rather than panicking or wrapping when
+/// `scroll_from_bottom` overshoots — which is exactly how `Home`
+/// (`scroll_from_bottom = usize::MAX`, see `App::handle_log_view_key`) is
+/// able to mean "scroll all the way to the top" without `App` itself ever
+/// knowing how many wrapped rows that actually is.
+fn log_view_start(total_rows: usize, viewport: usize, scroll_from_bottom: usize) -> usize {
+    let max_start = total_rows.saturating_sub(viewport);
+    max_start.saturating_sub(scroll_from_bottom)
+}
+
 fn render_gauge(frame: &mut Frame, area: Rect, task: &RunningTask) {
     let (done, total) = task.progress;
     let ratio = if total == 0 {
@@ -244,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn format_timestamp_prefix_is_a_fixed_width_mm_dd_hh_mm_ss() {
+    fn format_timestamp_prefix_is_a_fixed_width_yyyy_mm_dd_hh_mm_ss() {
         let prefix = format_timestamp_prefix(test_timestamp());
-        assert_eq!(prefix, "01-02 03:04:05 ");
+        assert_eq!(prefix, "2024-01-02 03:04:05 ");
         assert_eq!(
             UnicodeWidthStr::width(prefix.as_str()),
             TIMESTAMP_PREFIX_WIDTH
@@ -257,7 +309,10 @@ mod tests {
     fn wrap_log_lines_prefixes_the_first_row_with_the_timestamp() {
         let lines = [log_line("hello", false)];
         let wrapped = wrap_log_lines(lines.iter(), 40);
-        assert_eq!(wrapped, vec![("01-02 03:04:05 hello".to_string(), false)]);
+        assert_eq!(
+            wrapped,
+            vec![("2024-01-02 03:04:05 hello".to_string(), false)]
+        );
     }
 
     #[test]
@@ -302,7 +357,10 @@ mod tests {
 
         // "short one" (9 cols) fits in one row; the error line (28 chars)
         // must wrap into multiple rows, every one still flagged is_error.
-        assert_eq!(wrapped[0], ("01-02 03:04:05 short one".to_string(), false));
+        assert_eq!(
+            wrapped[0],
+            ("2024-01-02 03:04:05 short one".to_string(), false)
+        );
         assert!(wrapped.len() > 2, "the long line must wrap into >1 row");
         assert!(
             wrapped[1..].iter().all(|(_, is_error)| *is_error),
@@ -337,6 +395,32 @@ mod tests {
             vec![format!("{prefix}line 4"), format!("{prefix}line 5")],
             "must keep the newest rows"
         );
+    }
+
+    #[test]
+    fn log_view_start_at_zero_scroll_is_bottom_anchored() {
+        assert_eq!(log_view_start(100, 20, 0), 80);
+    }
+
+    #[test]
+    fn log_view_start_scrolls_up_by_the_requested_amount() {
+        assert_eq!(log_view_start(100, 20, 30), 50);
+    }
+
+    #[test]
+    fn log_view_start_saturates_at_zero_rather_than_underflowing() {
+        assert_eq!(log_view_start(100, 20, 1000), 0);
+    }
+
+    #[test]
+    fn log_view_start_home_sentinel_scrolls_all_the_way_to_the_top() {
+        assert_eq!(log_view_start(100, 20, usize::MAX), 0);
+    }
+
+    #[test]
+    fn log_view_start_when_content_fits_the_viewport_is_always_zero() {
+        assert_eq!(log_view_start(5, 20, 0), 0);
+        assert_eq!(log_view_start(5, 20, 3), 0);
     }
 
     #[test]

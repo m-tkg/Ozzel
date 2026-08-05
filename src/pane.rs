@@ -65,6 +65,18 @@ pub struct Pane {
     /// The active incremental filter, if any. Applied in `visible_entries`
     /// alongside the hidden-file filter; cleared on `cwd` change.
     pub filter: Option<FilterSpec>,
+    /// Browser-style "back" stack: every `cwd` this pane has left behind,
+    /// oldest first. Pushed by `App::record_history_if_changed` (every
+    /// cwd-changing action funnels through it), popped by `history_back`
+    /// (`S-left`). Per-pane and entirely in-memory — distinct from the
+    /// persisted, cross-session `History` MRU list `HistoryJump` (`S-h`)
+    /// shows.
+    pub back: Vec<PathBuf>,
+    /// Browser-style "forward" stack, the mirror of `back` — popped by
+    /// `history_forward` (`S-right`), pushed by `history_back`. Cleared on
+    /// every *new* cwd change (going somewhere new invalidates "forward",
+    /// same as a real browser).
+    pub forward: Vec<PathBuf>,
 }
 
 impl Pane {
@@ -79,6 +91,8 @@ impl Pane {
             cursor_memory: HashMap::new(),
             marks: HashSet::new(),
             filter: None,
+            back: Vec::new(),
+            forward: Vec::new(),
         };
         pane.reload()?;
         Ok(pane)
@@ -311,6 +325,23 @@ impl Pane {
         }
     }
 
+    /// Marks (never unmarks) whatever real entry sits at visible index
+    /// `index`, if any — a no-op on `..` or an out-of-range index. Used by
+    /// mouse drag range-marking (`App::handle_mouse_left_down`/
+    /// `handle_mouse_left_drag`), which sweeps over rows and always wants
+    /// "mark on", never a toggle (re-sweeping the same row on a jittery
+    /// drag must not un-mark it).
+    pub fn mark_index(&mut self, index: usize, marked: bool) {
+        if let Some(VisibleItem::Entry(e)) = self.visible_entries().get(index) {
+            let path = e.path.clone();
+            if marked {
+                self.marks.insert(path);
+            } else {
+                self.marks.remove(&path);
+            }
+        }
+    }
+
     fn flip_mark(&mut self, path: PathBuf) {
         if !self.marks.remove(&path) {
             self.marks.insert(path);
@@ -408,6 +439,9 @@ mod tests {
             size,
             mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_offset_secs)),
             is_hidden: name.starts_with('.'),
+            unix_mode: None,
+            readonly: false,
+            is_executable: false,
         }
     }
 

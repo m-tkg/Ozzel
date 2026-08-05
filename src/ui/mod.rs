@@ -3,6 +3,7 @@
 //! prompt line in `Mode::Prompt`, with a centered confirm box drawn on top
 //! in `Mode::Confirm`).
 
+mod function_list_view;
 mod help_view;
 mod log_view;
 mod modal;
@@ -17,18 +18,30 @@ use ratatui::widgets::Paragraph;
 use crate::app::{ActivePane, App};
 use crate::mode::Mode;
 
-pub fn draw(frame: &mut Frame, app: &App) {
+/// Takes `&mut App` (rather than `&App`, as before mouse support) purely so
+/// each frame can refresh `App::pane_layout` with this frame's real
+/// on-screen geometry — mouse hit-testing (`App::handle_mouse`) reads it
+/// back on the *next* event, never mutates it itself, so `App` still never
+/// changes as a side effect of anything except this one assignment.
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // The viewer is a full-frame takeover (panes, log, and status bar are
-    // all replaced while a file is open), so it's handled before any of
-    // the normal layout is computed.
+    // The viewer/log full-frame takeovers (panes, log, and status bar are
+    // all replaced) are handled before any of the normal layout is
+    // computed. Neither one is clickable in a way that needs
+    // `pane_layout`, so it's simply left stale (harmless: `App::pane_at`
+    // just won't match anything relevant while one of these modes is up,
+    // and Normal-mode mouse handling never runs during them anyway).
     if matches!(app.mode, Mode::Viewer { .. }) {
         viewer_view::render(frame, area, &app.mode);
         return;
     }
     if matches!(app.mode, Mode::Help { .. }) {
         help_view::render(frame, area, &app.mode, &app.keymap);
+        return;
+    }
+    if let Mode::Log { scroll_from_bottom } = &app.mode {
+        log_view::render_full(frame, area, app, *scroll_from_bottom);
         return;
     }
 
@@ -50,21 +63,28 @@ pub fn draw(frame: &mut Frame, app: &App) {
         cursor: app.config.colors.cursor,
         cursor_inactive: app.config.colors.cursor_inactive,
         dim_inactive: app.config.colors.dim_inactive,
+        directory: app.config.colors.directory,
+        hidden: app.config.colors.hidden,
+        executable: app.config.colors.executable,
     };
-    pane_view::render(
+    let show_permissions = app.config.show_permissions;
+    let left_layout = pane_view::render(
         frame,
         panes[0],
         &app.panes[0],
         app.active == ActivePane::Left,
         colors,
+        show_permissions,
     );
-    pane_view::render(
+    let right_layout = pane_view::render(
         frame,
         panes[1],
         &app.panes[1],
         app.active == ActivePane::Right,
         colors,
+        show_permissions,
     );
+    app.pane_layout = [Some(left_layout), Some(right_layout)];
 
     log_view::render(frame, rows[1], app);
 
@@ -87,8 +107,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
             render_status_bar(frame, rows[2], app);
             modal::render_confirm(frame, area, message);
         }
+        Mode::FunctionList { .. } => {
+            render_status_bar(frame, rows[2], app);
+            function_list_view::render(frame, area, &app.mode);
+        }
         Mode::Normal => render_status_bar(frame, rows[2], app),
-        Mode::Viewer { .. } | Mode::Help { .. } => {
+        Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } => {
             unreachable!("handled by the full-frame takeover return above")
         }
     }
