@@ -12,13 +12,12 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, PopKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use ratatui::crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
+
+use crate::terminal::write_startup_sequence;
 
 /// A shell command line to run with the TUI suspended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +176,25 @@ pub fn run_suspended(
     // was never asked for. Only once that's done do we re-enter the
     // alternate screen and re-push the flags, so the push lands back on
     // the alternate screen's own stack — mirroring `TerminalGuard::new`.
+    //
+    // The "enter alt screen, then (if enabled) push the keyboard flags"
+    // part is byte-for-byte what `terminal::write_startup_sequence` does
+    // for the exact same reason (see its own doc comment) — reused here
+    // rather than re-spelled. Mouse capture stays a separate `execute!`
+    // right after it: `write_startup_sequence` deliberately has no
+    // opinion on mouse capture (not a per-screen-buffer stack, so its
+    // ordering here doesn't affect correctness — see that function's doc
+    // comment), so composing the two here produces identical output to
+    // the three calls this replaced. The *leaving* half (just above this
+    // closure) is deliberately **not** unified with
+    // `terminal::write_teardown_sequence`: that helper's unconditional
+    // defense-in-depth second pop and its lack of a `Show` write would
+    // both change the exact bytes written here, and this function's
+    // pop/disable-capture/leave-screen ordering (mouse and keyboard flags
+    // both undone *before* `disable_raw_mode`, unlike `TerminalGuard`'s
+    // teardown) is its own deliberate sequence for handing a *live*
+    // terminal to a child process, not a final-exit teardown — so it's
+    // left as its own inline sequence rather than forced to match.
     let reenter = |pause_message: Option<String>| -> Result<()> {
         enable_raw_mode().context("failed to re-enable raw mode")?;
         if let Some(msg) = pause_message {
@@ -184,15 +202,8 @@ pub fn run_suspended(
             let _ = io::stdout().flush();
             wait_for_keypress().context("failed to wait for keypress")?;
         }
-        execute!(io::stdout(), EnterAlternateScreen)
+        write_startup_sequence(&mut io::stdout(), keyboard_enhancement)
             .context("failed to re-enter alternate screen")?;
-        if keyboard_enhancement {
-            execute!(
-                io::stdout(),
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            )
-            .context("failed to re-push keyboard enhancement flags")?;
-        }
         if mouse {
             execute!(io::stdout(), EnableMouseCapture)
                 .context("failed to re-enable mouse capture")?;

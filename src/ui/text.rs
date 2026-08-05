@@ -7,10 +7,12 @@
 //!
 //! Previously these were five near-duplicate implementations scattered
 //! across `pane_view`, `settings_view`, `log_view`, and `viewer_view`; this
-//! module is the merge point. `pad_label_min1` and the `wrap_to_width` /
-//! `take_display_prefix` pair are kept as distinct functions rather than
-//! forced into one shape each — see their own doc comments for the
-//! behavioral differences that make full unification wrong.
+//! module is the merge point. `pad_label_min1` and `take_display_prefix`
+//! are kept as distinct functions rather than forced into one shape each —
+//! see their own doc comments for the behavioral differences that make full
+//! unification wrong. `wrap_to_width` — originally here too — now lives in
+//! `crate::logwrap` instead: its only caller is the log-line wrapping this
+//! module must not depend on (see `logwrap`'s own doc comment for why).
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -104,12 +106,12 @@ pub(crate) fn pad_label_min1(label: &str, width: usize) -> String {
 
 /// Splits `s` into `(first `width`-columns-worth, remainder)` on grapheme
 /// boundaries, never exceeding `width` display columns in the first part.
-/// Unlike [`wrap_to_width`], this never force-places an over-width single
-/// grapheme into the first part (if the very first grapheme alone already
-/// exceeds `width`, the first part comes back empty) — fine for its one
-/// caller (`pane_view::wrap_header_lines`, which only ever takes at most
-/// two slices off the front of a string), but not a general-purpose
-/// wrapping loop; see `wrap_to_width` for that.
+/// Unlike `crate::logwrap`'s `wrap_to_width`, this never force-places an
+/// over-width single grapheme into the first part (if the very first
+/// grapheme alone already exceeds `width`, the first part comes back empty)
+/// — fine for its one caller (`pane_view::wrap_header_lines`, which only
+/// ever takes at most two slices off the front of a string), but not a
+/// general-purpose wrapping loop; see that function for that.
 pub(crate) fn take_display_prefix(s: &str, width: usize) -> (String, String) {
     let graphemes: Vec<&str> = s.graphemes(true).collect();
     let mut line = String::new();
@@ -126,37 +128,6 @@ pub(crate) fn take_display_prefix(s: &str, width: usize) -> (String, String) {
         i += 1;
     }
     (line, graphemes[i..].concat())
-}
-
-/// Hard-wraps `s` into chunks of at most `width` display columns, breaking
-/// only on grapheme-cluster boundaries (never mid-character, even for wide
-/// Japanese graphemes) — this is a plain width-based wrap, not word-wrap,
-/// since log messages are often paths with no spaces to break on. An empty
-/// string still yields one (empty) row, matching the pre-wrap one-row-per-
-/// line baseline for a blank message. Unlike [`take_display_prefix`], an
-/// over-width single grapheme is still force-placed alone on its own row
-/// (via `.max(1)` treating every grapheme as at least 1 column) rather than
-/// leaving that row empty, so this always makes forward progress across the
-/// whole string — required for a loop that must consume all of `s`, not
-/// just take one prefix.
-pub(crate) fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let mut rows = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for g in s.graphemes(true) {
-        let w = UnicodeWidthStr::width(g).max(1);
-        if current_width + w > width && !current.is_empty() {
-            rows.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push_str(g);
-        current_width += w;
-    }
-    rows.push(current);
-    rows
 }
 
 /// Returns the substring of `line` covering display columns
@@ -268,38 +239,6 @@ mod tests {
         let (first, rest) = take_display_prefix("日本語", 1);
         assert_eq!(first, "");
         assert_eq!(rest, "日本語");
-    }
-
-    #[test]
-    fn wrap_to_width_leaves_a_short_line_as_one_row() {
-        assert_eq!(wrap_to_width("short", 80), vec!["short".to_string()]);
-    }
-
-    #[test]
-    fn wrap_to_width_splits_a_long_ascii_line_at_the_width() {
-        let rows = wrap_to_width("abcdefghij", 4);
-        assert_eq!(rows, vec!["abcd", "efgh", "ij"]);
-        for row in &rows {
-            assert!(UnicodeWidthStr::width(row.as_str()) <= 4);
-        }
-    }
-
-    #[test]
-    fn wrap_to_width_never_splits_a_wide_japanese_grapheme() {
-        let rows = wrap_to_width("日本語ファイル", 5);
-        for row in &rows {
-            assert!(UnicodeWidthStr::width(row.as_str()) <= 5);
-        }
-    }
-
-    #[test]
-    fn wrap_to_width_empty_string_is_one_empty_row() {
-        assert_eq!(wrap_to_width("", 80), vec!["".to_string()]);
-    }
-
-    #[test]
-    fn wrap_to_width_zero_width_is_one_empty_row_not_a_panic() {
-        assert_eq!(wrap_to_width("anything", 0), vec!["".to_string()]);
     }
 
     #[test]

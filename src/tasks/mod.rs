@@ -14,7 +14,31 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::event::TaskEvent;
+/// A message from a background task's worker thread back to the main
+/// thread, sent over the `mpsc::Sender<TaskEvent>` every `TaskManager::spawn`
+/// closure receives a clone of. Lives here (rather than `event.rs`, where
+/// it originally sat alongside `AppEvent`) so `event.rs` — the terminal-
+/// input-normalization module — doesn't have to depend on `tasks` just for
+/// this enum's own `TaskId` field; `event.rs` still depends on `tasks` for
+/// `AppEvent::Task`'s payload (this type), which is unavoidable, but no
+/// longer for anything this enum's *definition* needed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskEvent {
+    Progress {
+        id: TaskId,
+        done: u64,
+        total: u64,
+        detail: String,
+    },
+    Log {
+        id: TaskId,
+        line: String,
+    },
+    Finished {
+        id: TaskId,
+        result: Result<String, String>,
+    },
+}
 
 /// Chunked read/write buffer size shared by every worker that streams file
 /// bytes through a manual `Read`/`Write` loop: copy/move's chunked-file

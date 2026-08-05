@@ -13,12 +13,12 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::PaneLayout;
 use crate::color::dim_color;
 use crate::entry::EntryKind;
 #[cfg(test)]
 use crate::entry::FsEntry;
 use crate::pane::{Pane, VisibleItem};
+use crate::ui::layout::PaneLayout;
 use crate::ui::text;
 use crate::virtual_dir;
 #[cfg(test)]

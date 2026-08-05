@@ -327,6 +327,27 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 /// know *why* an otherwise-plausible-looking key ended up unknown, so this
 /// appends one generic (not `[viewers]`-specific) extra line pointing at
 /// the most common cause.
+///
+/// Deliberately still `toml::from_str`, not `toml_edit::de::from_str`,
+/// despite `toml_edit` already being a dependency (`settings.rs`'s
+/// format-preserving config writes): a probe against `toml_edit::de`
+/// (same `deny_unknown_fields`/`deserialize_with`/nested-struct shape as
+/// `Config`) produced byte-identical `.message()`/`Display` output for
+/// every error case tried (unknown top-level field, unknown nested field,
+/// wrong value type) — genuinely promising — but switching *just this one
+/// call* wouldn't actually let `toml` be dropped from `Cargo.toml` either
+/// way: `update.rs`'s `fetch_remote_version` parses `Cargo.toml` as a
+/// `toml::Value`, and roughly two dozen of this module's own tests call
+/// `toml::from_str::<Config>(...)` directly (deliberately bypassing this
+/// function, to test `Deserialize`'s own behavior in isolation) rather
+/// than through `parse_config`. Switching this one call site would add a
+/// second TOML-parsing code path to the dependency graph — one exercised
+/// by production use but not by the bulk of this module's own test
+/// coverage — for zero reduction in `Cargo.toml`'s dependency count,
+/// which is the entire point a "unify on one TOML crate" change would be
+/// for. Left as-is; revisit only alongside also converting those direct
+/// `toml::from_str` test call sites and `update.rs`'s, which is a bigger
+/// change than this phase's scope.
 fn parse_config(text: &str) -> Result<Config> {
     match toml::from_str::<Config>(text) {
         Ok(mut config) => {

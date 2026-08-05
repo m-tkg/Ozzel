@@ -20,7 +20,7 @@ use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::event::TaskEvent;
+use super::TaskEvent;
 use crate::tasks::{CHUNK_SIZE, PROGRESS_MIN_INTERVAL, TaskId, Throttle, send_log};
 use crate::virtual_dir::{self, ArchiveKind};
 

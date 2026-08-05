@@ -9,6 +9,7 @@
 
 mod function_list_view;
 mod help_view;
+pub mod layout;
 // `pub` (rather than `pub(crate)`) so `benches/`'s criterion bench, an
 // external target, can reach `wrap_log_lines` directly.
 pub mod log_view;
@@ -25,40 +26,72 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::{ActivePane, App};
 use crate::mode::Mode;
+pub use layout::PaneLayout;
 
-/// Takes `&mut App` (rather than `&App`, as before mouse support) purely so
-/// each frame can refresh `App::pane_layout` with this frame's real
-/// on-screen geometry — mouse hit-testing (`App::handle_mouse`) reads it
-/// back on the *next* event, never mutates it itself, so `App` still never
-/// changes as a side effect of anything except this one assignment.
-pub fn draw(frame: &mut Frame, app: &mut App) {
+/// Everything a call to [`draw`] learns about this frame's on-screen
+/// geometry that `App` needs for the *next* frame/event (mouse
+/// hit-testing, `Mode::Log`'s `/`/`?` search) — returned rather than
+/// written directly into `app` from inside `draw`/`log_view::render_full`,
+/// so drawing a frame never mutates `App`'s externally-visible state as a
+/// side effect; the caller (`main.rs`'s loop) applies it afterward via
+/// [`App::apply_layout_feedback`](crate::app::App::apply_layout_feedback).
+/// Both fields default to `None` (via `#[derive(Default)]`) and are left
+/// that way whenever this frame didn't touch the corresponding geometry —
+/// `apply_layout_feedback` then simply leaves `App`'s existing value alone,
+/// the same "stale until a relevant frame draws, harmless" idiom
+/// `App::pane_layout`/`App::log_view_width` already relied on before this
+/// struct existed.
+#[derive(Debug, Default)]
+pub struct LayoutFeedback {
+    /// This frame's two-pane geometry — `Some` only when the normal
+    /// two-pane layout was actually drawn (never during a Viewer/Help/Log/
+    /// Settings full-frame takeover, none of which are clickable in a way
+    /// that needs it — see `App::pane_at`).
+    pub panes: Option<[PaneLayout; 2]>,
+    /// The full log view's content width this frame — `Some` only when
+    /// `Mode::Log`'s full-frame view was drawn (see
+    /// `log_view::render_full`).
+    pub log_view_width: Option<u16>,
+}
+
+/// Takes `&mut App` purely because some of the modes it dispatches to
+/// (`log_view::render_full`, `help_view::render`, ...) call back into
+/// `App`'s own memoization caches (`App::log_wrapped`, `App::help_lines`,
+/// ...), which need `&mut self` to rebuild-and-cache; drawing a frame
+/// otherwise never mutates `App` — see [`LayoutFeedback`]'s doc comment for
+/// the two fields that used to be exceptions to that.
+pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
     let area = frame.area();
 
     // The viewer/log full-frame takeovers (panes, log, and status bar are
     // all replaced) are handled before any of the normal layout is
     // computed. Neither one is clickable in a way that needs
-    // `pane_layout`, so it's simply left stale (harmless: `App::pane_at`
-    // just won't match anything relevant while one of these modes is up,
-    // and Normal-mode mouse handling never runs during them anyway).
+    // `pane_layout`, so this frame simply reports no pane geometry (see
+    // `LayoutFeedback`'s doc comment — harmless: `App::pane_at` just won't
+    // match anything relevant while one of these modes is up, and
+    // Normal-mode mouse handling never runs during them anyway).
     if matches!(app.mode, Mode::Viewer { .. }) {
         viewer_view::render(frame, area, &app.mode);
-        return;
+        return LayoutFeedback::default();
     }
     if matches!(app.mode, Mode::Help { .. }) {
         help_view::render(frame, area, app);
-        return;
+        return LayoutFeedback::default();
     }
     if let Mode::Log {
         scroll_from_bottom, ..
     } = &app.mode
     {
         let scroll_from_bottom = *scroll_from_bottom;
-        log_view::render_full(frame, area, app, scroll_from_bottom);
-        return;
+        let log_view_width = log_view::render_full(frame, area, app, scroll_from_bottom);
+        return LayoutFeedback {
+            panes: None,
+            log_view_width: Some(log_view_width),
+        };
     }
     if matches!(app.mode, Mode::Settings { .. }) {
         settings_view::render(frame, area, app);
-        return;
+        return LayoutFeedback::default();
     }
 
     let rows = Layout::default()
@@ -100,7 +133,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         colors,
         show_permissions,
     );
-    app.pane_layout = [Some(left_layout), Some(right_layout)];
 
     log_view::render(frame, rows[1], app);
 
@@ -138,6 +170,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } | Mode::Settings { .. } => {
             unreachable!("handled by the full-frame takeover return above")
         }
+    }
+
+    LayoutFeedback {
+        panes: Some([left_layout, right_layout]),
+        log_view_width: None,
     }
 }
 
@@ -196,7 +233,11 @@ mod tests {
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &mut app);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         let bottom_row_y = 23u16;
         let mut bottom_row = String::new();
