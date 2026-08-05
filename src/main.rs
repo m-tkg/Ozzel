@@ -1,25 +1,3 @@
-mod action;
-mod app;
-mod color;
-mod config;
-mod entry;
-mod event;
-mod external;
-mod filter;
-mod function_list;
-mod help;
-mod keymap;
-mod mode;
-mod ops;
-mod pane;
-mod persist;
-mod search;
-mod settings;
-mod tasks;
-mod ui;
-mod viewer;
-mod virtual_dir;
-
 use std::io::{self, Stdout, Write as _};
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -40,7 +18,8 @@ use ratatui::crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 
-use app::App;
+use ozzel::app::App;
+use ozzel::{config, event, external, persist, ui};
 
 /// Repository URL used by both `cargo install --git` (the actual update
 /// mechanism) and the raw-content fetch that checks the remote version

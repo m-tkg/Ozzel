@@ -117,8 +117,10 @@ fn format_timestamp_prefix(timestamp: DateTime<Local>) -> String {
 /// message stays red top to bottom. `pub(crate)` (rather than private) so
 /// `App::run_log_search`/`log_search_step` can rewrap the log at
 /// `App::log_view_width` — the same width this was last rendered at — to
-/// search against exactly the rows the screen shows.
-pub(crate) fn wrap_log_lines<'a>(
+/// search against exactly the rows the screen shows. `pub` (rather than
+/// `pub(crate)`) additionally so `benches/`'s criterion bench, an external
+/// target, can measure it directly.
+pub fn wrap_log_lines<'a>(
     log: impl Iterator<Item = &'a LogLine>,
     width: usize,
 ) -> Vec<(String, bool)> {
