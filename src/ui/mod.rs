@@ -9,7 +9,9 @@
 
 mod function_list_view;
 mod help_view;
-pub(crate) mod log_view;
+// `pub` (rather than `pub(crate)`) so `benches/`'s criterion bench, an
+// external target, can reach `wrap_log_lines` directly.
+pub mod log_view;
 mod modal;
 mod pane_view;
 mod settings_view;

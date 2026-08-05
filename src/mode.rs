@@ -404,6 +404,11 @@ impl LineEditor {
         Self::default()
     }
 
+    // Named to mirror `std::str::FromStr::from_str` for call-site
+    // readability (`LineEditor::from_str(...)`, no `Result` unwrap
+    // needed since this can't fail) — not an actual `FromStr` impl, so
+    // silence clippy's trait-name-collision lint rather than rename it.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let graphemes: Vec<String> = s.graphemes(true).map(str::to_string).collect();
         let cursor = graphemes.len();

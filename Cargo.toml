@@ -9,6 +9,18 @@ readme = "README.md"
 keywords = ["tui", "file-manager", "terminal", "filer"]
 categories = ["command-line-utilities", "filesystem"]
 
+[lib]
+name = "ozzel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ozzel"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 anyhow = "1.0.104"
 # Default features (no `bzip2-sys`) build against the pure-Rust
@@ -47,7 +59,12 @@ walkdir = "2.5.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+criterion = "0.8.2"
 tempfile = "3.27.0"
+
+[[bench]]
+name = "benchmarks"
+harness = false
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"
