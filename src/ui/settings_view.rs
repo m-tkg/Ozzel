@@ -412,9 +412,10 @@ fn render_keybinding(
     );
     let combos = settings::combos_for(&app.keymap, action);
     let items: Vec<ListItem> = if combos.is_empty() {
-        vec![ListItem::new(
-            Line::styled(" (no combo bound)".to_string(), dialog_style()),
-        )]
+        vec![ListItem::new(Line::styled(
+            " (no combo bound)".to_string(),
+            dialog_style(),
+        ))]
     } else {
         combos
             .iter()
