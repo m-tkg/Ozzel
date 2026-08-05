@@ -12,6 +12,7 @@
 - 設定ファイルをその場で編集して即座に反映できるショートカット（`,`。未作成ならテンプレートから新規作成し、保存後は再起動なしで設定を再読み込み）
 - 複数ファイルのマーク（Space）とマーク一括操作
 - インクリメンタル絞込・検索（部分一致、`re:` プレフィックスで正規表現）
+- プレフィックスジャンプ（`\`）— 一覧を絞り込まずカーソルだけを前方一致で移動するインクリメンタルサーチ。`Down`/`Up` で次/前の一致へ折り返し循環
 - コピー・移動・削除・zip 圧縮/展開・Virtual Directory からの展開はバックグラウンドスレッドで非同期実行し、進捗バーを表示しながら他の操作も継続可能
 - ログ欄の各行に記録時刻を表示（長いメッセージは折り返され、継続行は日時分だけ字下げされて桁が揃う）。`L` キーでログ全体を見るフルスクリーンのログビューアも開ける
 - zip 圧縮・展開（zip-slip 対策済み）
@@ -116,6 +117,19 @@ ozzel [左ペインのディレクトリ] [右ペインのディレクトリ]
 | 通常モード中 `Esc` | 有効な絞込があれば解除 |
 
 絞込モードでは、入力した文字列がそのまま「大文字小文字を区別しない部分一致」として使われます。`re:` から始めると、以降を大文字小文字を区別する正規表現として扱います（例: `re:^IMG_[0-9]+\.jpg$`）。不正な正規表現を入力した場合はエラーメッセージが表示され、クラッシュはせず単に何も一致しない扱いになります。
+
+### プレフィックスジャンプ（前方一致インクリメンタルサーチ）
+
+| キー | 動作 |
+| --- | --- |
+| `\` | プレフィックスジャンプモードを開始 |
+| （入力中）文字入力 | 入力した文字列（先頭一致・大文字小文字を区別しない）に一致する最初のエントリへカーソルを移動 |
+| （入力中）`Down` / `Tab` | 同じ入力に一致する次のエントリへ（末尾まで行くと先頭へ折り返し） |
+| （入力中）`Up` | 同じ入力に一致する前のエントリへ（先頭まで行くと末尾へ折り返し） |
+| （入力中）`Enter` | 入力を終了し、カーソルはそのまま現在の位置に留まる |
+| （入力中）`Esc` | 入力を取り消し、カーソルをモード開始時の位置へ戻す |
+
+`f` / `/` の絞込とは異なり、一覧のエントリを非表示にすることは一切ありません。あくまでカーソルを移動させるだけの機能です。一致するエントリが無い間はカーソルは動かず、入力欄に警告表示（`(no match)`）が出ます。`..`（親ディレクトリへ戻る行）は一致対象になりません。Virtual Directory（`.zip` 内の閲覧）でも同様に機能します。
 
 ### zip 圧縮・展開
 
@@ -430,7 +444,7 @@ delete = ["d", "S-d"]
 
 ### アクション名一覧（`[keys]` の右辺 / `[bindings]` の左辺に指定できる値）
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `zip_marked`, `unzip`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `jump_search`, `zip_marked`, `unzip`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `quit`
 
 この一覧に対応する現在の実効キーバインドは、アプリ内のヘルプ画面（`h`/`?`）でいつでも確認できます。
 

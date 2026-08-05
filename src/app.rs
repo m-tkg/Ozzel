@@ -440,6 +440,7 @@ impl App {
                     }
                 }
                 Mode::Filter { .. } => self.handle_filter_key(code, modifiers),
+                Mode::JumpSearch { .. } => self.handle_jump_search_key(code, modifiers),
                 Mode::Select { .. } => self.handle_select_key(code),
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
@@ -726,6 +727,10 @@ impl App {
             }
             Action::ClearFilter => {
                 self.active_pane_mut().set_filter(None);
+                Ok(())
+            }
+            Action::JumpSearch => {
+                self.begin_jump_search();
                 Ok(())
             }
             Action::ZipMarked => {
@@ -1804,6 +1809,120 @@ impl App {
             input.value()
         };
         self.active_pane_mut().set_filter(FilterSpec::parse(&value));
+    }
+
+    /// `\`: opens the prefix-jump search line, remembering the cursor
+    /// position it started at (`Esc` restores exactly this; `Enter` does
+    /// not).
+    fn begin_jump_search(&mut self) {
+        let original_cursor = self.active_pane().cursor;
+        self.mode = Mode::JumpSearch {
+            input: LineEditor::new(),
+            original_cursor,
+        };
+    }
+
+    /// Fixed editing keys for `Mode::JumpSearch`; never consults the
+    /// keymap. Unlike `Mode::Filter`, this never touches `Pane::filter` —
+    /// it's pure cursor movement, so `Esc`'s "undo" is restoring the
+    /// cursor position instead of clearing a filter.
+    fn handle_jump_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                let Mode::JumpSearch {
+                    original_cursor, ..
+                } = &self.mode
+                else {
+                    return;
+                };
+                let original_cursor = *original_cursor;
+                self.active_pane_mut().cursor = original_cursor;
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                self.jump_search_cycle(1);
+                return;
+            }
+            KeyCode::Up => {
+                self.jump_search_cycle(-1);
+                return;
+            }
+            _ => {}
+        }
+
+        let value = {
+            let Mode::JumpSearch { input, .. } = &mut self.mode else {
+                return;
+            };
+            match code {
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Delete => input.delete(),
+                KeyCode::Left => input.move_left(),
+                KeyCode::Right => input.move_right(),
+                KeyCode::Home => input.move_home(),
+                KeyCode::End => input.move_end(),
+                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => input.insert(c),
+                _ => {}
+            }
+            input.value()
+        };
+        self.jump_search_to_first_match(&value);
+    }
+
+    /// Every keystroke re-searches from the top of the list with the
+    /// (now longer/shorter) typed prefix — deliberately *not* incremental
+    /// from wherever the cursor currently sits, so backspacing back to a
+    /// shorter prefix returns to the same first match typing that prefix
+    /// fresh would. An empty `value` (nothing typed yet) leaves the
+    /// cursor untouched; a `value` that matches nothing also leaves it
+    /// untouched (the UI shows the `(no match)` hint instead — see
+    /// `ui::draw`/`modal::render_jump_search_line`).
+    fn jump_search_to_first_match(&mut self, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        if let Some(&first) = self.active_pane().jump_matches(value).first() {
+            self.active_pane_mut().cursor = first;
+        }
+    }
+
+    /// `Down`/`Tab` (`step = 1`) or `Up` (`step = -1`) while
+    /// `Mode::JumpSearch` is open: moves to the next/previous entry
+    /// matching the *current* typed prefix, wrapping around. A no-op when
+    /// nothing's typed yet or nothing matches. If the cursor isn't
+    /// currently sitting on one of the matches (shouldn't normally happen,
+    /// since typing always jumps onto a match when there is one, but is
+    /// possible right after opening the search before anything's been
+    /// typed), `step = 1` starts at the first match and `step = -1` at
+    /// the last, rather than doing nothing.
+    fn jump_search_cycle(&mut self, step: isize) {
+        let Mode::JumpSearch { input, .. } = &self.mode else {
+            return;
+        };
+        let value = input.value();
+        if value.is_empty() {
+            return;
+        }
+        let pane = self.active_pane();
+        let matches = pane.jump_matches(&value);
+        if matches.is_empty() {
+            return;
+        }
+        let len = matches.len() as isize;
+        let next = match matches.iter().position(|&i| i == pane.cursor) {
+            Some(pos) => {
+                let pos = pos as isize;
+                ((pos + step).rem_euclid(len)) as usize
+            }
+            None if step > 0 => 0,
+            None => matches.len() - 1,
+        };
+        self.active_pane_mut().cursor = matches[next];
     }
 
     /// Fixed editing keys for `Mode::Prompt`; never consults the keymap.
@@ -4735,5 +4854,166 @@ mod tests {
         app.dispatch(Action::Delete);
         assert!(matches!(app.mode, Mode::Confirm { .. }));
         assert!(app.wants_mouse_capture());
+    }
+
+    #[test]
+    fn jump_search_moves_cursor_to_the_first_case_insensitive_prefix_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("aa.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("ab.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "b.txt");
+
+        app.dispatch(Action::JumpSearch);
+        assert!(matches!(app.mode, Mode::JumpSearch { .. }));
+        // Uppercase input must still match the lowercase files.
+        app.handle_event(AppEvent::Input(KeyCode::Char('A'), KeyModifiers::NONE));
+
+        assert_eq!(
+            cursor_entry_name(&app),
+            "aa.txt",
+            "must land on the first match in display order, not \"ab.txt\""
+        );
+    }
+
+    #[test]
+    fn jump_search_handles_japanese_prefixes_and_narrows_incrementally() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("あいう.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("あえお.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("かきく.txt"), b"a").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "かきく.txt");
+
+        app.dispatch(Action::JumpSearch);
+        app.handle_event(AppEvent::Input(KeyCode::Char('あ'), KeyModifiers::NONE));
+        assert_eq!(
+            cursor_entry_name(&app),
+            "あいう.txt",
+            "first match for the single-character prefix \"あ\""
+        );
+
+        // Narrowing the prefix further must re-search from the top and
+        // move off "あいう.txt" onto the only remaining match.
+        app.handle_event(AppEvent::Input(KeyCode::Char('え'), KeyModifiers::NONE));
+        assert_eq!(cursor_entry_name(&app), "あえお.txt");
+    }
+
+    #[test]
+    fn jump_search_down_and_up_cycle_through_matches_with_wraparound() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cat1.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("cat2.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("cat3.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("dog.txt"), b"a").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+
+        app.dispatch(Action::JumpSearch);
+        for c in "cat".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(cursor_entry_name(&app), "cat1.txt");
+
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(cursor_entry_name(&app), "cat2.txt");
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(cursor_entry_name(&app), "cat3.txt");
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            cursor_entry_name(&app),
+            "cat1.txt",
+            "Down from the last match must wrap around to the first"
+        );
+
+        app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            cursor_entry_name(&app),
+            "cat3.txt",
+            "Up from the first match must wrap around to the last"
+        );
+    }
+
+    #[test]
+    fn jump_search_with_no_match_leaves_the_cursor_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "b.txt");
+
+        app.dispatch(Action::JumpSearch);
+        app.handle_event(AppEvent::Input(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(cursor_entry_name(&app), "b.txt");
+    }
+
+    #[test]
+    fn jump_search_esc_restores_the_cursor_to_where_the_search_started() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "b.txt");
+
+        app.dispatch(Action::JumpSearch);
+        app.handle_event(AppEvent::Input(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(cursor_entry_name(&app), "a.txt", "sanity: search moved it");
+
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(cursor_entry_name(&app), "b.txt");
+    }
+
+    #[test]
+    fn jump_search_enter_keeps_the_cursor_where_the_search_left_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "b.txt");
+
+        app.dispatch(Action::JumpSearch);
+        app.handle_event(AppEvent::Input(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(cursor_entry_name(&app), "a.txt");
+    }
+
+    #[test]
+    fn jump_search_never_matches_the_parent_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        // A real filename that happens to start with "..", to make sure a
+        // "." or ".." prefix search matches a real entry rather than the
+        // synthetic ".." parent row (which isn't a named `FsEntry` at all,
+        // but this also documents the exclusion at the behavioral level).
+        std::fs::write(dir.path().join("..extra.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("normal.txt"), b"a").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        app.dispatch(Action::ToggleHidden);
+        select_entry_named(&mut app, "normal.txt");
+
+        assert!(matches!(
+            app.active_pane().visible_entries()[0],
+            crate::pane::VisibleItem::Parent
+        ));
+
+        app.dispatch(Action::JumpSearch);
+        app.handle_event(AppEvent::Input(KeyCode::Char('.'), KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Char('.'), KeyModifiers::NONE));
+
+        assert_eq!(cursor_entry_name(&app), "..extra.txt");
+        assert_ne!(
+            app.active_pane().cursor,
+            0,
+            "must never land on the parent row"
+        );
     }
 }

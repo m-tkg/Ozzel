@@ -98,6 +98,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .map(str::to_string);
             modal::render_filter_line(frame, rows[2], &app.mode, error.as_deref());
         }
+        Mode::JumpSearch { input, .. } => {
+            let has_match = !app.active_pane().jump_matches(&input.value()).is_empty();
+            modal::render_jump_search_line(frame, rows[2], &app.mode, has_match);
+        }
         Mode::Select { .. } => {
             render_status_bar(frame, rows[2], app);
             modal::render_select(frame, area, &app.mode);

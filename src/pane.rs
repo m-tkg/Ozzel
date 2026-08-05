@@ -482,6 +482,30 @@ impl Pane {
         }
     }
 
+    /// Indices (into `visible_entries()`) of every real entry whose name
+    /// starts with `prefix`, case-insensitive, in display order — `..` is
+    /// never a match. Used by prefix-jump search (`\`, `Mode::JumpSearch`)
+    /// for both "jump to the first match" (typing) and "cycle to the
+    /// next/previous match" (`Down`/`Up` — see `App::handle_jump_search_key`).
+    /// An empty `prefix` matches nothing (there's no meaningful "first
+    /// entry" search before anything's been typed).
+    pub fn jump_matches(&self, prefix: &str) -> Vec<usize> {
+        if prefix.is_empty() {
+            return Vec::new();
+        }
+        let prefix_lower = prefix.to_lowercase();
+        self.visible_entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| match item {
+                VisibleItem::Entry(e) if e.name.to_lowercase().starts_with(&prefix_lower) => {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Toggles the mark on whatever is under the cursor (a no-op on `..`
     /// or an empty pane) and advances the cursor down one row when a
     /// toggle actually happened.

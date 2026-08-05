@@ -115,6 +115,18 @@ pub enum Mode {
     Filter {
         input: LineEditor,
     },
+    /// Prefix-jump incremental search (`\`): pure cursor movement, never
+    /// hides/filters the listing (that's `Filter`'s job) — every keystroke
+    /// moves the active pane's cursor to the first visible entry whose
+    /// name starts with what's typed so far. See
+    /// `App::handle_jump_search_key`.
+    JumpSearch {
+        input: LineEditor,
+        /// The cursor position when the search was opened, restored
+        /// verbatim on `Esc` — `Enter` leaves the cursor wherever the
+        /// search left it instead.
+        original_cursor: usize,
+    },
     /// A centered jump menu (history or bookmarks): up/down move, Enter
     /// selects (the active pane cd's there), Esc cancels, and `d` deletes
     /// the highlighted entry when `kind` is `Bookmark`.

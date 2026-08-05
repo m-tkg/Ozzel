@@ -35,22 +35,44 @@ pub fn render_filter_line(frame: &mut Frame, area: Rect, mode: &Mode, error: Opt
     let Mode::Filter { input } = mode else {
         return;
     };
-    render_input_line(frame, area, "Filter: ", input, error);
+    let suffix = error.map(|err| format!("  (invalid regex: {err})"));
+    render_input_line(frame, area, "Filter: ", input, suffix.as_deref());
 }
 
+/// Draws the `JumpSearch` line into `area`, showing the live input plus a
+/// `(no match)` hint (in warning styling) whenever the typed prefix
+/// currently matches nothing. No-op if `mode` is not `JumpSearch`.
+/// `has_match` is computed by the caller (`ui::draw`), which — unlike this
+/// module — has access to the active pane's `Pane::jump_matches`.
+pub fn render_jump_search_line(frame: &mut Frame, area: Rect, mode: &Mode, has_match: bool) {
+    let Mode::JumpSearch { input, .. } = mode else {
+        return;
+    };
+    let no_match = !input.value().is_empty() && !has_match;
+    let suffix = no_match.then_some("  (no match)");
+    render_input_line(frame, area, "Jump: ", input, suffix);
+}
+
+/// Shared by `render_prompt_line`/`render_filter_line`/`render_jump_search_line`:
+/// draws `{label}{input}{warning_suffix}` (reverse-video, red when a
+/// warning suffix is present) and positions the real terminal cursor at
+/// the input's own edit point. `warning_suffix`, when present, is
+/// expected to already include its own leading spacing/punctuation (e.g.
+/// `"  (invalid regex: ...)"`, `"  (no match)"`) since the two callers'
+/// wording differs.
 fn render_input_line(
     frame: &mut Frame,
     area: Rect,
     label: &str,
     input: &crate::mode::LineEditor,
-    error: Option<&str>,
+    warning_suffix: Option<&str>,
 ) {
-    let text = match error {
-        Some(err) => format!("{label}{}  (invalid regex: {err})", input.value()),
+    let text = match warning_suffix {
+        Some(suffix) => format!("{label}{}{suffix}", input.value()),
         None => format!("{label}{}", input.value()),
     };
     let mut style = Style::default().add_modifier(Modifier::REVERSED);
-    if error.is_some() {
+    if warning_suffix.is_some() {
         style = style.fg(Color::Red);
     }
     let paragraph = Paragraph::new(text).style(style);

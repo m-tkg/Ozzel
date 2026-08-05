@@ -42,6 +42,12 @@ pub enum Action {
     CopyPath,
     Filter,
     ClearFilter,
+    /// Prefix-jump incremental search (`Mode::JumpSearch`): pure cursor
+    /// movement, never hides/filters the listing — typing moves the
+    /// cursor to the first visible entry whose name starts with what's
+    /// typed so far (case-insensitive), `..` excluded. See
+    /// `App::begin_jump_search`.
+    JumpSearch,
     ZipMarked,
     Unzip,
     HistoryJump,
@@ -120,7 +126,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 42] = [
+    pub const ALL: [Action; 43] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -149,6 +155,7 @@ impl Action {
         Action::Unzip,
         Action::Filter,
         Action::ClearFilter,
+        Action::JumpSearch,
         Action::HistoryJump,
         Action::HistoryBack,
         Action::HistoryForward,
@@ -176,7 +183,7 @@ impl Action {
             Rename | Mkdir | Delete | Copy | Move | Duplicate | CopyPath | ZipMarked | Unzip => {
                 ActionCategory::FileOps
             }
-            Filter | ClearFilter => ActionCategory::Filter,
+            Filter | ClearFilter | JumpSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
             }
@@ -217,6 +224,7 @@ impl Action {
             Unzip => "Unzip the cursor .zip file",
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
+            JumpSearch => "Jump the cursor to entries by typed prefix",
             HistoryJump => "Open the directory history menu",
             HistoryBack => "Go back to the previous directory in this pane",
             HistoryForward => "Go forward to the next directory in this pane",
@@ -265,6 +273,7 @@ impl Action {
             CopyPath => "copy_path",
             Filter => "filter",
             ClearFilter => "clear_filter",
+            JumpSearch => "jump_search",
             ZipMarked => "zip_marked",
             Unzip => "unzip",
             HistoryJump => "history_jump",

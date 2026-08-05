@@ -146,8 +146,11 @@ impl Keymap {
     /// pane's own browser-style back/forward stack (distinct from `S-h`'s
     /// persisted MRU menu), `c` duplicates the cursor entry under a new
     /// name in the same directory, `y` copies its absolute path to the
-    /// clipboard, `S-l` (capital `L`) opens the full in-memory log, and
-    /// `S-f` (capital `F`) opens the function-list command palette.
+    /// clipboard, `S-l` (capital `L`) opens the full in-memory log,
+    /// `S-f` (capital `F`) opens the function-list command palette, and
+    /// `\` opens prefix-jump search (pure cursor movement to the first
+    /// visible entry starting with what's typed — distinct from `f`/`/`'s
+    /// filter, which hides non-matching entries).
     pub fn defaults() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -189,6 +192,7 @@ impl Keymap {
             ("f", Filter),
             ("/", Filter),
             ("esc", ClearFilter),
+            ("\\", JumpSearch),
             ("p", ZipMarked),
             ("u", Unzip),
             ("h", Help),
@@ -322,13 +326,34 @@ impl Keymap {
         for (action, combos) in self.ordered_bindings() {
             let quoted = combos
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| quote_toml_string(c))
                 .collect::<Vec<_>>()
                 .join(", ");
             out.push_str(&format!("{} = [{quoted}]\n", action.config_name()));
         }
         out
     }
+}
+
+/// TOML-quotes `s` as a basic (non-literal) string: backslash and double-
+/// quote are the only two characters a combo notation string can ever
+/// contain that need escaping (e.g. `\` itself, the `jump_search` default
+/// binding — written unescaped, it would emit `["\"]`, which isn't valid
+/// TOML at all — the closing `"` reads as an escape of the array's own
+/// closing bracket). Combo notation never contains control characters, so
+/// this deliberately doesn't handle the full basic-string escape set.
+fn quote_toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Formats a combo back into (approximately) the same notation
@@ -960,6 +985,29 @@ mod tests {
     fn to_bindings_toml_starts_with_the_bindings_header() {
         let km = Keymap::defaults();
         assert!(km.to_bindings_toml().starts_with("[bindings]\n"));
+    }
+
+    #[test]
+    fn quote_toml_string_escapes_backslash_and_quote() {
+        // `\` is the literal default binding for `jump_search` — written
+        // unescaped inside a TOML basic string, a lone backslash isn't
+        // valid at all (and would in fact eat the closing quote).
+        assert_eq!(quote_toml_string("\\"), "\"\\\\\"");
+        assert_eq!(quote_toml_string("\""), "\"\\\"\"");
+        assert_eq!(quote_toml_string("r"), "\"r\"");
+    }
+
+    #[test]
+    fn to_bindings_toml_emits_valid_toml_for_the_backslash_binding() {
+        let km = Keymap::defaults();
+        let text = km.to_bindings_toml();
+        assert!(
+            text.contains("jump_search = [\"\\\\\"]"),
+            "expected an escaped backslash in the jump_search line: {text}"
+        );
+        // The whole document must still parse as TOML at all — this would
+        // fail outright with the pre-fix unescaped `["\"]`.
+        let _: toml::Value = toml::from_str(&text).unwrap();
     }
 
     #[test]
