@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use walkdir::WalkDir;
 
-use crate::event::TaskEvent;
+use super::TaskEvent;
 use crate::tasks::{
     CHUNK_SIZE, PROGRESS_MIN_INTERVAL, TaskId, Throttle, finish_cancelled, send_log,
 };

@@ -15,9 +15,7 @@ use directories::BaseDirs;
 use crate::action::Action;
 use crate::config::{self, Config, DeleteBehavior};
 use crate::entry::EntryKind;
-use crate::event::{
-    AppEvent, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, TaskEvent,
-};
+use crate::event::{AppEvent, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::external::{self, ExternalRequest};
 use crate::filter::FilterSpec;
 use crate::help::HelpLine;
@@ -32,7 +30,8 @@ use crate::persist::{Bookmarks, History, Side};
 use crate::search;
 use crate::settings::{self, Category};
 use crate::tasks::delete as delete_task;
-use crate::tasks::{TaskId, TaskManager, archive, copy_move};
+use crate::tasks::{TaskEvent, TaskId, TaskManager, archive, copy_move};
+use crate::ui::layout::PaneLayout;
 use crate::viewer;
 use crate::virtual_dir;
 
@@ -96,29 +95,47 @@ pub struct LogLine {
     /// When this line was appended (local time), captured once by
     /// `App::log_push` — never recomputed at render time, so the log
     /// area's rendering stays a pure function of already-stored data (see
-    /// `ui::log_view::format_timestamp_prefix`).
+    /// `crate::logwrap::format_timestamp_prefix`).
     pub timestamp: DateTime<Local>,
-    /// `ui::log_view::format_timestamp_prefix(timestamp)`, computed once
+    /// `crate::logwrap::format_timestamp_prefix(timestamp)`, computed once
     /// here by `LogLine::new` rather than by every `wrap_log_lines`/
     /// `wrap_log_lines_tail` call — with up to `LOG_CAPACITY` lines live,
     /// re-running `chrono`'s `format` on every one of them every frame the
     /// bottom log panel (or the full log view) draws was real, measurable
     /// per-frame cost for something that never changes after the line is
-    /// appended. `pub(crate)` (not `pub`): read directly by `ui::log_view`,
-    /// but never constructed outside `LogLine::new`, which is what keeps it
-    /// in sync with `timestamp`.
+    /// appended. `pub(crate)` (not `pub`): read directly by `ui::log_view`
+    /// (via the `logwrap::LoggableLine` impl below), but never constructed
+    /// outside `LogLine::new`, which is what keeps it in sync with
+    /// `timestamp`.
     pub(crate) formatted_timestamp: String,
 }
 
 impl LogLine {
     pub fn new(message: String, is_error: bool, timestamp: DateTime<Local>) -> Self {
-        let formatted_timestamp = crate::ui::log_view::format_timestamp_prefix(timestamp);
+        let formatted_timestamp = crate::logwrap::format_timestamp_prefix(timestamp);
         Self {
             message,
             is_error,
             timestamp,
             formatted_timestamp,
         }
+    }
+}
+
+/// Lets `crate::logwrap::wrap_log_lines`/`wrap_log_lines_tail` operate on
+/// `LogLine` without that module depending on `app` — see `logwrap`'s own
+/// doc comment for why the dependency runs this direction instead.
+impl crate::logwrap::LoggableLine for LogLine {
+    fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn is_error(&self) -> bool {
+        self.is_error
+    }
+
+    fn formatted_timestamp(&self) -> &str {
+        &self.formatted_timestamp
     }
 }
 
@@ -268,23 +285,6 @@ pub struct App {
 /// `width == 0` early return) if a `/`/`?` search somehow fired before
 /// `Mode::Log` ever rendered a single frame.
 const DEFAULT_LOG_VIEW_WIDTH: u16 = 80;
-
-/// One pane's on-screen geometry as of the last frame — just enough for
-/// mouse hit-testing to map a click's `(x, y)` back to "row N of this
-/// pane's visible entries" (see `hit_test_row`).
-#[derive(Debug, Clone, Copy)]
-pub struct PaneLayout {
-    /// The pane's full drawn area, borders included.
-    pub area: ratatui::layout::Rect,
-    /// The entry-list rows' area specifically (inside the border and any
-    /// header rows) — what `hit_test_row` actually maps `y` against.
-    pub rows_area: ratatui::layout::Rect,
-    /// Index of the first visible entry (`Pane::visible_entries()[start]`
-    /// is whatever's drawn at `rows_area`'s first row) — mirrors
-    /// `ui::pane_view`'s own `scroll_offset` so hit-testing agrees with
-    /// what's actually on screen.
-    pub start: usize,
-}
 
 /// Which pane a left-button drag is constrained to, and the drag's own
 /// running state. This is a "live rubber-band" range select: every `Drag`
@@ -485,6 +485,28 @@ impl App {
         self.panes[1].reload()?;
         self.needs_redraw = true;
         Ok(())
+    }
+
+    /// Applies this frame's on-screen geometry, as reported by
+    /// [`ui::draw`](crate::ui::draw) — called once per draw by `main.rs`'s
+    /// loop, right after `terminal.draw` returns. Split out from `draw`
+    /// itself (which returns a [`ui::LayoutFeedback`](crate::ui::LayoutFeedback)
+    /// rather than writing `pane_layout`/`log_view_width` directly) so that
+    /// no render function ever mutates `App`'s externally-visible state as
+    /// a side effect of drawing — see that struct's doc comment for the
+    /// full reasoning. Each field left `None` this frame (a Viewer/Help/Log/
+    /// Settings full-frame takeover doesn't touch pane geometry; only
+    /// `Mode::Log`'s takeover touches the log width) simply leaves the
+    /// corresponding `App` field at whatever it already was, the same
+    /// "stale until a relevant frame draws, harmless" behavior both fields
+    /// always had.
+    pub fn apply_layout_feedback(&mut self, feedback: crate::ui::LayoutFeedback) {
+        if let Some([left, right]) = feedback.panes {
+            self.pane_layout = [Some(left), Some(right)];
+        }
+        if let Some(width) = feedback.log_view_width {
+            self.log_view_width = width;
+        }
     }
 
     pub fn active_pane(&self) -> &Pane {
@@ -2050,7 +2072,7 @@ impl App {
             None => true,
         };
         if stale {
-            let wrapped = crate::ui::log_view::wrap_log_lines(self.log.iter(), width as usize);
+            let wrapped = crate::logwrap::wrap_log_lines(self.log.iter(), width as usize);
             self.log_wrap_cache = Some((self.log_generation, width, wrapped));
         }
         &self.log_wrap_cache.as_ref().unwrap().2

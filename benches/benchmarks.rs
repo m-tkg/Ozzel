@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use chrono::{Local, TimeZone};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ozzel::app::LogLine;
+use ozzel::logwrap::{wrap_log_lines, wrap_log_lines_tail};
 use ozzel::pane::{Pane, SortKey};
-use ozzel::ui::log_view::{wrap_log_lines, wrap_log_lines_tail};
 use ozzel::virtual_dir::{VirtualDir, read_archive_dir_entries};
 
 // --- Pane::visible_entries (directory read + sort) -------------------------
@@ -73,7 +73,7 @@ fn bench_pane_visible_entries_cached(c: &mut Criterion) {
     group.finish();
 }
 
-// --- ui::log_view::wrap_log_lines ------------------------------------------
+// --- logwrap::wrap_log_lines ------------------------------------------
 
 fn make_log_lines(count: usize) -> Vec<LogLine> {
     let base = Local.timestamp_opt(1_700_000_000, 0).unwrap();

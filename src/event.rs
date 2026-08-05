@@ -1,6 +1,10 @@
 //! Normalizes the raw terminal event stream into [`AppEvent`]. This is the
 //! single chokepoint for turning crossterm events into something the rest
-//! of the app understands.
+//! of the app understands — the only thing it depends on outside crossterm
+//! itself is [`crate::tasks::TaskEvent`], for `AppEvent::Task`'s payload
+//! (background-task progress/log/finish events, drained separately by
+//! `App::drain_tasks` and folded into this same enum so `App::handle_event`
+//! has one dispatch point for every kind of event, not two).
 
 use std::time::Duration;
 
@@ -10,28 +14,7 @@ pub use ratatui::crossterm::event::{
     KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use crate::tasks::TaskId;
-
-/// A message from a background task's worker thread back to the main
-/// thread, sent over the `mpsc::Sender<TaskEvent>` every `TaskManager::spawn`
-/// closure receives a clone of.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TaskEvent {
-    Progress {
-        id: TaskId,
-        done: u64,
-        total: u64,
-        detail: String,
-    },
-    Log {
-        id: TaskId,
-        line: String,
-    },
-    Finished {
-        id: TaskId,
-        result: Result<String, String>,
-    },
-}
+use crate::tasks::TaskEvent;
 
 /// Events fed into `App::handle_event`. `Task` events are drained from the
 /// `TaskManager`'s channel (see `App::drain_tasks`) ahead of every terminal

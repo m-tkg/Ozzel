@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
+use super::TaskEvent;
 use crate::config::DeleteBehavior;
-use crate::event::TaskEvent;
 use crate::tasks::{TaskId, finish_cancelled, send_log};
 
 /// Worker entry point for a delete task; matches the `TaskManager::spawn`

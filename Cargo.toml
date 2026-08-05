@@ -54,7 +54,6 @@ toml_edit = "0.25.13"
 trash = "5.2.6"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.0"
-ureq = { version = "2", features = ["tls"] }
 walkdir = "2.5.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
