@@ -7,7 +7,30 @@
 //! `ui::function_list_view` (for rendering), so both always agree on
 //! exactly which actions are listed and in what order.
 
+use std::sync::OnceLock;
+
 use crate::action::Action;
+
+/// `Action::ALL`'s config names/descriptions, lowercased once and cached —
+/// both are `&'static str`s baked into the binary, so there's nothing to
+/// invalidate. Without this, `filter_actions` re-lowercased all ~44
+/// actions' worth of strings on every single call, including calls that
+/// only re-render the palette (a cursor Up/Down, a blinking cursor) rather
+/// than actually changing the query.
+fn lowercase_haystacks() -> &'static [(String, String)] {
+    static TABLE: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        Action::ALL
+            .iter()
+            .map(|a| {
+                (
+                    a.config_name().to_lowercase(),
+                    a.description().to_lowercase(),
+                )
+            })
+            .collect()
+    })
+}
 
 /// Every action whose config name or description contains `query`
 /// (case-insensitive substring match); an empty query matches everything,
@@ -16,11 +39,11 @@ pub fn filter_actions(query: &str) -> Vec<Action> {
     let needle = query.to_lowercase();
     Action::ALL
         .into_iter()
-        .filter(|action| {
-            needle.is_empty()
-                || action.config_name().to_lowercase().contains(&needle)
-                || action.description().to_lowercase().contains(&needle)
+        .zip(lowercase_haystacks())
+        .filter(|(_, (name_lower, description_lower))| {
+            needle.is_empty() || name_lower.contains(&needle) || description_lower.contains(&needle)
         })
+        .map(|(action, _)| action)
         .collect()
 }
 

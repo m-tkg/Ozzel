@@ -14,16 +14,26 @@ use crate::app::App;
 use crate::mode::{Mode, SettingsEditor, SettingsScreen, TextField};
 use crate::settings::{self, Category};
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let Mode::Settings { screen } = &app.mode else {
         return;
     };
+    // Copied/cloned out of `screen` (ending its borrow of `app.mode`) before
+    // any call below, so `render_items` is free to borrow `app` mutably
+    // (it may populate `App::settings_keybinding_lines_cache`).
     match screen {
-        SettingsScreen::Categories { cursor } => render_categories(frame, area, *cursor),
-        SettingsScreen::Items { category, cursor } => {
-            render_items(frame, area, app, *category, *cursor);
+        SettingsScreen::Categories { cursor } => {
+            let cursor = *cursor;
+            render_categories(frame, area, cursor);
         }
-        SettingsScreen::Editor { editor, .. } => render_editor(frame, area, app, editor),
+        SettingsScreen::Items { category, cursor } => {
+            let (category, cursor) = (*category, *cursor);
+            render_items(frame, area, app, category, cursor);
+        }
+        SettingsScreen::Editor { editor, .. } => {
+            let editor = editor.clone();
+            render_editor(frame, area, app, &editor);
+        }
     }
 }
 
@@ -83,7 +93,7 @@ fn render_categories(frame: &mut Frame, area: Rect, cursor: usize) {
 /// here every frame from `cursor` and `total` alone, since a settings
 /// item list's cursor is a plain `usize` with no separate scroll-offset
 /// field to keep in sync.
-fn windowed_range(total: usize, cursor: usize, height: usize) -> std::ops::Range<usize> {
+pub(super) fn windowed_range(total: usize, cursor: usize, height: usize) -> std::ops::Range<usize> {
     if height == 0 || total == 0 {
         return 0..0;
     }
@@ -107,31 +117,45 @@ fn pad_label(label: &str, width: usize) -> String {
     out
 }
 
-fn render_items(frame: &mut Frame, area: Rect, app: &App, category: Category, cursor: usize) {
+/// Renders one category's item list. Only builds `ListItem`s for the rows
+/// actually on screen (`windowed_range`, computed from a total that's known
+/// up front for every category without touching per-item data) rather than
+/// formatting the entire list and throwing away everything outside the
+/// window — the Keybindings category in particular would otherwise call
+/// `settings::combos_for` (a full keymap scan) for all of `Action::ALL`
+/// every frame, not just the ~20 rows a normal terminal actually shows.
+fn render_items(frame: &mut Frame, area: Rect, app: &mut App, category: Category, cursor: usize) {
     let rows = frame_rows(area);
     render_title(frame, rows[0], &format!(" {}", category.label()));
 
-    let all_items: Vec<ListItem> = match category {
-        Category::Behavior => settings::BEHAVIOR_ITEMS
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
+    let total = match category {
+        Category::Behavior => settings::BEHAVIOR_ITEMS.len(),
+        Category::Colors => settings::COLOR_ITEMS.len(),
+        Category::Startup => settings::STARTUP_ITEMS.len(),
+        // "+ add new" is one synthetic extra slot past the real entries.
+        Category::Viewers => app.config.viewers.len() + 1,
+        Category::Keybindings => crate::action::Action::ALL.len(),
+    };
+    let window = windowed_range(total, cursor, rows[1].height as usize);
+
+    let visible: Vec<ListItem> = match category {
+        Category::Behavior => window
+            .map(|i| {
+                let item = &settings::BEHAVIOR_ITEMS[i];
                 let value = settings::item_value_display(category, item, &app.config);
                 list_item(format!(" {}{value}", pad_label(item.label, 4)), i == cursor)
             })
             .collect(),
-        Category::Colors => settings::COLOR_ITEMS
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
+        Category::Colors => window
+            .map(|i| {
+                let item = &settings::COLOR_ITEMS[i];
                 let value = settings::item_value_display(category, item, &app.config);
                 list_item(format!(" {}{value}", pad_label(item.label, 4)), i == cursor)
             })
             .collect(),
-        Category::Startup => settings::STARTUP_ITEMS
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
+        Category::Startup => window
+            .map(|i| {
+                let item = &settings::STARTUP_ITEMS[i];
                 let value = settings::item_value_display(category, item, &app.config);
                 list_item(format!(" {}{value}", pad_label(item.label, 4)), i == cursor)
             })
@@ -142,38 +166,24 @@ fn render_items(frame: &mut Frame, area: Rect, app: &App, category: Category, cu
                 ext.sort();
                 ext
             };
-            let mut items: Vec<ListItem> = extensions
-                .iter()
-                .enumerate()
-                .map(|(i, ext)| {
-                    let command = app.config.viewers.get(ext).cloned().unwrap_or_default();
-                    list_item(format!(" .{ext:<10} -> {command}"), i == cursor)
+            window
+                .map(|i| match extensions.get(i) {
+                    Some(ext) => {
+                        let command = app.config.viewers.get(ext).cloned().unwrap_or_default();
+                        list_item(format!(" .{ext:<10} -> {command}"), i == cursor)
+                    }
+                    // The synthetic "+ add new" slot, one past the real entries.
+                    None => list_item(" + add new".to_string(), i == cursor),
                 })
-                .collect();
-            items.push(list_item(
-                " + add new".to_string(),
-                cursor == extensions.len(),
-            ));
-            items
+                .collect()
         }
-        Category::Keybindings => crate::action::Action::ALL
-            .iter()
-            .enumerate()
-            .map(|(i, action)| {
-                let combos = settings::combos_for(&app.keymap, *action).join(", ");
-                list_item(
-                    format!(" {:<20} {combos}", action.config_name()),
-                    i == cursor,
-                )
-            })
-            .collect(),
+        Category::Keybindings => {
+            let lines = app.settings_keybinding_lines();
+            window
+                .map(|i| list_item(lines[i].clone(), i == cursor))
+                .collect()
+        }
     };
-    let window = windowed_range(all_items.len(), cursor, rows[1].height as usize);
-    let visible: Vec<ListItem> = all_items
-        .into_iter()
-        .skip(window.start)
-        .take(window.len())
-        .collect();
     frame.render_widget(List::new(visible), rows[1]);
 
     let footer = match category {
@@ -442,7 +452,7 @@ mod tests {
         .unwrap()
     }
 
-    fn render_to_string(app: &App) -> String {
+    fn render_to_string(app: &mut App) -> String {
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -475,7 +485,7 @@ mod tests {
         app.mode = Mode::Settings {
             screen: SettingsScreen::Categories { cursor: 0 },
         };
-        let screen = render_to_string(&app);
+        let screen = render_to_string(&mut app);
         for category in Category::ALL {
             assert!(screen.contains(category.label()), "{screen}");
         }
@@ -490,7 +500,7 @@ mod tests {
                 cursor: 0,
             },
         };
-        let screen = render_to_string(&app);
+        let screen = render_to_string(&mut app);
         assert!(screen.contains("ON"), "{screen}");
     }
 
@@ -510,7 +520,7 @@ mod tests {
                 cursor: settings_index,
             },
         };
-        let screen = render_to_string(&app);
+        let screen = render_to_string(&mut app);
         assert!(screen.contains("settings"), "{screen}");
     }
 
@@ -524,7 +534,7 @@ mod tests {
                 cursor: last_index,
             },
         };
-        let screen = render_to_string(&app);
+        let screen = render_to_string(&mut app);
         let last_action = crate::action::Action::ALL[last_index];
         assert!(screen.contains(last_action.config_name()), "{screen}");
     }
@@ -542,7 +552,7 @@ mod tests {
                 },
             },
         };
-        let screen = render_to_string(&app);
+        let screen = render_to_string(&mut app);
         assert!(screen.contains("nvim"), "{screen}");
     }
 
@@ -565,7 +575,7 @@ mod tests {
                 },
             },
         };
-        let screen = render_to_string(&app);
+        let screen = render_to_string(&mut app);
         assert!(screen.contains("rename"), "{screen}");
         assert!(screen.contains("mkdir"), "{screen}");
     }

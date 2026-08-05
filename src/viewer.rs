@@ -176,7 +176,10 @@ pub fn format_hex_lines(bytes: &[u8]) -> Vec<String> {
 /// or matching nothing. Never stored on `Mode` itself (see
 /// `crate::mode::ViewerSearch::Active`'s doc comment for why) — built on
 /// demand from the plain `pattern: String` it carries instead, both when
-/// running/advancing a search and when rendering highlights.
+/// running/advancing a search and when rendering highlights. Compiled once
+/// by `crate::search::run` and cached on `ViewerSearch::Active` behind an
+/// `Rc` (see its doc comment) rather than rebuilt every render frame.
+#[derive(Debug)]
 pub enum Matcher {
     Regex(Regex),
     /// Already lowercased, so `is_match`/`find_ranges` don't have to
