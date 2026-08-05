@@ -269,8 +269,14 @@ impl Pane {
     }
 
     /// Enter acts on whatever is under the cursor: `..` goes to the parent
-    /// (see [`Pane::go_parent`]), a directory descends into it, anything
-    /// else (file, symlink) is a no-op for now.
+    /// (see [`Pane::go_parent`]), a directory — or a symlink resolving to
+    /// one, see [`crate::entry::FsEntry::is_dir_like`] — descends into it,
+    /// anything else (file, file-symlink, dangling symlink) is a no-op
+    /// here (`App::begin_open` handles those before ever calling `enter`).
+    /// Descending into a directory-symlink uses the link's own path
+    /// verbatim (`e.path`, never canonicalized) as the new `cwd` — so
+    /// `/a/link` stays `/a/link`, and `go_parent` naturally lands back on
+    /// `/a` afterward, with the cursor restored onto `link` itself.
     pub fn enter(&mut self) -> Result<()> {
         enum Target {
             Parent,
@@ -280,9 +286,7 @@ impl Pane {
 
         let target = match self.visible_entries().get(self.cursor) {
             Some(VisibleItem::Parent) => Target::Parent,
-            Some(VisibleItem::Entry(e)) if e.kind == EntryKind::Dir => {
-                Target::Descend(e.path.clone())
-            }
+            Some(VisibleItem::Entry(e)) if e.is_dir_like() => Target::Descend(e.path.clone()),
             _ => Target::None,
         };
 
@@ -482,6 +486,23 @@ impl Pane {
         }
     }
 
+    /// Whether the cursor is on something `Enter`/`o` should *navigate*
+    /// into rather than open as a file — a real directory, or a symlink
+    /// resolving to one (`FsEntry::is_dir_like`). `None` for `..`/empty
+    /// (the caller, `App::begin_open`, always treats `..` as navigable
+    /// regardless — see `Pane::enter`). Deliberately distinct from
+    /// `selected_entry_kind`, which stays the link's own *raw* kind: this
+    /// one is purely a navigation/display decision, never consulted by any
+    /// file operation (copy/move/delete/duplicate/zip always re-stat with
+    /// `fs::symlink_metadata` independently — see `FsEntry::symlink_target`'s
+    /// doc comment).
+    pub fn selected_entry_is_dir_like(&self) -> Option<bool> {
+        match self.visible_entries().get(self.cursor) {
+            Some(VisibleItem::Entry(e)) => Some(e.is_dir_like()),
+            _ => None,
+        }
+    }
+
     /// Indices (into `visible_entries()`) of every real entry whose name
     /// starts with `prefix`, case-insensitive, in display order — `..` is
     /// never a match. Used by prefix-jump search (`\`, `Mode::JumpSearch`)
@@ -613,12 +634,13 @@ impl Pane {
     }
 }
 
-/// Sort comparator: directories are always grouped before files/symlinks
+/// Sort comparator: directories — and directory-symlinks, see
+/// `FsEntry::is_dir_like` — are always grouped before files/file-symlinks
 /// regardless of `sort`/`ascending`, then the requested key breaks ties,
 /// with name as a final deterministic tiebreaker.
 fn compare_entries(a: &FsEntry, b: &FsEntry, sort: SortKey, ascending: bool) -> Ordering {
-    let a_is_dir = a.kind == EntryKind::Dir;
-    let b_is_dir = b.kind == EntryKind::Dir;
+    let a_is_dir = a.is_dir_like();
+    let b_is_dir = b.is_dir_like();
     if a_is_dir != b_is_dir {
         return if a_is_dir {
             Ordering::Less
@@ -665,6 +687,16 @@ mod tests {
             unix_mode: None,
             readonly: false,
             is_executable: false,
+            symlink_target: None,
+        }
+    }
+
+    /// A symlink entry resolving to `target` — see `entry` for the
+    /// non-symlink case.
+    fn symlink_entry(name: &str, target: crate::entry::SymlinkTarget) -> FsEntry {
+        FsEntry {
+            symlink_target: Some(target),
+            ..entry(name, EntryKind::Symlink, 0, 1)
         }
     }
 
@@ -687,6 +719,32 @@ mod tests {
                 "dir should sort before file even when descending, for {sort:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_directory_symlink_sorts_with_real_directories_not_files() {
+        let file_a = entry("a.txt", EntryKind::File, 100, 5);
+        let link = symlink_entry("z_link", crate::entry::SymlinkTarget::Dir);
+
+        for sort in [SortKey::Name, SortKey::Size, SortKey::MTime, SortKey::Ext] {
+            assert_eq!(
+                compare_entries(&link, &file_a, sort, true),
+                Ordering::Less,
+                "a directory-symlink should sort before a file for {sort:?}, same as a real directory"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_symlink_sorts_with_files_not_directories() {
+        let dir_z = entry("z_dir", EntryKind::Dir, 0, 1);
+        let link = symlink_entry("a_link", crate::entry::SymlinkTarget::File);
+
+        assert_eq!(
+            compare_entries(&dir_z, &link, SortKey::Name, true),
+            Ordering::Less,
+            "a real directory should still sort before a file-symlink"
+        );
     }
 
     #[test]
@@ -769,6 +827,78 @@ mod tests {
             pane.cursor_memory.get(dir.path()).map(String::as_str),
             Some("bbb")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn entering_a_directory_symlink_descends_using_the_links_own_path_not_the_target() {
+        // /dir/real_target and /dir/link_to_target (-> real_target), plus
+        // a file inside the target so the listing after descending is
+        // verifiable.
+        let dir = tempfile::tempdir().unwrap();
+        let real_target = dir.path().join("real_target");
+        fs::create_dir(&real_target).unwrap();
+        fs::write(real_target.join("inside.txt"), b"hi").unwrap();
+        let link = dir.path().join("link_to_target");
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        let link_idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == "link_to_target"))
+            .unwrap();
+        pane.cursor = link_idx;
+        pane.enter().unwrap();
+
+        // `cwd` is the link's own path verbatim — never canonicalized to
+        // `real_target`.
+        assert_eq!(pane.cwd, link);
+        assert_ne!(pane.cwd, real_target);
+        // `fs::read_dir` follows the final symlink automatically, so the
+        // listing still shows what's actually inside the target.
+        assert!(
+            pane.visible_entries()
+                .iter()
+                .any(|item| matches!(item, VisibleItem::Entry(e) if e.name == "inside.txt")),
+            "listing after descending into a directory-symlink must show the target's contents"
+        );
+
+        // Backspace naturally returns to the link's own parent — a plain
+        // `Path::parent()` on `/dir/link_to_target` is `/dir`, regardless
+        // of what the link points to.
+        pane.go_parent().unwrap();
+        assert_eq!(pane.cwd, dir.path());
+        match pane.visible_entries().get(pane.cursor) {
+            Some(VisibleItem::Entry(e)) => assert_eq!(e.name, "link_to_target"),
+            other => panic!("expected cursor to rest on link_to_target, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn entering_a_dangling_symlink_or_a_file_symlink_does_not_navigate() {
+        let dir = tempfile::tempdir().unwrap();
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+        let target = dir.path().join("target.txt");
+        fs::write(&target, b"hi").unwrap();
+        let file_link = dir.path().join("file_link");
+        std::os::unix::fs::symlink(&target, &file_link).unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        let cwd_before = pane.cwd.clone();
+
+        for name in ["dangling", "file_link"] {
+            let idx = pane
+                .visible_entries()
+                .iter()
+                .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == name))
+                .unwrap();
+            pane.cursor = idx;
+            pane.enter().unwrap();
+            assert_eq!(pane.cwd, cwd_before, "{name} must not navigate");
+        }
     }
 
     #[test]

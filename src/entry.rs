@@ -8,12 +8,24 @@ use anyhow::{Context, Result};
 /// What kind of filesystem object an [`FsEntry`] refers to. Symlinks are
 /// their own kind (never resolved to their target) so that callers can
 /// decide how to treat them without accidentally following a link during
-/// browsing, copy, or delete.
+/// browsing, copy, or delete. See [`FsEntry::symlink_target`] for what a
+/// symlink's target actually resolves to, kept separate from this so file
+/// operations (copy/move/delete/duplicate/zip) — which must *never* follow
+/// a link — can keep branching on the raw, unresolved `kind` alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     Dir,
     File,
     Symlink,
+}
+
+/// What a symlink's target resolves to, following the *entire* chain the
+/// way `fs::metadata` does (so a symlink to a symlink to a directory still
+/// resolves to `Dir`). See [`FsEntry::symlink_target`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymlinkTarget {
+    Dir,
+    File,
 }
 
 /// A single row a directory listing can show.
@@ -41,19 +53,60 @@ pub struct FsEntry {
     /// extension against a small PATHEXT-ish set (`is_executable_windows`).
     /// Directories are never executable regardless of platform.
     pub is_executable: bool,
+    /// For a symlink entry (`kind == EntryKind::Symlink`) only: what its
+    /// target resolves to — `None` for a dangling symlink (target doesn't
+    /// exist / can't be stat'd), and trivially `None` for any non-symlink
+    /// entry too. Costs one extra `fs::metadata` call (which *does*
+    /// follow) per symlink, never per entry — see `read_dir_entries`.
+    ///
+    /// This is what lets a directory-symlink behave like a directory
+    /// everywhere in navigation/display (`FsEntry::is_dir_like`,
+    /// `pane::compare_entries`'s sort grouping, `ui::pane_view`'s color/
+    /// size column, `App::begin_open`'s descend-vs-view dispatch) while
+    /// `kind` itself stays the link's own, unresolved kind — file
+    /// operations (copy/move/delete/duplicate/zip, see
+    /// `tasks::copy_move`/`tasks::delete`/`tasks::archive`) independently
+    /// re-stat with `fs::symlink_metadata` (no follow) and never even look
+    /// at this field, so they keep operating on the link itself,
+    /// unconditionally, regardless of what it points to.
+    pub symlink_target: Option<SymlinkTarget>,
 }
 
-/// unix executable detection: any owner/group/other `x` bit set, on a
-/// regular file specifically — deliberately narrower than "not a
-/// directory" (symlinks are excluded too): `read_dir_entries` captures a
-/// symlink's *own* metadata (never the target's, per this module's
-/// no-follow policy), and a symlink's mode bits are conventionally `777`
-/// on Linux regardless of what they point to, which would make the
-/// `executable` color meaningless noise on every symlink rather than a
-/// useful signal.
+impl FsEntry {
+    /// Whether this entry should be treated as a directory for
+    /// navigation/sorting/coloring purposes: a real directory, or a
+    /// symlink whose target resolves to one. `false` for a dangling
+    /// symlink or a symlink-to-a-file, same as a plain file.
+    pub fn is_dir_like(&self) -> bool {
+        self.kind == EntryKind::Dir || self.symlink_target == Some(SymlinkTarget::Dir)
+    }
+}
+
+/// unix executable detection: any owner/group/other `x` bit set.
+/// - A regular file: checked against its own mode bits (`own_mode`).
+/// - A symlink whose target resolves to a regular file
+///   (`symlink_target == Some(SymlinkTarget::File)`): checked against the
+///   *target's* mode bits (`target_mode`) instead — a symlink's own mode
+///   bits are conventionally `777` on Linux regardless of what they point
+///   to, which would make the `executable` color meaningless noise
+///   otherwise; using the target's real mode is what makes it a useful
+///   signal again.
+/// - Anything else (a directory, a directory-symlink, a dangling
+///   symlink): never executable.
 #[cfg(unix)]
-fn is_executable_unix(kind: EntryKind, mode: u32) -> bool {
-    kind == EntryKind::File && mode & 0o111 != 0
+fn is_executable_unix(
+    kind: EntryKind,
+    own_mode: u32,
+    symlink_target: Option<SymlinkTarget>,
+    target_mode: Option<u32>,
+) -> bool {
+    match (kind, symlink_target) {
+        (EntryKind::File, _) => own_mode & 0o111 != 0,
+        (EntryKind::Symlink, Some(SymlinkTarget::File)) => {
+            target_mode.is_some_and(|m| m & 0o111 != 0)
+        }
+        _ => false,
+    }
 }
 
 /// Windows executable detection: a regular file whose extension is one of
@@ -81,8 +134,13 @@ fn is_hidden_name(name: &str) -> bool {
 }
 
 /// Reads the immediate children of `path` into [`FsEntry`] rows. Does not
-/// recurse and does not follow symlinks (a symlinked directory is reported
-/// as [`EntryKind::Symlink`], not [`EntryKind::Dir`]).
+/// recurse and does not follow symlinks for its *own* kind/metadata (a
+/// symlinked directory is reported as [`EntryKind::Symlink`], not
+/// [`EntryKind::Dir`]) — but does additionally resolve each symlink's
+/// *target* kind into [`FsEntry::symlink_target`] (one extra, following
+/// `fs::metadata` call per symlink, never per entry) so callers can treat
+/// a directory-symlink like a directory without this module ever
+/// conflating "what the link itself is" with "what it points to".
 pub fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>> {
     let read_dir = std::fs::read_dir(path)
         .with_context(|| format!("failed to read directory: {}", path.display()))?;
@@ -111,11 +169,32 @@ pub fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>> {
             .metadata()
             .with_context(|| format!("failed to stat: {}", entry_path.display()))?;
 
+        // The one extra, *following* stat — only for symlinks, never for a
+        // plain file/dir. `Ok` and non-dangling -> `Some`; a broken link
+        // (or any other resolution failure) simply leaves this `None`,
+        // which is exactly "neither navigable nor viewable" downstream.
+        let target_metadata = if kind == EntryKind::Symlink {
+            std::fs::metadata(&entry_path).ok()
+        } else {
+            None
+        };
+        let symlink_target = target_metadata.as_ref().map(|m| {
+            if m.is_dir() {
+                SymlinkTarget::Dir
+            } else {
+                SymlinkTarget::File
+            }
+        });
+
         #[cfg(unix)]
         let (unix_mode, is_executable) = {
             use std::os::unix::fs::PermissionsExt;
-            let mode = metadata.permissions().mode();
-            (Some(mode), is_executable_unix(kind, mode))
+            let own_mode = metadata.permissions().mode();
+            let target_mode = target_metadata.as_ref().map(|m| m.permissions().mode());
+            (
+                Some(own_mode),
+                is_executable_unix(kind, own_mode, symlink_target, target_mode),
+            )
         };
         #[cfg(not(unix))]
         let (unix_mode, is_executable): (Option<u32>, bool) =
@@ -131,6 +210,7 @@ pub fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>> {
             unix_mode,
             readonly: metadata.permissions().readonly(),
             is_executable,
+            symlink_target,
         });
     }
 
@@ -223,5 +303,103 @@ mod tests {
         let entries = read_dir_entries(dir.path()).unwrap();
         let link_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
         assert_eq!(link_entry.kind, EntryKind::Symlink);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_a_directory_resolves_target_kind_dir_and_is_dir_like() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_dir");
+        fs::create_dir(&real_dir).unwrap();
+        let link = dir.path().join("link_to_dir");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let entries = read_dir_entries(dir.path()).unwrap();
+        let link_entry = entries.iter().find(|e| e.name == "link_to_dir").unwrap();
+        assert_eq!(link_entry.kind, EntryKind::Symlink);
+        assert_eq!(link_entry.symlink_target, Some(SymlinkTarget::Dir));
+        assert!(link_entry.is_dir_like());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_a_file_resolves_target_kind_file_and_is_not_dir_like() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        fs::write(&target, b"hi").unwrap();
+        let link = dir.path().join("link_to_file");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let entries = read_dir_entries(dir.path()).unwrap();
+        let link_entry = entries.iter().find(|e| e.name == "link_to_file").unwrap();
+        assert_eq!(link_entry.symlink_target, Some(SymlinkTarget::File));
+        assert!(!link_entry.is_dir_like());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_resolves_to_no_target_and_is_not_dir_like() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("does_not_exist"), &link).unwrap();
+
+        let entries = read_dir_entries(dir.path()).unwrap();
+        let link_entry = entries.iter().find(|e| e.name == "dangling").unwrap();
+        assert_eq!(link_entry.kind, EntryKind::Symlink);
+        assert_eq!(link_entry.symlink_target, None);
+        assert!(!link_entry.is_dir_like());
+        assert!(!link_entry.is_executable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_an_executable_file_is_colored_executable_by_target_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run.sh");
+        fs::write(&script, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.path().join("link_to_script");
+        std::os::unix::fs::symlink(&script, &link).unwrap();
+
+        let entries = read_dir_entries(dir.path()).unwrap();
+        let link_entry = entries.iter().find(|e| e.name == "link_to_script").unwrap();
+        assert!(
+            link_entry.is_executable,
+            "a file-symlink's executable color must follow the target's mode, \
+             not the link's own (conventionally 777) mode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_a_non_executable_file_is_not_colored_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("plain.txt");
+        fs::write(&target, b"hi").unwrap();
+        let link = dir.path().join("link_to_plain");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let entries = read_dir_entries(dir.path()).unwrap();
+        let link_entry = entries.iter().find(|e| e.name == "link_to_plain").unwrap();
+        assert!(!link_entry.is_executable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_a_directory_is_never_colored_executable_even_if_target_dir_is_searchable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_dir");
+        fs::create_dir(&real_dir).unwrap();
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.path().join("link_to_dir");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let entries = read_dir_entries(dir.path()).unwrap();
+        let link_entry = entries.iter().find(|e| e.name == "link_to_dir").unwrap();
+        assert!(!link_entry.is_executable);
     }
 }

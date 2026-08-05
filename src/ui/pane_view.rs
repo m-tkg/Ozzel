@@ -153,12 +153,9 @@ pub fn render(
             let text = format_row(item, inner.width as usize, marked, show_perms_col);
             let type_color = match item {
                 VisibleItem::Parent => None,
-                VisibleItem::Entry(e) => entry_type_color(
-                    e.kind == EntryKind::Dir,
-                    e.is_hidden,
-                    e.is_executable,
-                    colors,
-                ),
+                VisibleItem::Entry(e) => {
+                    entry_type_color(e.is_dir_like(), e.is_hidden, e.is_executable, colors)
+                }
             };
             let style = row_style(idx == cursor, marked, dim, cursor_color, type_color);
             ListItem::new(Line::styled(text, style))
@@ -375,14 +372,26 @@ fn format_row(item: &VisibleItem<'_>, width: usize, marked: bool, show_perms_col
             " ".repeat(PERMS_COL_WIDTH),
         ),
         VisibleItem::Entry(e) => {
-            let size_text = if e.kind == EntryKind::Dir {
+            let size_text = if e.is_dir_like() {
                 "<DIR>".to_string()
             } else {
                 human_size(e.size)
             };
             let mtime_text = e.mtime.map(format_mtime).unwrap_or_default();
             let perms_text = format_permissions(e.kind, e.unix_mode, e.readonly);
-            (e.name.clone(), size_text, mtime_text, perms_text)
+            // `ls -F`'s convention: a trailing `@` marks a symlink,
+            // regardless of what it resolves to — the size column/color
+            // (both driven by `is_dir_like`) already say "this behaves
+            // like a directory"; this says "...but it's actually a link"
+            // (dangling or not). Appended only for display — `e.name`
+            // itself (sorting, filtering, prefix-jump, rename prefill,
+            // marks-by-path) never sees this suffix.
+            let name = if e.kind == EntryKind::Symlink {
+                format!("{}@", e.name)
+            } else {
+                e.name.clone()
+            };
+            (name, size_text, mtime_text, perms_text)
         }
     };
 
@@ -755,6 +764,7 @@ mod tests {
             unix_mode,
             readonly,
             is_executable: true,
+            symlink_target: None,
         };
         let item = VisibleItem::Entry(&entry);
         let expected_perms = format_permissions(EntryKind::File, unix_mode, readonly);
@@ -765,5 +775,83 @@ mod tests {
         assert!(!without.contains(&expected_perms));
         assert_eq!(UnicodeWidthStr::width(with.as_str()), 60);
         assert_eq!(UnicodeWidthStr::width(without.as_str()), 60);
+    }
+
+    fn symlink_entry(name: &str, target: crate::entry::SymlinkTarget) -> FsEntry {
+        use std::path::PathBuf;
+        FsEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            kind: EntryKind::Symlink,
+            size: 11,
+            mtime: None,
+            is_hidden: false,
+            unix_mode: None,
+            readonly: false,
+            is_executable: false,
+            symlink_target: Some(target),
+        }
+    }
+
+    #[test]
+    fn format_row_shows_dir_size_for_a_directory_symlink_and_appends_the_link_marker() {
+        let entry = symlink_entry("mylink", crate::entry::SymlinkTarget::Dir);
+        let row = format_row(&VisibleItem::Entry(&entry), 60, false, false);
+        assert!(row.contains("<DIR>"), "row: {row:?}");
+        assert!(row.contains("mylink@"), "row: {row:?}");
+    }
+
+    #[test]
+    fn format_row_shows_human_size_for_a_file_symlink_and_still_appends_the_link_marker() {
+        let entry = symlink_entry("mylink", crate::entry::SymlinkTarget::File);
+        let row = format_row(&VisibleItem::Entry(&entry), 60, false, false);
+        assert!(!row.contains("<DIR>"), "row: {row:?}");
+        assert!(row.contains("mylink@"), "row: {row:?}");
+    }
+
+    #[test]
+    fn format_row_never_appends_the_link_marker_to_a_real_directory_or_file() {
+        let dir = entry_for_test("adir", EntryKind::Dir);
+        let file = entry_for_test("afile.txt", EntryKind::File);
+        assert!(!format_row(&VisibleItem::Entry(&dir), 60, false, false).contains('@'));
+        assert!(!format_row(&VisibleItem::Entry(&file), 60, false, false).contains('@'));
+    }
+
+    fn entry_for_test(name: &str, kind: EntryKind) -> FsEntry {
+        use std::path::PathBuf;
+        FsEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            kind,
+            size: 0,
+            mtime: None,
+            is_hidden: false,
+            unix_mode: None,
+            readonly: false,
+            is_executable: false,
+            symlink_target: None,
+        }
+    }
+
+    #[test]
+    fn entry_type_color_treats_a_directory_symlink_like_a_directory() {
+        let colors = PaneColors {
+            cursor: Color::White,
+            cursor_inactive: Color::Gray,
+            dim_inactive: false,
+            directory: Color::Blue,
+            hidden: Color::DarkGray,
+            executable: Color::Green,
+        };
+        let link = symlink_entry("mylink", crate::entry::SymlinkTarget::Dir);
+        assert_eq!(
+            entry_type_color(
+                link.is_dir_like(),
+                link.is_hidden,
+                link.is_executable,
+                colors
+            ),
+            Some(Color::Blue)
+        );
     }
 }

@@ -231,17 +231,33 @@ fn hit_test_row(layout: &PaneLayout, x: u16, y: u16) -> Option<usize> {
 
 /// Looks up `path`'s extension (lowercased, dot stripped — matching the
 /// documented `[viewers]` key format) in `viewers`, returning the command
-/// template to run instead of the built-in viewer. `None` for a path with
-/// no extension, or one whose extension has no configured entry — either
-/// way `App::begin_open` falls back to the built-in viewer. A free
-/// function (rather than a method) purely so it's directly unit-testable
-/// without constructing an `App`.
+/// template to run instead of the built-in viewer. Falls back to
+/// `fallback_target`'s extension (a symlink's resolved target — see
+/// `App::begin_open`) when `path`'s own extension has no configured entry,
+/// so `mylink` (no extension) pointing at `notes.md` still picks up an
+/// `md` viewer, while `mylink.txt -> notes.md` still prefers the link's
+/// own `txt` entry if one exists. `None` when neither has a match (or
+/// neither has an extension at all) — either way `App::begin_open` falls
+/// back to the built-in viewer. A free function (rather than a method)
+/// purely so it's directly unit-testable without constructing an `App`.
 fn extension_viewer_command(
     viewers: &std::collections::HashMap<String, String>,
     path: &Path,
+    fallback_target: Option<&Path>,
 ) -> Option<String> {
-    let ext = path.extension()?.to_str()?.to_lowercase();
-    viewers.get(&ext).cloned()
+    extension_key(path)
+        .and_then(|ext| viewers.get(&ext).cloned())
+        .or_else(|| {
+            fallback_target
+                .and_then(extension_key)
+                .and_then(|ext| viewers.get(&ext).cloned())
+        })
+}
+
+/// `path`'s extension, lowercased — the `[viewers]` key format. `None` for
+/// a path with none.
+fn extension_key(path: &Path) -> Option<String> {
+    Some(path.extension()?.to_str()?.to_lowercase())
 }
 
 /// Appends one `LogLine` (capacity-capped, timestamped `Local::now()`) to
@@ -1008,17 +1024,31 @@ impl App {
     fn begin_open(&mut self) {
         let pane = self.active_pane();
         let is_virtual = pane.is_virtual();
-        // `..`/directories navigate (via `Pane::enter`, which already
-        // handles both — and is a safe no-op on an empty pane); anything
-        // else with a real kind (file, symlink) opens instead.
-        let open_path = match pane.selected_entry_kind() {
-            Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
+        // `..`/directories — and directory-symlinks, see
+        // `FsEntry::is_dir_like` — navigate (via `Pane::enter`, which
+        // already handles both, and is a safe no-op on an empty pane);
+        // anything else (file, file-symlink, dangling symlink) opens
+        // instead.
+        let selected_kind = pane.selected_entry_kind();
+        let open_path = match pane.selected_entry_is_dir_like() {
+            Some(false) => pane.selected_entry_path(),
             _ => None,
         };
         let archive_path = pane.virtual_dir.as_ref().map(|vd| vd.archive_path.clone());
-        let viewer_cmd = open_path
-            .as_ref()
-            .and_then(|path| extension_viewer_command(&self.config.viewers, path));
+        // A file-symlink's `[viewers]` lookup tries the *link's* name
+        // extension first (`open_path`, same as any other entry) and only
+        // falls back to the target's extension if that doesn't match
+        // anything — see `extension_viewer_command`. Resolving the target
+        // only costs a `canonicalize` call, and only for a symlink whose
+        // `open_path` is even present (a dangling one has none to resolve
+        // anyway, and `canonicalize` on it would just fail harmlessly).
+        let fallback_ext_target = match (selected_kind, &open_path) {
+            (Some(EntryKind::Symlink), Some(path)) => std::fs::canonicalize(path).ok(),
+            _ => None,
+        };
+        let viewer_cmd = open_path.as_ref().and_then(|path| {
+            extension_viewer_command(&self.config.viewers, path, fallback_ext_target.as_deref())
+        });
 
         match open_path {
             Some(inner_path) if is_virtual => {
@@ -1197,8 +1227,10 @@ impl App {
             return;
         }
         let pane = self.active_pane();
-        let target = match pane.selected_entry_kind() {
-            Some(kind) if kind != EntryKind::Dir => pane.selected_entry_path(),
+        // Same navigate-vs-open split as `begin_open`: a directory-symlink
+        // is "not a file" here too, just like a real directory.
+        let target = match pane.selected_entry_is_dir_like() {
+            Some(false) => pane.selected_entry_path(),
             _ => None,
         };
         let Some(path) = target else {
@@ -3121,6 +3153,88 @@ mod tests {
         assert_eq!(std::fs::read(right.path().join("a.txt")).unwrap(), b"new");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn copying_a_directory_symlink_copies_the_link_itself_not_the_target_tree() {
+        // The core safety asymmetry this round is about: navigation
+        // follows a directory-symlink, but every file operation
+        // (copy/move/delete/duplicate/zip) must keep treating it as a
+        // link, never as the directory it resolves to.
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        let real_dir = left.path().join("real_dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("inside.txt"), b"hi").unwrap();
+        let link = left.path().join("link_to_dir");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let mut app = App::new(
+            left.path().to_path_buf(),
+            right.path().to_path_buf(),
+            Config {
+                confirm_operations: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "link_to_dir");
+
+        app.dispatch(Action::Copy);
+        wait_for_tasks_done(&mut app);
+
+        let dest = right.path().join("link_to_dir");
+        let dest_meta = std::fs::symlink_metadata(&dest)
+            .expect("destination must exist (as a symlink, not a directory tree)");
+        assert!(
+            dest_meta.is_symlink(),
+            "copying a directory-symlink must produce another symlink at the \
+             destination, not a recursively-copied directory tree"
+        );
+        assert_eq!(
+            std::fs::read_link(&dest).unwrap(),
+            real_dir,
+            "the copied symlink must point at the same target, not have been \
+             dereferenced and re-copied as a fresh tree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_directory_symlink_removes_only_the_link_leaving_the_target_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("inside.txt"), b"hi").unwrap();
+        let link = dir.path().join("link_to_dir");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Permanent,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "link_to_dir");
+
+        app.dispatch(Action::Delete);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "the link itself must be gone"
+        );
+        assert!(
+            real_dir.join("inside.txt").exists(),
+            "deleting the link must never touch the target it pointed to"
+        );
+    }
+
     #[test]
     fn two_concurrent_transfers_both_complete() {
         let left = tempfile::tempdir().unwrap();
@@ -3713,6 +3827,77 @@ mod tests {
             }
             other => panic!("expected Mode::Viewer, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_on_a_directory_symlink_navigates_instead_of_opening_the_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link = dir.path().join("link_to_dir");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "link_to_dir");
+
+        app.dispatch(Action::Open);
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "must navigate, not open a viewer"
+        );
+        assert_eq!(
+            app.active_pane().cwd,
+            link,
+            "cwd must be the link's own path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_on_a_file_symlink_opens_the_viewer_on_the_targets_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "hello through the link").unwrap();
+        let link = dir.path().join("link_to_file.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "link_to_file.txt");
+
+        app.dispatch(Action::Open);
+        match &app.mode {
+            Mode::Viewer { path, lines, .. } => {
+                // The viewer opens the *link's* path (reading through it
+                // transparently follows to the target's bytes — no path
+                // substitution needed).
+                assert_eq!(path, &link);
+                assert_eq!(lines, &vec!["hello through the link".to_string()]);
+            }
+            other => panic!("expected Mode::Viewer, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_on_a_dangling_symlink_logs_an_error_instead_of_opening_the_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "dangling");
+
+        app.dispatch(Action::Open);
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "a dangling symlink must not open the viewer or navigate"
+        );
+        assert!(
+            app.log.iter().any(|l| l.is_error),
+            "opening a dangling symlink must log an error; log: {:?}",
+            app.log
+        );
     }
 
     #[test]
@@ -5258,19 +5443,52 @@ mod tests {
         viewers.insert("md".to_string(), "glow {}".to_string());
 
         assert_eq!(
-            extension_viewer_command(&viewers, Path::new("readme.md")),
+            extension_viewer_command(&viewers, Path::new("readme.md"), None),
             Some("glow {}".to_string())
         );
         assert_eq!(
-            extension_viewer_command(&viewers, Path::new("readme.MD")),
+            extension_viewer_command(&viewers, Path::new("readme.MD"), None),
             Some("glow {}".to_string())
         );
         assert_eq!(
-            extension_viewer_command(&viewers, Path::new("readme.txt")),
+            extension_viewer_command(&viewers, Path::new("readme.txt"), None),
             None
         );
         assert_eq!(
-            extension_viewer_command(&viewers, Path::new("readme")),
+            extension_viewer_command(&viewers, Path::new("readme"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn extension_viewer_command_falls_back_to_the_symlink_targets_extension() {
+        let mut viewers = std::collections::HashMap::new();
+        viewers.insert("md".to_string(), "glow {}".to_string());
+        viewers.insert("txt".to_string(), "less {}".to_string());
+
+        // No extension on the link itself -> falls back to the target's.
+        assert_eq!(
+            extension_viewer_command(&viewers, Path::new("mylink"), Some(Path::new("notes.md"))),
+            Some("glow {}".to_string())
+        );
+        // The link's own extension has a configured entry -> that wins,
+        // even though the target's extension would resolve to a different
+        // one.
+        assert_eq!(
+            extension_viewer_command(
+                &viewers,
+                Path::new("mylink.txt"),
+                Some(Path::new("notes.md"))
+            ),
+            Some("less {}".to_string())
+        );
+        // Neither resolves to anything configured.
+        assert_eq!(
+            extension_viewer_command(
+                &viewers,
+                Path::new("mylink.rs"),
+                Some(Path::new("notes.rs"))
+            ),
             None
         );
     }

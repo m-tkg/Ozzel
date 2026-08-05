@@ -168,6 +168,10 @@ pub fn read_zip_dir_entries(archive_path: &Path, inner: &Path) -> Result<Vec<FsE
                 // for every row in a virtual pane for free.
                 readonly: true,
                 is_executable: false,
+                // Archive entries are only ever synthesized as Dir/File
+                // above — a zip has no notion of a symlink entry that this
+                // listing would need to resolve.
+                symlink_target: None,
             }
         })
         .collect())
