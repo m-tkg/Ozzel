@@ -2,7 +2,7 @@
 //! current input mode, running background tasks, and the `Action` dispatch
 //! hub every Normal-mode key eventually funnels through.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -22,10 +22,10 @@ use crate::filter::FilterSpec;
 use crate::keymap::Keymap;
 use crate::mode::{LineEditor, Mode, PendingOp, PromptKind, SelectKind, TransferKind, ViewMode};
 use crate::ops;
-use crate::pane::{PAGE_SIZE, Pane};
+use crate::pane::{CursorAnchor, PAGE_SIZE, Pane};
 use crate::persist::{Bookmarks, History, Side};
 use crate::tasks::delete as delete_task;
-use crate::tasks::{TaskManager, archive, copy_move};
+use crate::tasks::{TaskId, TaskManager, archive, copy_move};
 use crate::viewer;
 use crate::virtual_dir;
 
@@ -149,6 +149,13 @@ pub struct App {
     /// `App::handle_mouse_left_down`) — `None` once consumed by a
     /// double-click or once `DOUBLE_CLICK_WINDOW` has passed.
     last_click: Option<(ActivePane, usize, Instant)>,
+    /// Which pane a delete task's cursor should land on (and where — see
+    /// `Pane::anchor_above`), keyed by that task's own `TaskId` so an
+    /// unrelated task finishing first can never misapply it. Populated by
+    /// `spawn_delete` right before the task starts, consumed (removed) by
+    /// `handle_task_event` the moment *that exact* task's `Finished`
+    /// event arrives.
+    pending_delete_anchor: HashMap<TaskId, (ActivePane, Option<CursorAnchor>)>,
 }
 
 /// One pane's on-screen geometry as of the last frame — just enough for
@@ -169,11 +176,15 @@ pub struct PaneLayout {
 }
 
 /// Which pane a left-button drag is constrained to, and the drag's own
-/// running state. Marking is a *toggle* per row (already-marked -> off,
-/// unmarked -> on), so — unlike a simple "set every swept row to marked"
-/// scheme — this has to track exactly which rows this drag gesture has
-/// already toggled, to guard against re-toggling the same row twice when
-/// the pointer sweeps back over it (see `App::handle_mouse_left_drag`).
+/// running state. This is a "live rubber-band" range select: every `Drag`
+/// event recomputes marks fresh from `snapshot` (the pane's marks the
+/// instant before the drag began) plus the current `[origin_index, row]`
+/// range toggled relative to it — see `App::handle_mouse_left_drag`. That
+/// means retreating the pointer out of a row it previously swept over
+/// automatically reverts that row to whatever it was *before* the drag
+/// touched it, rather than leaving it toggled forever — the defining
+/// difference from a plain "mark everything swept" or "toggle once and
+/// remember" scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DragState {
     pub pane: ActivePane,
@@ -183,19 +194,15 @@ pub struct DragState {
     /// never moves the pointer never toggles anything (see
     /// `App::handle_mouse_left_down`'s doc comment).
     pub origin_index: usize,
-    /// `false` until the first `Drag` event after mouse-down; flips the
-    /// origin row from "pending" to "actually toggled" exactly once.
+    /// `false` until the first `Drag` event after mouse-down; only
+    /// affects whether the origin row's own toggle has materialized yet
+    /// (a plain click that never drags must leave marks untouched).
     started: bool,
-    /// The row processed by the most recent `Drag` event (or
-    /// `origin_index` before the drag has started) — each new event
-    /// toggles the *range* between this and the current row (covering any
-    /// rows a fast pointer movement jumped over between two events), not
-    /// just the single current row.
-    last_row: usize,
-    /// Every row index this drag gesture has already toggled — checked
-    /// before toggling so re-sweeping over an already-visited row is a
-    /// no-op instead of flipping it back.
-    visited: std::collections::HashSet<usize>,
+    /// The pane's marks exactly as they were the instant before this drag
+    /// began — the baseline every `Drag` event re-derives the current
+    /// marks from, so the range is always computed fresh rather than
+    /// accumulated incrementally.
+    snapshot: HashSet<PathBuf>,
 }
 
 /// Maps a click/drag/wheel screen coordinate to an entry index (into
@@ -286,6 +293,7 @@ impl App {
             pane_layout: [None, None],
             drag: None,
             last_click: None,
+            pending_delete_anchor: HashMap::new(),
         })
     }
 
@@ -295,6 +303,25 @@ impl App {
 
     pub fn active_pane_mut(&mut self) -> &mut Pane {
         &mut self.panes[self.active.index()]
+    }
+
+    /// Whether mouse capture should be active *right now* — consulted
+    /// once per main-loop iteration by `main.rs`'s `sync_mouse_capture`,
+    /// which is what actually enables/disables it on the real terminal.
+    /// `false` while a full-frame text-*reading* mode (Viewer/Log/Help) is
+    /// showing, so the terminal's own native text selection and
+    /// scrollback take over instead of ozzel's own click/wheel handling —
+    /// `true` everywhere else, including the Function List command
+    /// palette (an interactive picker, not a reading mode, so it keeps
+    /// capture on even though it has no mouse behavior of its own).
+    /// Always `false` when `config.mouse` itself is off, regardless of
+    /// mode.
+    pub fn wants_mouse_capture(&self) -> bool {
+        self.config.mouse
+            && !matches!(
+                self.mode,
+                Mode::Viewer { .. } | Mode::Log { .. } | Mode::Help { .. }
+            )
     }
 
     fn log_push(&mut self, message: String, is_error: bool) {
@@ -322,8 +349,31 @@ impl App {
     /// `Pane::reload_preserving_cursor`). Reload failures are logged, not
     /// propagated — one pane's unreadable directory shouldn't crash the UI.
     fn reload_both(&mut self) {
-        for pane in &mut self.panes {
-            if let Err(err) = pane.reload_preserving_cursor() {
+        self.reload_both_with_delete_anchor(None);
+    }
+
+    /// The actual body behind both `reload_both` (no anchor — every
+    /// ordinary task completion) and a delete task's completion (which
+    /// does have one): reloads both panes, using `Pane::reload_preserving_cursor`
+    /// as usual *except* for whichever pane `anchor` names, if any, which
+    /// gets `Pane::reload_preserving_cursor_onto` instead — see
+    /// `Pane::anchor_above`'s doc comment for why a delete needs this
+    /// distinct treatment.
+    fn reload_both_with_delete_anchor(
+        &mut self,
+        anchor: Option<(ActivePane, Option<CursorAnchor>)>,
+    ) {
+        for (i, pane) in self.panes.iter_mut().enumerate() {
+            let this_pane = if i == 0 {
+                ActivePane::Left
+            } else {
+                ActivePane::Right
+            };
+            let result = match &anchor {
+                Some((p, a)) if *p == this_pane => pane.reload_preserving_cursor_onto(a.clone()),
+                _ => pane.reload_preserving_cursor(),
+            };
+            if let Err(err) = result {
                 // Can't call `self.log_error` here: `pane` already holds a
                 // `&mut self.panes` borrow, and a `&mut self` method call
                 // would conflict with it even though `log` is a disjoint
@@ -348,6 +398,15 @@ impl App {
             self.log_info(line.clone());
         }
         let finished = matches!(event, TaskEvent::Finished { .. });
+        // Only ever `Some` when `event` is this *exact* delete task's own
+        // `Finished` — an unrelated task finishing first (or a second,
+        // concurrent delete) can never pick up an anchor that isn't
+        // theirs, since each is keyed by its own `TaskId`.
+        let delete_anchor = if let TaskEvent::Finished { id, .. } = &event {
+            self.pending_delete_anchor.remove(id)
+        } else {
+            None
+        };
 
         if let Some((summary, is_error)) = self.tasks.apply_event(&event) {
             if is_error {
@@ -361,7 +420,7 @@ impl App {
             // A finished transfer/delete may have touched either pane
             // (source and destination), so reload and unmark both rather
             // than trying to track exactly which one.
-            self.reload_both();
+            self.reload_both_with_delete_anchor(delete_anchor);
             for pane in &mut self.panes {
                 pane.clear_marks();
             }
@@ -400,28 +459,18 @@ impl App {
     /// modes other than Viewer/Log/Help ignore the mouse entirely (per the
     /// plan: "other modals ignore mouse, Esc still by key"); Normal mode
     /// gets the full click/drag/wheel behavior in `handle_mouse_normal`.
+    /// Viewer/Log/Help never reach here at all: mouse capture is
+    /// dynamically disabled the moment any of them becomes the active
+    /// mode (see `App::wants_mouse_capture`/`main.rs`'s `sync_mouse_capture`),
+    /// so the terminal never even reports a mouse event while one is
+    /// showing — that's the whole point, it hands wheel/selection back to
+    /// the terminal's own native scrollback and text selection. Only
+    /// `Normal` has anything to do here; every other mode (including the
+    /// Function List command palette, which keeps capture on but has no
+    /// mouse behavior of its own) ignores mouse input.
     fn handle_mouse(&mut self, ev: MouseEvent) {
-        match &self.mode {
-            Mode::Viewer { .. } => self.handle_modal_wheel(ev, Self::handle_viewer_key),
-            Mode::Log { .. } => self.handle_modal_wheel(ev, Self::handle_log_view_key),
-            Mode::Help { .. } => self.handle_modal_wheel(ev, Self::handle_help_key),
-            Mode::Normal => self.handle_mouse_normal(ev),
-            _ => {}
-        }
-    }
-
-    /// Shared wheel-scroll plumbing for the three full-frame modal views:
-    /// each tick is just `MOUSE_WHEEL_STEP` repeats of the same `Up`/`Down`
-    /// key their own key handler already understands, so the scroll math
-    /// stays defined in exactly one place per mode.
-    fn handle_modal_wheel(&mut self, ev: MouseEvent, key_handler: fn(&mut Self, KeyCode)) {
-        let code = match ev.kind {
-            MouseEventKind::ScrollUp => KeyCode::Up,
-            MouseEventKind::ScrollDown => KeyCode::Down,
-            _ => return,
-        };
-        for _ in 0..MOUSE_WHEEL_STEP {
-            key_handler(self, code);
+        if matches!(self.mode, Mode::Normal) {
+            self.handle_mouse_normal(ev);
         }
     }
 
@@ -509,39 +558,35 @@ impl App {
         // `Drag` events in between) must only move the cursor, never
         // toggle a mark — only `handle_mouse_left_drag`, once an actual
         // `Drag` event proves the pointer moved while the button was
-        // held, toggles the origin row (`started` flips to `true` on that
-        // first event, and the origin row is included in its sweep).
+        // held, applies the range (which, on that very first event,
+        // already includes the origin row itself). `snapshot` freezes
+        // the pane's marks exactly as they were right now, before any of
+        // that happens.
+        let snapshot = self.panes[pane.index()].marks.clone();
         self.drag = Some(DragState {
             pane,
             origin_index: row,
             started: false,
-            last_row: row,
-            visited: std::collections::HashSet::new(),
+            snapshot,
         });
     }
 
-    /// Left-button drag: toggles the mark on every row the pointer sweeps
-    /// over since the last `Drag` event (covering multi-row jumps between
-    /// events, not just the single row each event happens to land on),
-    /// but *only* while the pointer stays within the pane the drag started
-    /// in — crossing into the other pane, or off the entry rows entirely,
-    /// simply stops the sweep from growing (focus never changes
-    /// mid-drag, and nothing already toggled is undone by leaving). Each
-    /// row is toggled *at most once* per drag gesture (`DragState::visited`
-    /// guards this), so sweeping back and forth over the same row doesn't
-    /// flip it repeatedly — this is what makes "drag to deselect" a
-    /// well-defined, idempotent operation rather than something that
-    /// depends on exactly how many `Drag` events the terminal happened to
-    /// send.
+    /// Left-button drag: a live rubber-band range select. Every `Drag`
+    /// event recomputes the pane's marks from scratch as `snapshot`
+    /// (frozen at mouse-down) with every row in `[origin_index, row]`
+    /// toggled relative to it — never accumulated incrementally — so a
+    /// row the pointer swept over and then retreated *out* of
+    /// automatically reverts to whatever it was before the drag touched
+    /// it, and a direction reversal across the origin just recomputes the
+    /// (now different) range from the same snapshot. Only active *within*
+    /// the pane the drag started in — crossing into the other pane, or
+    /// off the entry rows entirely, simply leaves the current range as-is
+    /// (focus never changes mid-drag, and nothing reverts just because
+    /// the pointer briefly left the rows area).
     fn handle_mouse_left_drag(&mut self, ev: MouseEvent) {
         let Some(drag) = &self.drag else { return };
         let pane = drag.pane;
-        let started = drag.started;
-        let sweep_from = if started {
-            drag.last_row
-        } else {
-            drag.origin_index
-        };
+        let origin = drag.origin_index;
 
         let Some(layout) = self.pane_layout_for(pane) else {
             return;
@@ -554,22 +599,18 @@ impl App {
             return;
         }
 
-        let (lo, hi) = if row <= sweep_from {
-            (row, sweep_from)
-        } else {
-            (sweep_from, row)
-        };
-
         let Some(drag) = self.drag.as_mut() else {
             return;
         };
         drag.started = true;
-        drag.last_row = row;
-        let newly_visited: Vec<usize> = (lo..=hi).filter(|i| drag.visited.insert(*i)).collect();
+        let snapshot = drag.snapshot.clone();
 
-        for i in newly_visited {
-            self.panes[pane.index()].toggle_mark_index(i);
-        }
+        let (lo, hi) = if row <= origin {
+            (row, origin)
+        } else {
+            (origin, row)
+        };
+        self.panes[pane.index()].apply_drag_range(&snapshot, lo, hi);
     }
 
     /// Mouse wheel over a pane in Normal mode: moves that pane's cursor by
@@ -1712,12 +1753,21 @@ impl App {
 
     /// Hands the actual delete off to a background task (see
     /// `tasks::delete`); see `spawn_transfer` for the completion story.
+    /// Captures the post-delete cursor anchor (see `Pane::anchor_above`)
+    /// from the active pane *before* the delete runs — `targets` are all
+    /// still present in `visible_entries()` at this point, which is
+    /// exactly what `anchor_above` needs — then spawns the task and
+    /// remembers the anchor against its own `TaskId` for
+    /// `handle_task_event` to apply once that specific task finishes.
     fn spawn_delete(&mut self, targets: Vec<PathBuf>) {
+        let anchor = self.active_pane().anchor_above(&targets);
+        let pane = self.active;
         let behavior = self.config.delete_behavior;
         let desc = format!("delete {} item(s)", targets.len());
-        self.tasks.spawn(desc, move |id, tx, cancel| {
+        let id = self.tasks.spawn(desc, move |id, tx, cancel| {
             delete_task::run_delete(id, tx, cancel, targets, behavior);
         });
+        self.pending_delete_anchor.insert(id, (pane, anchor));
     }
 
     /// Fixed editing keys for `Mode::Filter`; never consults the keymap.
@@ -2316,6 +2366,154 @@ mod tests {
         assert!(
             app.log.iter().any(|l| l.message.contains("deleted 1 item")),
             "finished delete should log a summary"
+        );
+    }
+
+    /// Reads back whichever real entry the pane's cursor currently sits
+    /// on, panicking if it's on `..` or out of bounds — used by the
+    /// post-delete cursor-anchor tests below to assert exactly where the
+    /// cursor landed.
+    fn cursor_entry_name(app: &App) -> String {
+        match app
+            .active_pane()
+            .visible_entries()
+            .get(app.active_pane().cursor)
+        {
+            Some(crate::pane::VisibleItem::Entry(e)) => e.name.clone(),
+            other => panic!("expected cursor on a real entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_middle_entry_moves_cursor_to_the_entry_above() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"c").unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Permanent,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "b.txt");
+
+        app.dispatch(Action::Delete);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+
+        assert!(!dir.path().join("b.txt").exists());
+        assert_eq!(cursor_entry_name(&app), "a.txt");
+    }
+
+    #[test]
+    fn delete_first_entry_leaves_cursor_at_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Permanent,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        // "a.txt" is the first *real* entry — nothing but ".." is above it.
+        select_entry_named(&mut app, "a.txt");
+        assert_eq!(app.active_pane().cursor, 1, "sanity: right below \"..\"");
+
+        app.dispatch(Action::Delete);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+
+        assert!(!dir.path().join("a.txt").exists());
+        assert_eq!(
+            app.active_pane().cursor,
+            0,
+            "cursor must clamp to the top, landing on the new first row"
+        );
+    }
+
+    #[test]
+    fn delete_last_entry_moves_cursor_to_the_new_last_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"c").unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Permanent,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "c.txt");
+
+        app.dispatch(Action::Delete);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+
+        assert!(!dir.path().join("c.txt").exists());
+        assert_eq!(
+            cursor_entry_name(&app),
+            "b.txt",
+            "b.txt is now the last entry"
+        );
+    }
+
+    #[test]
+    fn delete_cursor_anchor_applies_the_same_way_under_trash_behavior() {
+        // The cursor-anchor logic is orthogonal to whether the delete
+        // itself actually succeeds (real OS trash access is environment-
+        // dependent — see the README's known limitations — so this
+        // deliberately doesn't assert the file is gone, only that the
+        // anchor was captured and applied for a Trash-mode delete exactly
+        // like a Permanent one: the reload/anchor path doesn't branch on
+        // `delete_behavior` at all).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"c").unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                delete_behavior: crate::config::DeleteBehavior::Trash,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.active_pane_mut().reload().unwrap();
+        select_entry_named(&mut app, "b.txt");
+
+        app.dispatch(Action::Delete);
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        wait_for_tasks_done(&mut app);
+
+        assert!(
+            app.pending_delete_anchor.is_empty(),
+            "the anchor must be consumed exactly once, by this task's own Finished event"
+        );
+        // If the trash move actually succeeded, the cursor should have
+        // landed on "a.txt" (the entry above "b.txt"); if it failed in
+        // this environment, "b.txt" is still there and the cursor simply
+        // stayed on it — reload_preserving_cursor_onto's anchor lookup is
+        // a no-op miss in that case, which is fine, since either way
+        // nothing panics and the pane stays in a sane, well-defined state.
+        let landed_on = cursor_entry_name(&app);
+        assert!(
+            landed_on == "a.txt" || landed_on == "b.txt",
+            "unexpected cursor position: {landed_on}"
         );
     }
 
@@ -3929,8 +4127,9 @@ mod tests {
         release(&mut app, 5, 3);
         assert_eq!(app.panes[0].marks.len(), 2);
 
-        // Second, independent gesture over the exact same rows: toggling
-        // an already-marked row must unmark it — "drag to deselect".
+        // Second, independent gesture over the exact same rows: each
+        // gesture snapshots the marks fresh at its own mouse-down, so
+        // toggling an already-marked row unmarks it — "drag to deselect".
         click(&mut app, 5, 2);
         drag(&mut app, 5, 3);
         release(&mut app, 5, 3);
@@ -3943,20 +4142,95 @@ mod tests {
     }
 
     #[test]
-    fn revisiting_the_same_row_within_one_drag_does_not_flip_it_back() {
+    fn drag_retreat_reverts_rows_that_leave_the_range() {
+        // The defining behavior of the live rubber-band model: a row
+        // toggled by extending the range, then left behind by retreating,
+        // must revert to its pre-drag state — not stay toggled forever.
         let (dir, mut app) = mouse_test_app();
-        click(&mut app, 5, 2); // origin: c_dir (index 1), not toggled yet
-        drag(&mut app, 5, 3); // sweep to a.txt (index 2): toggles c_dir + a.txt ON
-        drag(&mut app, 5, 2); // sweep back over c_dir again: must NOT re-toggle it off
+        click(&mut app, 5, 2); // origin: c_dir (index 1)
+        drag(&mut app, 5, 3); // extend to a.txt (index 2): both toggled ON
+        assert_eq!(app.panes[0].marks.len(), 2);
+
+        drag(&mut app, 5, 2); // retreat back onto the origin: a.txt leaves the range
+        release(&mut app, 5, 2);
+
+        let marks = &app.panes[0].marks;
+        assert_eq!(marks.len(), 1, "marks: {marks:?}");
+        assert!(marks.contains(&dir.path().join("c_dir")));
+        assert!(
+            !marks.contains(&dir.path().join("a.txt")),
+            "a.txt must revert to unmarked once it leaves the range"
+        );
+    }
+
+    #[test]
+    fn drag_direction_reversal_across_the_origin_recomputes_the_range() {
+        let (dir, mut app) = mouse_test_app();
+        click(&mut app, 5, 3); // origin: a.txt (index 2)
+        drag(&mut app, 5, 4); // extend down to b.txt (index 3)
+        assert_eq!(
+            app.panes[0].marks.len(),
+            2,
+            "a.txt+b.txt should be marked: {:?}",
+            app.panes[0].marks
+        );
+
+        // Reverse direction, sweeping past the origin up to c_dir.
+        drag(&mut app, 5, 2);
         release(&mut app, 5, 2);
 
         let marks = &app.panes[0].marks;
         assert_eq!(marks.len(), 2, "marks: {marks:?}");
         assert!(
             marks.contains(&dir.path().join("c_dir")),
-            "revisiting c_dir mid-drag must not flip it back off"
+            "newly entered the range"
         );
+        assert!(
+            marks.contains(&dir.path().join("a.txt")),
+            "the origin row, still in range on both sides of the reversal"
+        );
+        assert!(
+            !marks.contains(&dir.path().join("b.txt")),
+            "left the range on the reversal, must revert"
+        );
+    }
+
+    #[test]
+    fn drag_over_a_row_marked_before_the_drag_toggles_off_then_reverts_on_retreat() {
+        let (dir, mut app) = mouse_test_app();
+        app.panes[0].marks.insert(dir.path().join("b.txt")); // pre-marked, index 3
+
+        click(&mut app, 5, 2); // origin: c_dir (index 1)
+        drag(&mut app, 5, 4); // extend down through b.txt (index 3)
+
+        let marks = &app.panes[0].marks;
+        assert!(
+            !marks.contains(&dir.path().join("b.txt")),
+            "a row marked before the drag must flip off when swept over: {marks:?}"
+        );
+        assert!(marks.contains(&dir.path().join("c_dir")));
         assert!(marks.contains(&dir.path().join("a.txt")));
+
+        drag(&mut app, 5, 3); // retreat: b.txt (index 3) leaves the range
+        release(&mut app, 5, 3);
+
+        let marks = &app.panes[0].marks;
+        assert!(
+            marks.contains(&dir.path().join("b.txt")),
+            "b.txt must revert to its pre-drag marked state once it leaves the range: {marks:?}"
+        );
+        assert!(marks.contains(&dir.path().join("c_dir")));
+        assert!(marks.contains(&dir.path().join("a.txt")));
+    }
+
+    #[test]
+    fn plain_click_never_touches_existing_marks() {
+        let (dir, mut app) = mouse_test_app();
+        app.panes[0].marks.insert(dir.path().join("a.txt"));
+        click(&mut app, 5, 2); // a plain click elsewhere, no drag event at all
+        release(&mut app, 5, 2);
+        assert_eq!(app.panes[0].marks.len(), 1);
+        assert!(app.panes[0].marks.contains(&dir.path().join("a.txt")));
     }
 
     #[test]
@@ -4375,5 +4649,91 @@ mod tests {
                 .message
                 .contains("don't apply inside archives")
         );
+    }
+
+    // --- wants_mouse_capture (mode-transition table) -----------------------
+
+    #[test]
+    fn wants_mouse_capture_is_true_in_normal_mode_when_mouse_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path(), dir.path());
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.wants_mouse_capture());
+    }
+
+    #[test]
+    fn wants_mouse_capture_is_false_when_mouse_is_off_regardless_of_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                mouse: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert!(!app.wants_mouse_capture());
+        app.dispatch(Action::Help);
+        assert!(matches!(app.mode, Mode::Help { .. }));
+        assert!(!app.wants_mouse_capture());
+    }
+
+    #[test]
+    fn wants_mouse_capture_is_false_in_viewer_log_and_help() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.txt"), b"hello").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        move_cursor_onto(app.active_pane_mut(), "readme.txt");
+        app.dispatch(Action::Open);
+        assert!(matches!(app.mode, Mode::Viewer { .. }));
+        assert!(!app.wants_mouse_capture(), "Viewer must disable capture");
+        app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(
+            app.wants_mouse_capture(),
+            "returning to Normal must re-enable capture"
+        );
+
+        app.dispatch(Action::ShowLog);
+        assert!(matches!(app.mode, Mode::Log { .. }));
+        assert!(!app.wants_mouse_capture(), "Log view must disable capture");
+        app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.wants_mouse_capture());
+
+        app.dispatch(Action::Help);
+        assert!(matches!(app.mode, Mode::Help { .. }));
+        assert!(!app.wants_mouse_capture(), "Help must disable capture");
+        app.handle_event(AppEvent::Input(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.wants_mouse_capture());
+    }
+
+    #[test]
+    fn wants_mouse_capture_stays_true_in_the_function_list_palette() {
+        // An interactive picker, not a text-reading mode — explicitly
+        // excluded from the disable list.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::FunctionList);
+        assert!(matches!(app.mode, Mode::FunctionList { .. }));
+        assert!(app.wants_mouse_capture());
+    }
+
+    #[test]
+    fn wants_mouse_capture_stays_true_in_prompt_confirm_and_select_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+
+        app.dispatch(Action::Mkdir);
+        assert!(matches!(app.mode, Mode::Prompt { .. }));
+        assert!(app.wants_mouse_capture());
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+
+        move_cursor_onto(app.active_pane_mut(), "a.txt");
+        app.dispatch(Action::Delete);
+        assert!(matches!(app.mode, Mode::Confirm { .. }));
+        assert!(app.wants_mouse_capture());
     }
 }

@@ -148,4 +148,41 @@ mod tests {
     fn slice_display_cols_offset_past_end_is_empty() {
         assert_eq!(slice_display_cols("short", 100, 20), "");
     }
+
+    /// With mouse capture dynamically disabled while the viewer is up
+    /// (see `App::wants_mouse_capture`), a native terminal click-drag
+    /// selection must only ever be able to grab real file content, never
+    /// a border glyph or the title — this renders a real frame and checks
+    /// for any box-drawing character `Borders::ALL` might have produced.
+    #[test]
+    fn render_draws_no_border_characters() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const BORDER_GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼'];
+
+        let mode = Mode::Viewer {
+            path: std::path::PathBuf::from("example.txt"),
+            lines: vec!["hello world".to_string(), "a second line".to_string()],
+            bytes: b"hello world\na second line".to_vec(),
+            view_mode: ViewMode::Text,
+            scroll: 0,
+            h_scroll: 0,
+            truncated: false,
+        };
+
+        let backend = TestBackend::new(30, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &mode))
+            .unwrap();
+
+        for cell in terminal.backend().buffer().content() {
+            let symbol = cell.symbol();
+            assert!(
+                !BORDER_GLYPHS.iter().any(|g| symbol.contains(*g)),
+                "unexpected border glyph {symbol:?} in the rendered viewer"
+            );
+        }
+    }
 }

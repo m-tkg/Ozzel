@@ -50,8 +50,46 @@ static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Same story as `KEYBOARD_ENHANCEMENT_ACTIVE`, for mouse capture
 /// (`config.mouse`, default on): the panic hook needs to know whether to
 /// disable it before restoring the terminal, and it runs outside
-/// `TerminalGuard`'s own scope.
+/// `TerminalGuard`'s own scope. Unlike the keyboard-enhancement flag
+/// (fixed for the whole session), this one changes *dynamically* at
+/// runtime — see `sync_mouse_capture` — so it doubles as the "what's
+/// actually active right now" source of truth for anything that needs to
+/// know (the panic hook, `Drop`, and `run_suspended`'s own push/pop
+/// symmetry around a suspended child process).
 static MOUSE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// The single choke point for enabling/disabling mouse capture on the
+/// real terminal at runtime: compares `wanted` against the shared
+/// `MOUSE_CAPTURE_ACTIVE` flag and only actually writes the enable/
+/// disable escape when they differ (see `mouse_capture_needs_sync`),
+/// then keeps the flag itself in sync — which is what lets the panic
+/// hook/`Drop` (and `run_suspended`'s suspend/resume symmetry) always
+/// trust it to reflect the terminal's real current state, never a stale
+/// "as configured at startup" value. Called once per main-loop iteration
+/// with `App::wants_mouse_capture()` — that single call site structurally
+/// covers every mode transition (entering/leaving Viewer/Log/Help, a
+/// config reload flipping `mouse`, etc.) without needing one scattered
+/// through every place a transition could happen.
+fn sync_mouse_capture(wanted: bool) -> io::Result<()> {
+    let active = MOUSE_CAPTURE_ACTIVE.load(Ordering::SeqCst);
+    if !mouse_capture_needs_sync(active, wanted) {
+        return Ok(());
+    }
+    if wanted {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)?;
+    }
+    MOUSE_CAPTURE_ACTIVE.store(wanted, Ordering::SeqCst);
+    Ok(())
+}
+
+/// The pure decision half of `sync_mouse_capture`, factored out so the
+/// "avoid redundant writes" guard is unit-testable without a real
+/// terminal.
+fn mouse_capture_needs_sync(active: bool, wanted: bool) -> bool {
+    active != wanted
+}
 
 /// ozzel: a two-pane TUI file manager.
 #[derive(Parser, Debug)]
@@ -106,10 +144,7 @@ impl TerminalGuard {
             )?;
             KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
         }
-        if mouse {
-            execute!(stdout, EnableMouseCapture)?;
-            MOUSE_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
-        }
+        sync_mouse_capture(mouse)?;
         execute!(stdout, EnterAlternateScreen)?;
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         Ok(Self {
@@ -201,12 +236,7 @@ fn main() -> anyhow::Result<()> {
         app.log_error(msg);
     }
 
-    run(
-        &mut guard.terminal,
-        &mut app,
-        guard.keyboard_enhancement,
-        mouse,
-    )?;
+    run(&mut guard.terminal, &mut app, guard.keyboard_enhancement)?;
 
     // Best-effort: the terminal is about to be restored by `guard`'s Drop
     // regardless, so a save failure here has nowhere good to be shown —
@@ -258,7 +288,6 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
     keyboard_enhancement: bool,
-    mouse: bool,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, &mut *app))?;
@@ -274,9 +303,14 @@ fn run(
         // `:` and `e` queue a suspend request rather than running the
         // child process inline, since only `main.rs` holds the `Terminal`
         // handle `external::run_suspended` needs to leave/re-enter the
-        // alternate screen around it.
+        // alternate screen around it. `MOUSE_CAPTURE_ACTIVE` is read fresh
+        // here (rather than a value frozen at startup) since it can now
+        // change dynamically — but a suspend can only ever be queued from
+        // `Normal` mode, where capture always matches `config.mouse`
+        // anyway, so this is really just "don't assume it's always on".
         if let Some(req) = app.pending_external.take() {
-            match external::run_suspended(terminal, &req, keyboard_enhancement, mouse) {
+            let mouse_was_active = MOUSE_CAPTURE_ACTIVE.load(Ordering::SeqCst);
+            match external::run_suspended(terminal, &req, keyboard_enhancement, mouse_was_active) {
                 Ok(Some(spawn_error)) => app.log_error(spawn_error),
                 Ok(None) => {}
                 Err(err) => return Err(err),
@@ -314,6 +348,13 @@ fn run(
             app.bookmarks_dirty = false;
         }
 
+        // One choke point for every mode transition that might change
+        // whether mouse capture should be on (entering/leaving Viewer/
+        // Log/Help, a `,` config reload flipping `mouse`, ...): checked
+        // every iteration rather than at each individual transition site,
+        // and `sync_mouse_capture` itself no-ops when nothing changed.
+        sync_mouse_capture(app.wants_mouse_capture())?;
+
         if app.should_quit {
             break;
         }
@@ -332,6 +373,14 @@ mod tests {
         assert!(!should_write_cwd_file(false, Some(&path)));
         assert!(!should_write_cwd_file(true, None));
         assert!(!should_write_cwd_file(false, None));
+    }
+
+    #[test]
+    fn mouse_capture_needs_sync_only_when_the_states_differ() {
+        assert!(!mouse_capture_needs_sync(true, true));
+        assert!(!mouse_capture_needs_sync(false, false));
+        assert!(mouse_capture_needs_sync(true, false));
+        assert!(mouse_capture_needs_sync(false, true));
     }
 
     #[test]

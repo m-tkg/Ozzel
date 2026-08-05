@@ -60,3 +60,39 @@ fn render_line(line: &HelpLine) -> Line<'static> {
         HelpLine::Blank => Line::raw(""),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With mouse capture dynamically disabled while the help screen is
+    /// up (see `App::wants_mouse_capture`), a native terminal click-drag
+    /// selection must only ever be able to grab real keybinding text,
+    /// never a border glyph or the title — this renders a real frame and
+    /// checks for any box-drawing character `Borders::ALL` might have
+    /// produced.
+    #[test]
+    fn render_draws_no_border_characters() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const BORDER_GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼'];
+
+        let keymap = Keymap::defaults();
+        let mode = Mode::Help { scroll: 0 };
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &mode, &keymap))
+            .unwrap();
+
+        for cell in terminal.backend().buffer().content() {
+            let symbol = cell.symbol();
+            assert!(
+                !BORDER_GLYPHS.iter().any(|g| symbol.contains(*g)),
+                "unexpected border glyph {symbol:?} in the rendered help screen"
+            );
+        }
+    }
+}

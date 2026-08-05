@@ -45,6 +45,18 @@ pub enum VisibleItem<'a> {
     Entry(&'a FsEntry),
 }
 
+/// Where to restore a pane's cursor after a delete's post-completion
+/// reload — see `Pane::anchor_above`/`reload_preserving_cursor_onto`. A
+/// plain `String` name isn't quite enough on its own since the row
+/// immediately above the topmost deleted entry might be the synthetic
+/// `..` row, which `restore_cursor_onto`'s name-matching deliberately
+/// never matches (there's no `FsEntry` to match a name against).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorAnchor {
+    Parent,
+    Entry(String),
+}
+
 pub struct Pane {
     pub cwd: PathBuf,
     pub entries: Vec<FsEntry>,
@@ -143,6 +155,52 @@ impl Pane {
             self.restore_cursor_onto(&name);
         }
         Ok(())
+    }
+
+    /// Like `reload_preserving_cursor`, but for the one case where "the
+    /// cursor's own pre-reload name" is exactly the wrong anchor: a
+    /// delete's post-completion reload, where the cursor was sitting on
+    /// one of the now-gone deleted entries, and blindly re-searching for
+    /// *that* name would always miss and fall back to index 0 — landing
+    /// back at the top of the pane regardless of where the delete
+    /// actually happened. `anchor` (from `Pane::anchor_above`, captured
+    /// *before* the delete ran) is used instead when present; with `None`
+    /// (nothing was above the topmost deleted row to anchor onto), this
+    /// falls back to `reload`'s plain clamped-index behavior — the
+    /// already-numerically-correct "stays at the top" case.
+    pub fn reload_preserving_cursor_onto(&mut self, anchor: Option<CursorAnchor>) -> Result<()> {
+        self.reload()?;
+        match anchor {
+            Some(CursorAnchor::Parent) => self.cursor = 0,
+            Some(CursorAnchor::Entry(name)) => self.restore_cursor_onto(&name),
+            None => self.clamp_cursor(),
+        }
+        Ok(())
+    }
+
+    /// The cursor position to restore onto after deleting `targets`: the
+    /// name of whatever visible row sits immediately above the topmost
+    /// (lowest visible-index) entry being deleted — captured *before* the
+    /// deletion actually happens (`targets` are still present in
+    /// `visible_entries()` at this point), so it survives the reload the
+    /// delete triggers once it completes. `None` when there's nothing
+    /// above the topmost deleted row (it was already the first visible
+    /// row): the caller's fallback in that case is to just clamp the
+    /// existing cursor index, not hunt for a name that was never there.
+    pub fn anchor_above(&self, targets: &[PathBuf]) -> Option<CursorAnchor> {
+        let target_set: HashSet<&PathBuf> = targets.iter().collect();
+        let items = self.visible_entries();
+        let topmost = items.iter().position(|item| match item {
+            VisibleItem::Entry(e) => target_set.contains(&e.path),
+            VisibleItem::Parent => false,
+        })?;
+        if topmost == 0 {
+            return None;
+        }
+        Some(match &items[topmost - 1] {
+            VisibleItem::Parent => CursorAnchor::Parent,
+            VisibleItem::Entry(e) => CursorAnchor::Entry(e.name.clone()),
+        })
     }
 
     pub fn is_root(&self) -> bool {
@@ -454,18 +512,33 @@ impl Pane {
         }
     }
 
-    /// Toggles the mark on whatever real entry sits at visible index
-    /// `index`, if any — a no-op on `..` or an out-of-range index. Used by
-    /// mouse drag range-marking (`App::handle_mouse_left_drag`), which
-    /// sweeps over rows and toggles each one — the drag itself is
-    /// responsible for calling this at most once per row per gesture
-    /// (`DragState::visited`), so re-sweeping over an already-visited row
-    /// on a jittery drag doesn't flip it back.
-    pub fn toggle_mark_index(&mut self, index: usize) {
-        if let Some(VisibleItem::Entry(e)) = self.visible_entries().get(index) {
-            let path = e.path.clone();
-            self.flip_mark(path);
+    /// Live rubber-band range select for a mouse drag (`App::handle_mouse_left_drag`):
+    /// recomputes `self.marks` from scratch as `snapshot` (the marks
+    /// exactly as they were before the drag began) with every real entry
+    /// in visible-index range `[lo, hi]` toggled relative to it. Called
+    /// fresh on *every* `Drag` event with the drag's current range, never
+    /// incrementally — which is exactly what makes a row that was swept
+    /// over and then retreated out of automatically revert to its
+    /// pre-drag state, rather than staying toggled forever.
+    pub fn apply_drag_range(&mut self, snapshot: &HashSet<PathBuf>, lo: usize, hi: usize) {
+        let range_paths: Vec<PathBuf> = self
+            .visible_entries()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= lo && *i <= hi)
+            .filter_map(|(_, item)| match item {
+                VisibleItem::Entry(e) => Some(e.path.clone()),
+                VisibleItem::Parent => None,
+            })
+            .collect();
+
+        let mut marks = snapshot.clone();
+        for path in range_paths {
+            if !marks.remove(&path) {
+                marks.insert(path);
+            }
         }
+        self.marks = marks;
     }
 
     fn flip_mark(&mut self, path: PathBuf) {

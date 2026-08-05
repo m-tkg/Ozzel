@@ -17,7 +17,7 @@
 use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
@@ -171,18 +171,21 @@ fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
 /// function actually knows the terminal width (and therefore the real
 /// wrapped row count) needed to turn it into a concrete start offset (see
 /// `log_view_start`).
+///
+/// Deliberately borderless — same layout as `viewer_view`/`help_view`
+/// (content row(s) + a 1-line reverse-video footer, no `Block`/`Borders`
+/// anywhere) — so that with mouse capture dynamically disabled while this
+/// mode is up (see `App::wants_mouse_capture`), a native terminal
+/// click-drag text selection only ever grabs log content, never a border
+/// glyph or the title.
 pub fn render_full(frame: &mut Frame, area: Rect, app: &App, scroll_from_bottom: usize) {
-    let block = Block::default()
-        .title("Log (q/Esc to close)")
-        .borders(Borders::ALL);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
 
-    if inner.height == 0 {
-        return;
-    }
-    let wrapped = wrap_log_lines(app.log.iter(), inner.width as usize);
-    let viewport = inner.height as usize;
+    let viewport = rows[0].height as usize;
+    let wrapped = wrap_log_lines(app.log.iter(), rows[0].width as usize);
     let start = log_view_start(wrapped.len(), viewport, scroll_from_bottom);
     let end = (start + viewport).min(wrapped.len());
 
@@ -197,7 +200,17 @@ pub fn render_full(frame: &mut Frame, area: Rect, app: &App, scroll_from_bottom:
             Line::styled(text.clone(), style)
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), rows[0]);
+
+    let total = wrapped.len();
+    let range_text = if total == 0 {
+        "0/0".to_string()
+    } else {
+        format!("{}-{}/{total}", start + 1, end)
+    };
+    let footer = format!(" Log  [{range_text}]  q/Esc:close");
+    let footer_style = Style::default().add_modifier(Modifier::REVERSED);
+    frame.render_widget(Paragraph::new(footer).style(footer_style), rows[1]);
 }
 
 /// The pure scroll math behind `render_full`: `scroll_from_bottom` rows
@@ -430,5 +443,47 @@ mod tests {
         let available_rows = 10;
         let start = wrapped.len().saturating_sub(available_rows);
         assert_eq!(start, 0, "must not skip content when there's room to spare");
+    }
+
+    /// Every box-drawing glyph `Borders::ALL` might have drawn — used by
+    /// `render_full`'s (and its siblings') "no border characters anywhere"
+    /// regression tests: with mouse capture dynamically disabled while
+    /// these full-frame text modes are up (see `App::wants_mouse_capture`),
+    /// a native terminal click-drag selection must only ever be able to
+    /// grab real content, never a border glyph or a title.
+    const BORDER_GLYPHS: [char; 11] = ['─', '│', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼'];
+
+    #[test]
+    fn render_full_draws_no_border_characters() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::app::App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            crate::config::Config::default(),
+        )
+        .unwrap();
+        // A message long enough to wrap, so a continuation row is
+        // exercised too, not just single-line content.
+        app.log.push_back(log_line(
+            "a reasonably long log message that should wrap across more than one row",
+            false,
+        ));
+
+        let backend = TestBackend::new(30, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_full(frame, frame.area(), &app, 0))
+            .unwrap();
+
+        for cell in terminal.backend().buffer().content() {
+            let symbol = cell.symbol();
+            assert!(
+                !BORDER_GLYPHS.iter().any(|g| symbol.contains(*g)),
+                "unexpected border glyph {symbol:?} in the rendered log view"
+            );
+        }
     }
 }
