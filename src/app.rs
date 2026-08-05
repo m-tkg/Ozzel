@@ -12,21 +12,22 @@ use chrono::{DateTime, Local};
 use directories::BaseDirs;
 
 use crate::action::Action;
-use crate::config::{self, Config};
+use crate::config::{self, Config, DeleteBehavior};
 use crate::entry::EntryKind;
 use crate::event::{
     AppEvent, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, TaskEvent,
 };
 use crate::external::{self, ExternalRequest};
 use crate::filter::FilterSpec;
-use crate::keymap::Keymap;
+use crate::keymap::{KeyCombo, Keymap};
 use crate::mode::{
-    LineEditor, Mode, PendingOp, PromptKind, SearchDirection, SelectKind, TransferKind, ViewMode,
-    ViewerSearch,
+    LineEditor, Mode, PendingOp, PromptKind, SearchDirection, SelectKind, SettingsEditor,
+    SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch,
 };
 use crate::ops;
 use crate::pane::{CursorAnchor, PAGE_SIZE, Pane};
 use crate::persist::{Bookmarks, History, Side};
+use crate::settings::{self, Category};
 use crate::tasks::delete as delete_task;
 use crate::tasks::{TaskId, TaskManager, archive, copy_move};
 use crate::viewer;
@@ -163,6 +164,15 @@ pub struct App {
     /// `handle_task_event` the moment *that exact* task's `Finished`
     /// event arrives.
     pending_delete_anchor: HashMap<TaskId, (ActivePane, Option<CursorAnchor>)>,
+    /// Overrides `config::config_path()` for the settings screen's own
+    /// `toml_edit` writes and its post-write `reload_config_from` call —
+    /// `None` (the real-app default) means "use the real, XDG-resolved
+    /// location", exactly like `reload_config`'s own default. Tests point
+    /// this at a tempdir file instead, the same reasoning
+    /// `begin_edit_config_at`/`reload_config_from` already use an
+    /// injectable path for: `cargo test` must never read from or write to
+    /// a real user's config file.
+    settings_config_path: Option<PathBuf>,
 }
 
 /// One pane's on-screen geometry as of the last frame — just enough for
@@ -356,6 +366,7 @@ impl App {
             drag: None,
             last_click: None,
             pending_delete_anchor: HashMap::new(),
+            settings_config_path: None,
         })
     }
 
@@ -510,6 +521,7 @@ impl App {
                 Mode::Help { .. } => self.handle_help_key(code),
                 Mode::Log { .. } => self.handle_log_view_key(code),
                 Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
+                Mode::Settings { .. } => self.handle_settings_key(code, modifiers),
             },
             AppEvent::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             AppEvent::Task(task_event) => self.handle_task_event(task_event),
@@ -864,6 +876,10 @@ impl App {
             }
             Action::FunctionList => {
                 self.begin_function_list();
+                Ok(())
+            }
+            Action::Settings => {
+                self.begin_settings();
                 Ok(())
             }
             Action::Quit => {
@@ -1947,6 +1963,948 @@ impl App {
         // bounds by just resetting to the top rather than trying to track
         // "the same action" across a re-filter.
         *cursor = 0;
+    }
+
+    /// `S`/`S-s`: opens the settings screen at the top-level category menu.
+    fn begin_settings(&mut self) {
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Categories { cursor: 0 },
+        };
+    }
+
+    /// The real config file's path, honoring `settings_config_path`'s
+    /// test override — see its doc comment. Every settings-screen write
+    /// goes through this, never `config::config_path()` directly.
+    fn settings_path(&self) -> Option<PathBuf> {
+        self.settings_config_path
+            .clone()
+            .or_else(config::config_path)
+    }
+
+    /// Runs `write` against the real config path, then — on success —
+    /// live-reloads exactly like `,` (edit_config) does
+    /// (`reload_config_from`), so a settings-screen edit takes effect
+    /// immediately. Every commit in the settings screen (a bool flip, a
+    /// select/palette/hex pick, a text field's Enter, a keybinding add/
+    /// remove) goes through this one function, so "write, then reload,
+    /// with a write or reload failure just logging and otherwise leaving
+    /// the running config untouched" only has to be implemented once.
+    /// Since the screen's item list always displays live values read
+    /// straight from `self.config` (never a locally-cached copy), a
+    /// reload failure here automatically shows up as "the value on
+    /// screen didn't change" — the coordinator's "revert UI value" for
+    /// free, with no separate rollback code needed.
+    fn settings_save(&mut self, write: impl FnOnce(&Path) -> anyhow::Result<()>) {
+        let Some(path) = self.settings_path() else {
+            self.log_error("could not determine the config file location on this platform");
+            return;
+        };
+        if let Err(err) = write(&path) {
+            self.log_error(format!("settings: failed to save: {err}"));
+            return;
+        }
+        self.reload_config_from(&path);
+    }
+
+    /// Item-list length for `category` — see `SettingsScreen::Items`'s doc
+    /// comment for what each category's list actually contains.
+    fn settings_item_count(&self, category: Category) -> usize {
+        match category {
+            Category::Behavior => settings::BEHAVIOR_ITEMS.len(),
+            Category::Colors => settings::COLOR_ITEMS.len(),
+            Category::Startup => settings::STARTUP_ITEMS.len(),
+            // +1 for the synthetic "+ add new" slot at the end.
+            Category::Viewers => self.config.viewers.len() + 1,
+            Category::Keybindings => Action::ALL.len(),
+        }
+    }
+
+    /// `[viewers]`'s extensions, sorted — the `Viewers` category's item
+    /// list is this plus one synthetic "+ add new" slot at the end (index
+    /// `== extensions.len()`, handled specially by every caller since it
+    /// has no backing config entry).
+    fn settings_viewer_extensions(&self) -> Vec<String> {
+        let mut extensions: Vec<String> = self.config.viewers.keys().cloned().collect();
+        extensions.sort();
+        extensions
+    }
+
+    fn settings_color_value(&self, key: &str) -> ratatui::style::Color {
+        match key {
+            "cursor" => self.config.colors.cursor,
+            "cursor_inactive" => self.config.colors.cursor_inactive,
+            "directory" => self.config.colors.directory,
+            "hidden" => self.config.colors.hidden,
+            "executable" => self.config.colors.executable,
+            _ => unreachable!("unknown [colors] key {key:?}"),
+        }
+    }
+
+    fn settings_back_to_items(&mut self, category: Category, item_cursor: usize) {
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Items {
+                category,
+                cursor: item_cursor,
+            },
+        };
+    }
+
+    /// Fixed keys for `Mode::Settings`; never consults the keymap, the
+    /// same "this full-frame screen owns its own keys" story as
+    /// Viewer/Help/Log/FunctionList. Dispatches on which level
+    /// (`SettingsScreen`) is currently showing.
+    fn handle_settings_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Mode::Settings { screen } = &self.mode else {
+            return;
+        };
+        match screen.clone() {
+            SettingsScreen::Categories { cursor } => {
+                self.handle_settings_categories_key(code, cursor);
+            }
+            SettingsScreen::Items { category, cursor } => {
+                self.handle_settings_items_key(code, category, cursor);
+            }
+            SettingsScreen::Editor {
+                category,
+                item_cursor,
+                editor,
+            } => {
+                self.handle_settings_editor_key(code, modifiers, category, item_cursor, editor);
+            }
+        }
+    }
+
+    fn handle_settings_categories_key(&mut self, code: KeyCode, cursor: usize) {
+        match code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up => {
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Categories {
+                        cursor: cursor.saturating_sub(1),
+                    },
+                };
+            }
+            KeyCode::Down => {
+                let next = (cursor + 1).min(Category::ALL.len() - 1);
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Categories { cursor: next },
+                };
+            }
+            KeyCode::Enter => {
+                let category = Category::ALL[cursor];
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Items {
+                        category,
+                        cursor: 0,
+                    },
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_settings_items_key(&mut self, code: KeyCode, category: Category, cursor: usize) {
+        let count = self.settings_item_count(category);
+        match code {
+            KeyCode::Esc => {
+                let cat_cursor = Category::ALL
+                    .iter()
+                    .position(|&c| c == category)
+                    .unwrap_or(0);
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Categories { cursor: cat_cursor },
+                };
+            }
+            KeyCode::Up => {
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Items {
+                        category,
+                        cursor: cursor.saturating_sub(1),
+                    },
+                };
+            }
+            KeyCode::Down => {
+                let next = if count == 0 {
+                    0
+                } else {
+                    (cursor + 1).min(count - 1)
+                };
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Items {
+                        category,
+                        cursor: next,
+                    },
+                };
+            }
+            KeyCode::Char('d') if category == Category::Viewers => {
+                self.settings_delete_viewer_entry(category, cursor);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.settings_open_item(category, cursor);
+            }
+            _ => {}
+        }
+    }
+
+    fn settings_open_item(&mut self, category: Category, cursor: usize) {
+        match category {
+            Category::Behavior => {
+                if let Some(item) = settings::BEHAVIOR_ITEMS.get(cursor).copied() {
+                    self.settings_open_bool_or_enum_item(category, cursor, item);
+                }
+            }
+            Category::Colors => {
+                if let Some(item) = settings::COLOR_ITEMS.get(cursor).copied() {
+                    self.settings_open_color_item(category, cursor, item);
+                }
+            }
+            Category::Startup => {
+                if let Some(item) = settings::STARTUP_ITEMS.get(cursor).copied() {
+                    self.settings_open_startup_item(category, cursor, item);
+                }
+            }
+            Category::Viewers => self.settings_open_viewer_item(category, cursor),
+            Category::Keybindings => self.settings_open_keybinding_item(category, cursor),
+        }
+    }
+
+    fn settings_open_bool_or_enum_item(
+        &mut self,
+        category: Category,
+        cursor: usize,
+        item: settings::Item,
+    ) {
+        match item.kind {
+            settings::ItemKind::Bool => {
+                let current = match item.key {
+                    "confirm_operations" => self.config.confirm_operations,
+                    "confirm_quit" => self.config.confirm_quit,
+                    "quit_cd" => self.config.quit_cd,
+                    "mouse" => self.config.mouse,
+                    "show_permissions" => self.config.show_permissions,
+                    "dim_inactive" => self.config.colors.dim_inactive,
+                    _ => unreachable!("unknown bool key {:?}", item.key),
+                };
+                let key = item.key;
+                self.settings_save(|path| settings::save_bool(path, category, key, !current));
+            }
+            settings::ItemKind::DeleteBehaviorEnum => {
+                let cursor_pos = match self.config.delete_behavior {
+                    DeleteBehavior::Trash => 0,
+                    DeleteBehavior::Permanent => 1,
+                };
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor: cursor,
+                        editor: SettingsEditor::DeleteBehavior { cursor: cursor_pos },
+                    },
+                };
+            }
+            settings::ItemKind::Color | settings::ItemKind::OptionalText => {
+                unreachable!("Behavior items are always Bool or DeleteBehaviorEnum")
+            }
+        }
+    }
+
+    fn settings_open_color_item(
+        &mut self,
+        category: Category,
+        cursor: usize,
+        item: settings::Item,
+    ) {
+        let current = self.settings_color_value(item.key);
+        let palette_index = settings::COLOR_PALETTE
+            .iter()
+            .position(|(_, c)| *c == current)
+            .unwrap_or(settings::COLOR_PALETTE.len());
+        self.settings_set_color_editor(
+            category,
+            cursor,
+            item.key,
+            palette_index,
+            false,
+            LineEditor::new(),
+        );
+    }
+
+    fn settings_set_color_editor(
+        &mut self,
+        category: Category,
+        item_cursor: usize,
+        key: &'static str,
+        cursor: usize,
+        editing_hex: bool,
+        hex_input: LineEditor,
+    ) {
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category,
+                item_cursor,
+                editor: SettingsEditor::Color {
+                    key,
+                    cursor,
+                    editing_hex,
+                    hex_input,
+                },
+            },
+        };
+    }
+
+    fn settings_open_startup_item(
+        &mut self,
+        category: Category,
+        cursor: usize,
+        item: settings::Item,
+    ) {
+        let field = match item.key {
+            "home" => TextField::Home,
+            "editor" => TextField::Editor,
+            _ => unreachable!("unknown startup key {:?}", item.key),
+        };
+        let current = match field {
+            TextField::Home => self
+                .config
+                .home
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            TextField::Editor => self.config.editor.clone().unwrap_or_default(),
+        };
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category,
+                item_cursor: cursor,
+                editor: SettingsEditor::Text {
+                    field,
+                    input: LineEditor::from_str(&current),
+                },
+            },
+        };
+    }
+
+    fn settings_open_viewer_item(&mut self, category: Category, cursor: usize) {
+        let extensions = self.settings_viewer_extensions();
+        let editor = if let Some(ext) = extensions.get(cursor) {
+            let command = self.config.viewers.get(ext).cloned().unwrap_or_default();
+            SettingsEditor::ViewerEntry {
+                old_extension: Some(ext.clone()),
+                extension: LineEditor::from_str(ext),
+                command: LineEditor::from_str(&command),
+                editing_extension: false,
+            }
+        } else {
+            SettingsEditor::ViewerEntry {
+                old_extension: None,
+                extension: LineEditor::new(),
+                command: LineEditor::new(),
+                editing_extension: true,
+            }
+        };
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category,
+                item_cursor: cursor,
+                editor,
+            },
+        };
+    }
+
+    fn settings_delete_viewer_entry(&mut self, category: Category, cursor: usize) {
+        let extensions = self.settings_viewer_extensions();
+        let Some(ext) = extensions.get(cursor).cloned() else {
+            return;
+        };
+        self.settings_save(|path| settings::remove_viewer_entry(path, &ext));
+        let new_count = self.settings_item_count(category);
+        let clamped = cursor.min(new_count.saturating_sub(1));
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Items {
+                category,
+                cursor: clamped,
+            },
+        };
+    }
+
+    fn settings_open_keybinding_item(&mut self, category: Category, cursor: usize) {
+        let Some(&action) = Action::ALL.get(cursor) else {
+            return;
+        };
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category,
+                item_cursor: cursor,
+                editor: SettingsEditor::Keybinding { action, cursor: 0 },
+            },
+        };
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_settings_editor_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        category: Category,
+        item_cursor: usize,
+        editor: SettingsEditor,
+    ) {
+        match editor {
+            SettingsEditor::DeleteBehavior { cursor } => {
+                self.handle_settings_delete_behavior_key(code, category, item_cursor, cursor);
+            }
+            SettingsEditor::Color {
+                key,
+                cursor,
+                editing_hex,
+                hex_input,
+            } => {
+                self.handle_settings_color_key(
+                    code,
+                    modifiers,
+                    category,
+                    item_cursor,
+                    key,
+                    cursor,
+                    editing_hex,
+                    hex_input,
+                );
+            }
+            SettingsEditor::Text { field, input } => {
+                self.handle_settings_text_key(code, modifiers, category, item_cursor, field, input);
+            }
+            SettingsEditor::ViewerEntry {
+                old_extension,
+                extension,
+                command,
+                editing_extension,
+            } => {
+                self.handle_settings_viewer_entry_key(
+                    code,
+                    modifiers,
+                    category,
+                    item_cursor,
+                    old_extension,
+                    extension,
+                    command,
+                    editing_extension,
+                );
+            }
+            SettingsEditor::Keybinding { action, cursor } => {
+                self.handle_settings_keybinding_key(code, category, item_cursor, action, cursor);
+            }
+            SettingsEditor::KeybindingCapture { action, cursor } => {
+                self.handle_settings_keybinding_capture_key(
+                    code,
+                    modifiers,
+                    category,
+                    item_cursor,
+                    action,
+                    cursor,
+                );
+            }
+            SettingsEditor::KeybindingConfirm {
+                action,
+                combo,
+                conflict,
+                cursor,
+            } => {
+                self.handle_settings_keybinding_confirm_key(
+                    code,
+                    category,
+                    item_cursor,
+                    action,
+                    combo,
+                    conflict,
+                    cursor,
+                );
+            }
+        }
+    }
+
+    fn handle_settings_delete_behavior_key(
+        &mut self,
+        code: KeyCode,
+        category: Category,
+        item_cursor: usize,
+        cursor: usize,
+    ) {
+        match code {
+            KeyCode::Esc => self.settings_back_to_items(category, item_cursor),
+            KeyCode::Up | KeyCode::Down => {
+                let next = if cursor == 0 { 1 } else { 0 };
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::DeleteBehavior { cursor: next },
+                    },
+                };
+            }
+            KeyCode::Enter => {
+                let value = if cursor == 0 {
+                    DeleteBehavior::Trash
+                } else {
+                    DeleteBehavior::Permanent
+                };
+                self.settings_save(|path| settings::save_delete_behavior(path, value));
+                self.settings_back_to_items(category, item_cursor);
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_settings_color_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        category: Category,
+        item_cursor: usize,
+        key: &'static str,
+        cursor: usize,
+        editing_hex: bool,
+        mut hex_input: LineEditor,
+    ) {
+        if editing_hex {
+            match code {
+                KeyCode::Esc => {
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        false,
+                        LineEditor::new(),
+                    );
+                }
+                KeyCode::Enter => {
+                    let raw = hex_input.value();
+                    let text = if raw.starts_with('#') {
+                        raw.clone()
+                    } else {
+                        format!("#{raw}")
+                    };
+                    match crate::color::parse_color(&text) {
+                        Ok(value) => {
+                            self.settings_save(|path| settings::save_color(path, key, value));
+                            self.settings_back_to_items(category, item_cursor);
+                        }
+                        Err(err) => {
+                            self.log_error(format!("settings: invalid color {raw:?}: {err}"));
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    hex_input.backspace();
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        hex_input,
+                    );
+                }
+                KeyCode::Delete => {
+                    hex_input.delete();
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        hex_input,
+                    );
+                }
+                KeyCode::Left => {
+                    hex_input.move_left();
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        hex_input,
+                    );
+                }
+                KeyCode::Right => {
+                    hex_input.move_right();
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        hex_input,
+                    );
+                }
+                KeyCode::Home => {
+                    hex_input.move_home();
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        hex_input,
+                    );
+                }
+                KeyCode::End => {
+                    hex_input.move_end();
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        hex_input,
+                    );
+                }
+                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                    hex_input.insert(c);
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        hex_input,
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        let hex_slot = settings::COLOR_PALETTE.len();
+        match code {
+            KeyCode::Esc => self.settings_back_to_items(category, item_cursor),
+            KeyCode::Up => {
+                self.settings_set_color_editor(
+                    category,
+                    item_cursor,
+                    key,
+                    cursor.saturating_sub(1),
+                    false,
+                    LineEditor::new(),
+                );
+            }
+            KeyCode::Down => {
+                let next = (cursor + 1).min(hex_slot);
+                self.settings_set_color_editor(
+                    category,
+                    item_cursor,
+                    key,
+                    next,
+                    false,
+                    LineEditor::new(),
+                );
+            }
+            KeyCode::Enter => {
+                if cursor == hex_slot {
+                    self.settings_set_color_editor(
+                        category,
+                        item_cursor,
+                        key,
+                        cursor,
+                        true,
+                        LineEditor::new(),
+                    );
+                } else if let Some((_, value)) = settings::COLOR_PALETTE.get(cursor).copied() {
+                    self.settings_save(|path| settings::save_color(path, key, value));
+                    self.settings_back_to_items(category, item_cursor);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_settings_text_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        category: Category,
+        item_cursor: usize,
+        field: TextField,
+        mut input: LineEditor,
+    ) {
+        match code {
+            KeyCode::Esc => {
+                self.settings_back_to_items(category, item_cursor);
+                return;
+            }
+            KeyCode::Enter => {
+                let value = input.value();
+                let key = match field {
+                    TextField::Home => "home",
+                    TextField::Editor => "editor",
+                };
+                self.settings_save(|path| settings::save_optional_text(path, key, &value));
+                self.settings_back_to_items(category, item_cursor);
+                return;
+            }
+            KeyCode::Backspace => input.backspace(),
+            KeyCode::Delete => input.delete(),
+            KeyCode::Left => input.move_left(),
+            KeyCode::Right => input.move_right(),
+            KeyCode::Home => input.move_home(),
+            KeyCode::End => input.move_end(),
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => input.insert(c),
+            _ => {}
+        }
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category,
+                item_cursor,
+                editor: SettingsEditor::Text { field, input },
+            },
+        };
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_settings_viewer_entry_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        category: Category,
+        item_cursor: usize,
+        old_extension: Option<String>,
+        mut extension: LineEditor,
+        mut command: LineEditor,
+        editing_extension: bool,
+    ) {
+        match code {
+            KeyCode::Esc => {
+                self.settings_back_to_items(category, item_cursor);
+                return;
+            }
+            KeyCode::Tab => {
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::ViewerEntry {
+                            old_extension,
+                            extension,
+                            command,
+                            editing_extension: !editing_extension,
+                        },
+                    },
+                };
+                return;
+            }
+            KeyCode::Enter => {
+                let ext = extension.value();
+                let cmd = command.value();
+                if ext.trim().is_empty() || cmd.trim().is_empty() {
+                    self.log_error("settings: extension and command must both be non-empty");
+                    return;
+                }
+                let old = old_extension.clone();
+                self.settings_save(|path| {
+                    settings::save_viewer_entry_renaming(path, old.as_deref(), &ext, &cmd)
+                });
+                let extensions = self.settings_viewer_extensions();
+                let new_cursor = extensions.iter().position(|e| e == &ext).unwrap_or(0);
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Items {
+                        category,
+                        cursor: new_cursor,
+                    },
+                };
+                return;
+            }
+            _ => {}
+        }
+
+        let field = if editing_extension {
+            &mut extension
+        } else {
+            &mut command
+        };
+        match code {
+            KeyCode::Backspace => field.backspace(),
+            KeyCode::Delete => field.delete(),
+            KeyCode::Left => field.move_left(),
+            KeyCode::Right => field.move_right(),
+            KeyCode::Home => field.move_home(),
+            KeyCode::End => field.move_end(),
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => field.insert(c),
+            _ => {}
+        }
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category,
+                item_cursor,
+                editor: SettingsEditor::ViewerEntry {
+                    old_extension,
+                    extension,
+                    command,
+                    editing_extension,
+                },
+            },
+        };
+    }
+
+    fn handle_settings_keybinding_key(
+        &mut self,
+        code: KeyCode,
+        category: Category,
+        item_cursor: usize,
+        action: Action,
+        cursor: usize,
+    ) {
+        let combos = settings::combos_for(&self.keymap, action);
+        match code {
+            KeyCode::Esc => self.settings_back_to_items(category, item_cursor),
+            KeyCode::Up => {
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::Keybinding {
+                            action,
+                            cursor: cursor.saturating_sub(1),
+                        },
+                    },
+                };
+            }
+            KeyCode::Down => {
+                let next = if combos.is_empty() {
+                    0
+                } else {
+                    (cursor + 1).min(combos.len() - 1)
+                };
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::Keybinding {
+                            action,
+                            cursor: next,
+                        },
+                    },
+                };
+            }
+            KeyCode::Char('a') => {
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::KeybindingCapture { action, cursor },
+                    },
+                };
+            }
+            KeyCode::Char('d') => {
+                if let Some(combo) = combos.get(cursor).cloned() {
+                    self.settings_save(|path| settings::remove_binding(path, action, &combo));
+                }
+                let new_combos = settings::combos_for(&self.keymap, action);
+                let clamped = if new_combos.is_empty() {
+                    0
+                } else {
+                    cursor.min(new_combos.len() - 1)
+                };
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::Keybinding {
+                            action,
+                            cursor: clamped,
+                        },
+                    },
+                };
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_settings_keybinding_capture_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        category: Category,
+        item_cursor: usize,
+        action: Action,
+        cursor: usize,
+    ) {
+        if code == KeyCode::Esc {
+            self.mode = Mode::Settings {
+                screen: SettingsScreen::Editor {
+                    category,
+                    item_cursor,
+                    editor: SettingsEditor::Keybinding { action, cursor },
+                },
+            };
+            return;
+        }
+        let combo = KeyCombo::new(code, modifiers);
+        if !settings::combo_is_representable(combo) {
+            self.log_error("settings: that key can't be captured as a binding");
+            self.mode = Mode::Settings {
+                screen: SettingsScreen::Editor {
+                    category,
+                    item_cursor,
+                    editor: SettingsEditor::Keybinding { action, cursor },
+                },
+            };
+            return;
+        }
+        let conflict = settings::conflicting_action(&self.keymap, combo, action);
+        self.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category,
+                item_cursor,
+                editor: SettingsEditor::KeybindingConfirm {
+                    action,
+                    combo,
+                    conflict,
+                    cursor,
+                },
+            },
+        };
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_settings_keybinding_confirm_key(
+        &mut self,
+        code: KeyCode,
+        category: Category,
+        item_cursor: usize,
+        action: Action,
+        combo: KeyCombo,
+        conflict: Option<Action>,
+        cursor: usize,
+    ) {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                let combo_str = settings::format_combo(&combo);
+                if let Some(loser) = conflict {
+                    self.settings_save(|path| settings::remove_binding(path, loser, &combo_str));
+                }
+                self.settings_save(|path| settings::add_binding(path, action, &combo_str));
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::Keybinding { action, cursor },
+                    },
+                };
+            }
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::Keybinding { action, cursor },
+                    },
+                };
+            }
+            _ => {}
+        }
     }
 
     fn begin_mkdir(&mut self) {
@@ -5931,5 +6889,450 @@ mod tests {
             0,
             "must never land on the parent row"
         );
+    }
+
+    // --- Mode::Settings ------------------------------------------------
+
+    /// Points `app` at a fresh, empty config file in `dir` and returns its
+    /// path — every settings test needs this, since `settings_save` must
+    /// never touch a real user's config while `cargo test` runs.
+    fn settings_test_app(dir: &Path) -> (App, PathBuf) {
+        let left = tempfile::tempdir().unwrap();
+        let mut app = test_app(left.path(), left.path());
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+        app.settings_config_path = Some(config_path.clone());
+        (app, config_path)
+    }
+
+    #[test]
+    fn settings_action_opens_the_categories_screen() {
+        let mut app = test_app(
+            tempfile::tempdir().unwrap().path(),
+            tempfile::tempdir().unwrap().path(),
+        );
+        app.dispatch(Action::Settings);
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Categories { cursor: 0 }
+            }
+        ));
+    }
+
+    #[test]
+    fn settings_categories_navigate_and_esc_closes() {
+        let mut app = test_app(
+            tempfile::tempdir().unwrap().path(),
+            tempfile::tempdir().unwrap().path(),
+        );
+        app.begin_settings();
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Categories { cursor: 1 }
+            }
+        ));
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Items {
+                    category: Category::Colors,
+                    cursor: 0
+                }
+            }
+        ));
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Categories { cursor: 1 }
+            }
+        ));
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn settings_bool_toggle_saves_and_reloads_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, config_path) = settings_test_app(dir.path());
+        assert!(app.config.mouse, "mouse defaults to true");
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Items {
+                category: Category::Behavior,
+                cursor: 3, // mouse
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!app.config.mouse, "toggled off and live-reloaded");
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("mouse = false"), "{text}");
+        // Still on the Items screen, not kicked out of it.
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Items {
+                    category: Category::Behavior,
+                    cursor: 3
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn settings_delete_behavior_editor_commits_the_selected_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _config_path) = settings_test_app(dir.path());
+        assert_eq!(app.config.delete_behavior, DeleteBehavior::Trash);
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Items {
+                category: Category::Behavior,
+                cursor: 4, // delete_behavior
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Editor {
+                    editor: SettingsEditor::DeleteBehavior { cursor: 0 },
+                    ..
+                }
+            }
+        ));
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.config.delete_behavior, DeleteBehavior::Permanent);
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Items {
+                    category: Category::Behavior,
+                    cursor: 4
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn settings_color_palette_pick_applies_the_named_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _config_path) = settings_test_app(dir.path());
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Items {
+                category: Category::Colors,
+                cursor: 2, // directory
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        // The editor opens with the cursor parked on the current value
+        // (Cyan, `directory`'s default) — walk to "magenta" from there,
+        // wherever it lands in the palette, rather than hardcoding an
+        // absolute offset from the top.
+        let magenta_index = settings::COLOR_PALETTE
+            .iter()
+            .position(|(_, c)| *c == ratatui::style::Color::Magenta)
+            .unwrap();
+        let cyan_index = settings::COLOR_PALETTE
+            .iter()
+            .position(|(_, c)| *c == ratatui::style::Color::Cyan)
+            .unwrap();
+        let key = if magenta_index >= cyan_index {
+            KeyCode::Down
+        } else {
+            KeyCode::Up
+        };
+        for _ in 0..magenta_index.abs_diff(cyan_index) {
+            app.handle_event(AppEvent::Input(key, KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.config.colors.directory, ratatui::style::Color::Magenta);
+    }
+
+    #[test]
+    fn settings_color_hex_input_applies_a_custom_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _config_path) = settings_test_app(dir.path());
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category: Category::Colors,
+                item_cursor: 0,
+                editor: SettingsEditor::Color {
+                    key: "cursor",
+                    cursor: settings::COLOR_PALETTE.len(),
+                    editing_hex: false,
+                    hex_input: LineEditor::new(),
+                },
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        for c in "112233".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.config.colors.cursor,
+            ratatui::style::Color::Rgb(0x11, 0x22, 0x33)
+        );
+    }
+
+    #[test]
+    fn settings_text_editor_sets_and_then_clears_an_optional_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _config_path) = settings_test_app(dir.path());
+        assert_eq!(app.config.editor, None);
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category: Category::Startup,
+                item_cursor: 1,
+                editor: SettingsEditor::Text {
+                    field: TextField::Editor,
+                    input: LineEditor::new(),
+                },
+            },
+        };
+        for c in "nvim".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.config.editor, Some("nvim".to_string()));
+
+        // Re-open and clear it back to unset.
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category: Category::Startup,
+                item_cursor: 1,
+                editor: SettingsEditor::Text {
+                    field: TextField::Editor,
+                    input: LineEditor::from_str("nvim"),
+                },
+            },
+        };
+        for _ in 0.."nvim".len() {
+            app.handle_event(AppEvent::Input(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.config.editor, None);
+    }
+
+    #[test]
+    fn settings_viewer_entry_add_then_delete_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _config_path) = settings_test_app(dir.path());
+        assert!(app.config.viewers.is_empty());
+
+        // "+ add new" is cursor 0 when the map is empty.
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Items {
+                category: Category::Viewers,
+                cursor: 0,
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+        for c in "md".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Tab, KeyModifiers::NONE));
+        for c in "glow {}".chars() {
+            app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.config.viewers.get("md"), Some(&"glow {}".to_string()));
+
+        // Delete it straight from the item list.
+        let Mode::Settings {
+            screen: SettingsScreen::Items { cursor, .. },
+        } = app.mode
+        else {
+            panic!("expected Items screen after committing, got {:?}", app.mode);
+        };
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Items {
+                category: Category::Viewers,
+                cursor,
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(!app.config.viewers.contains_key("md"));
+    }
+
+    #[test]
+    fn settings_keybinding_add_writes_bindings_and_applies_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, config_path) = settings_test_app(dir.path());
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+            None
+        );
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category: Category::Keybindings,
+                item_cursor: 0,
+                editor: SettingsEditor::Keybinding {
+                    action: Action::Mkdir,
+                    cursor: 0,
+                },
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Editor {
+                    editor: SettingsEditor::KeybindingCapture { .. },
+                    ..
+                }
+            }
+        ));
+        app.handle_event(AppEvent::Input(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Editor {
+                    editor: SettingsEditor::KeybindingConfirm { conflict: None, .. },
+                    ..
+                }
+            }
+        ));
+        app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+            Some(Action::Mkdir)
+        );
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("[bindings]"), "{text}");
+        assert!(text.contains("mkdir"), "{text}");
+    }
+
+    #[test]
+    fn settings_keybinding_remove_a_default_combo_writes_keys_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, config_path) = settings_test_app(dir.path());
+        // "r" is a compiled-in default for Rename.
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('r'), KeyModifiers::NONE),
+            Some(Action::Rename)
+        );
+        let cursor = settings::combos_for(&app.keymap, Action::Rename)
+            .iter()
+            .position(|c| c == "r")
+            .unwrap();
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category: Category::Keybindings,
+                item_cursor: 0,
+                editor: SettingsEditor::Keybinding {
+                    action: Action::Rename,
+                    cursor,
+                },
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('r'), KeyModifiers::NONE),
+            None,
+            "removed"
+        );
+        // "R"/S-r must survive untouched (only "r" was removed).
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            Some(Action::Rename)
+        );
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("[keys]"), "{text}");
+    }
+
+    #[test]
+    fn settings_keybinding_capture_conflict_steal_moves_the_combo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _config_path) = settings_test_app(dir.path());
+        // "r" defaults to Rename; capture it for Mkdir and steal it.
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('r'), KeyModifiers::NONE),
+            Some(Action::Rename)
+        );
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category: Category::Keybindings,
+                item_cursor: 0,
+                editor: SettingsEditor::Keybinding {
+                    action: Action::Mkdir,
+                    cursor: 0,
+                },
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Editor {
+                    editor: SettingsEditor::KeybindingConfirm {
+                        conflict: Some(Action::Rename),
+                        ..
+                    },
+                    ..
+                }
+            }
+        ));
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert_eq!(
+            app.keymap.resolve(KeyCode::Char('r'), KeyModifiers::NONE),
+            Some(Action::Mkdir),
+            "stolen"
+        );
+    }
+
+    #[test]
+    fn settings_keybinding_capture_esc_cancels_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, config_path) = settings_test_app(dir.path());
+
+        app.mode = Mode::Settings {
+            screen: SettingsScreen::Editor {
+                category: Category::Keybindings,
+                item_cursor: 0,
+                editor: SettingsEditor::Keybinding {
+                    action: Action::Mkdir,
+                    cursor: 0,
+                },
+            },
+        };
+        app.handle_event(AppEvent::Input(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(
+            app.mode,
+            Mode::Settings {
+                screen: SettingsScreen::Editor {
+                    editor: SettingsEditor::Keybinding {
+                        action: Action::Mkdir,
+                        cursor: 0
+                    },
+                    ..
+                }
+            }
+        ));
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(text, "", "Esc during capture must never write anything");
     }
 }

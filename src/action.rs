@@ -79,6 +79,11 @@ pub enum Action {
     /// list of every action, executable by name. See
     /// `App::begin_function_list`.
     FunctionList,
+    /// Opens the full-frame settings screen (`Mode::Settings`, raspi-
+    /// config-style category -> item -> editor navigation, including
+    /// keybinding editing): see `crate::settings` and
+    /// `App::begin_settings`.
+    Settings,
     Quit,
 }
 
@@ -126,7 +131,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 43] = [
+    pub const ALL: [Action; 44] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -169,6 +174,7 @@ impl Action {
         Action::EditConfig,
         Action::ShowLog,
         Action::FunctionList,
+        Action::Settings,
         Action::Quit,
     ];
 
@@ -188,7 +194,7 @@ impl Action {
                 ActionCategory::Jumps
             }
             CommandLine | OpenEditor | OpenDefault | EditConfig => ActionCategory::External,
-            Help | ShowLog | FunctionList | Quit => ActionCategory::Misc,
+            Help | ShowLog | FunctionList | Settings | Quit => ActionCategory::Misc,
         }
     }
 
@@ -238,6 +244,7 @@ impl Action {
             EditConfig => "Edit the config file (created from a template if missing)",
             ShowLog => "Show the full in-memory log",
             FunctionList => "Open the command palette (search and run any action)",
+            Settings => "Open the settings screen",
             Quit => "Quit ozzel",
         }
     }
@@ -292,6 +299,7 @@ impl Action {
             EditConfig => "edit_config",
             ShowLog => "show_log",
             FunctionList => "function_list",
+            Settings => "settings",
         }
     }
 }
