@@ -58,6 +58,16 @@ fn default_confirm_operations() -> bool {
     true
 }
 
+/// Quit confirms by default when nothing is running ("Quit ozzel?"). A
+/// top-level `confirm_quit = false` skips that confirm and quits
+/// immediately in that case — but the *tasks-running* confirm ("N task(s)
+/// running — quit anyway?") is unconditional and never affected by this
+/// setting, since a detached worker thread gets killed outright if the
+/// process exits while it's still writing.
+fn default_confirm_quit() -> bool {
+    true
+}
+
 fn deserialize_color<'de, D>(deserializer: D) -> std::result::Result<Color, D::Error>
 where
     D: Deserializer<'de>,
@@ -113,6 +123,13 @@ pub struct Config {
     /// `delete_behavior` at the top level keep working unchanged.
     #[serde(default = "default_confirm_operations")]
     pub confirm_operations: bool,
+    /// Whether `Quit` shows a "Quit ozzel?" confirm dialog when nothing is
+    /// running (the tasks-running confirm is unconditional — see
+    /// `default_confirm_quit`). Kept top-level next to
+    /// `confirm_operations` for the same "don't break existing configs"
+    /// reason.
+    #[serde(default = "default_confirm_quit")]
+    pub confirm_quit: bool,
     /// `combo -> action_name`; `"none"` unbinds. Applied to the default
     /// keymap first (see `App::new`).
     pub keys: HashMap<String, String>,
@@ -132,6 +149,7 @@ impl Default for Config {
             home: None,
             editor: None,
             confirm_operations: default_confirm_operations(),
+            confirm_quit: default_confirm_quit(),
             keys: HashMap::new(),
             bindings: HashMap::new(),
             colors: ColorsConfig::default(),
@@ -274,7 +292,20 @@ mod tests {
         assert_eq!(config.colors.cursor_inactive, Color::White);
         assert!(config.colors.dim_inactive);
         assert!(config.confirm_operations);
+        assert!(config.confirm_quit);
         assert!(config.bindings.is_empty());
+    }
+
+    #[test]
+    fn confirm_quit_can_be_set_to_false() {
+        let config: Config = toml::from_str("confirm_quit = false").unwrap();
+        assert!(!config.confirm_quit);
+    }
+
+    #[test]
+    fn confirm_quit_absent_defaults_to_true() {
+        let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
+        assert!(config.confirm_quit);
     }
 
     #[test]

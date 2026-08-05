@@ -113,7 +113,9 @@ pub struct Keymap {
 impl Keymap {
     /// The dyna-filer-style defaults: arrows/PageUp/PageDown/Home/End move
     /// the cursor, `Left`/`Right` additionally jump focus straight to that
-    /// pane, Tab switches panes, Enter/Backspace navigate, Space marks,
+    /// pane (ijkl-style `i`/`k`/`j`/`l` are bound the same way, alongside
+    /// the arrows — not instead of them), Tab switches panes, Enter/Backspace
+    /// navigate, Space marks,
     /// `a` marks all, `s`/`.` cycle sort/hidden, `C`/`M`/`D`(or `d`)/`R`(or
     /// `r`)/`K` are the copy/move/delete/rename/mkdir commands (`r`/`d` are
     /// this keymap's showcase of binding more than one combo to the same
@@ -145,6 +147,10 @@ impl Keymap {
             ("down", CursorDown),
             ("left", FocusLeft),
             ("right", FocusRight),
+            ("i", CursorUp),
+            ("k", CursorDown),
+            ("j", FocusLeft),
+            ("l", FocusRight),
             ("pageup", PageUp),
             ("pagedown", PageDown),
             ("home", Top),
@@ -615,6 +621,53 @@ mod tests {
         assert_eq!(
             km.resolve(KeyCode::Right, KeyModifiers::NONE),
             Some(Action::FocusRight)
+        );
+    }
+
+    #[test]
+    fn default_keymap_binds_ijkl_navigation_alongside_the_arrows() {
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('i'), KeyModifiers::NONE),
+            Some(Action::CursorUp)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('k'), KeyModifiers::NONE),
+            Some(Action::CursorDown)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('j'), KeyModifiers::NONE),
+            Some(Action::FocusLeft)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('l'), KeyModifiers::NONE),
+            Some(Action::FocusRight)
+        );
+        // The arrows must still work too — ijkl is additive, not a
+        // replacement.
+        assert_eq!(
+            km.resolve(KeyCode::Up, KeyModifiers::NONE),
+            Some(Action::CursorUp)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Down, KeyModifiers::NONE),
+            Some(Action::CursorDown)
+        );
+    }
+
+    #[test]
+    fn lowercase_k_does_not_conflict_with_shift_k_mkdir() {
+        // No real conflict existed (lowercase k was unbound before ijkl),
+        // but this pins the resolved intent explicitly: Mkdir stays on
+        // uppercase K/S-k only, lowercase k is cursor_down.
+        let km = Keymap::default_dyna();
+        assert_eq!(
+            km.resolve(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            Some(Action::Mkdir)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('k'), KeyModifiers::NONE),
+            Some(Action::CursorDown)
         );
     }
 

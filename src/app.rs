@@ -443,23 +443,35 @@ impl App {
         }
     }
 
-    /// `q` quits immediately when nothing is running; otherwise asks for
-    /// confirmation, since the spawned worker threads are detached and get
-    /// killed outright (not gracefully stopped) if the process exits while
-    /// they're still writing.
+    /// Tasks running always confirm ("N task(s) running — quit anyway?"),
+    /// regardless of `confirm_quit` — the spawned worker threads are
+    /// detached and get killed outright (not gracefully stopped) if the
+    /// process exits while they're still writing, so that confirmation
+    /// isn't optional. With nothing running, `confirm_quit` (default
+    /// `true`) decides: confirm with a plain "Quit ozzel?" prompt, or quit
+    /// immediately when set to `false`.
     fn begin_quit(&mut self) {
-        if self.tasks.running.is_empty() {
-            self.should_quit = true;
+        if !self.tasks.running.is_empty() {
+            let message = format!(
+                "{} task(s) running — quit anyway? (y/n)",
+                self.tasks.running.len()
+            );
+            self.mode = Mode::Confirm {
+                message,
+                on_yes: PendingOp::Quit,
+            };
             return;
         }
-        let message = format!(
-            "{} task(s) running — quit anyway? (y/n)",
-            self.tasks.running.len()
-        );
-        self.mode = Mode::Confirm {
-            message,
-            on_yes: PendingOp::Quit,
-        };
+
+        if self.config.confirm_quit {
+            self.mode = Mode::Confirm {
+                message: "Quit ozzel? (y/n)".to_string(),
+                on_yes: PendingOp::Quit,
+            };
+            return;
+        }
+
+        self.should_quit = true;
     }
 
     /// Runs `f` against the active pane and, if its `cwd` actually
@@ -1261,11 +1273,79 @@ mod tests {
     }
 
     #[test]
-    fn quit_action_sets_should_quit_when_nothing_running() {
+    fn quit_action_confirms_by_default_then_quits_on_y() {
+        // confirm_quit defaults to true: with nothing running, Quit must
+        // now confirm rather than quit immediately.
         let dir = tempfile::tempdir().unwrap();
         let mut app = test_app(dir.path(), dir.path());
         assert!(!app.should_quit);
         app.dispatch(Action::Quit);
+        assert!(!app.should_quit, "must confirm before quitting by default");
+        match &app.mode {
+            Mode::Confirm { message, .. } => assert_eq!(message, "Quit ozzel? (y/n)"),
+            other => panic!("expected Mode::Confirm, got {other:?}"),
+        }
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn quit_confirm_declined_keeps_the_app_running_when_nothing_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), dir.path());
+        app.dispatch(Action::Quit);
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn quit_with_confirm_quit_false_and_no_tasks_quits_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                confirm_quit: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.dispatch(Action::Quit);
+        assert!(app.should_quit, "confirm_quit=false must quit immediately");
+    }
+
+    #[test]
+    fn quit_tasks_running_confirm_is_unaffected_by_confirm_quit_false() {
+        // The tasks-running confirm is unconditional — confirm_quit only
+        // governs the "nothing running" case.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config {
+                confirm_quit: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        app.tasks.spawn("noop", |id, tx, _| {
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = tx.send(TaskEvent::Finished {
+                id,
+                result: Ok("done".to_string()),
+            });
+        });
+
+        app.dispatch(Action::Quit);
+        assert!(
+            !app.should_quit,
+            "must still confirm when tasks are running, even with confirm_quit=false"
+        );
+        assert!(matches!(app.mode, Mode::Confirm { .. }));
+
+        app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(app.should_quit);
     }
 
