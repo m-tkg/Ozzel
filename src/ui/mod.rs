@@ -1,7 +1,11 @@
 //! Top-level draw routine: two 50% panes, a log area (4 content rows once
-//! its border is accounted for), and a 1-line status bar (replaced by the
-//! prompt line in `Mode::Prompt`, with a centered confirm box drawn on top
-//! in `Mode::Confirm`).
+//! its border is accounted for), and a 1-line status bar — replaced by the
+//! Filter/JumpSearch input line in those modes (deliberately *not* a
+//! centered popup: the list below has to stay visible while narrowing it
+//! live), with a centered box drawn on top of the normal status bar for
+//! `Mode::Confirm` and `Mode::Prompt` alike (a prompt's text input isn't a
+//! live-narrowing interaction the way Filter/JumpSearch are, so obscuring
+//! the panes behind it costs nothing).
 
 mod function_list_view;
 mod help_view;
@@ -106,7 +110,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             render_status_bar(frame, rows[2], app);
             modal::render_select(frame, area, &app.mode);
         }
-        Mode::Prompt { .. } => modal::render_prompt_line(frame, rows[2], &app.mode),
+        Mode::Prompt { .. } => {
+            render_status_bar(frame, rows[2], app);
+            modal::render_prompt_box(frame, area, &app.mode);
+        }
         Mode::Confirm { message, .. } => {
             render_status_bar(frame, rows[2], app);
             modal::render_confirm(frame, area, message);
@@ -149,4 +156,66 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let status = Paragraph::new(format!(" {}{}  |  h:help", info, pane.cwd.display()))
         .style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(status, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+    use crate::config::Config;
+    use crate::mode::{LineEditor, PromptKind};
+
+    #[test]
+    fn prompt_mode_leaves_the_bottom_status_bar_showing_the_normal_status_not_the_old_inline_input()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config::default(),
+        )
+        .unwrap();
+        app.mode = Mode::Prompt {
+            kind: PromptKind::Mkdir,
+            input: LineEditor::from_str("newdir"),
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let bottom_row_y = 23u16;
+        let mut bottom_row = String::new();
+        for x in 0..80u16 {
+            bottom_row.push_str(buffer[(x, bottom_row_y)].symbol());
+        }
+
+        // The bottom row is the ordinary status bar (cwd path + h:help
+        // hint) — the prompt's own label/input never lands there anymore.
+        assert!(bottom_row.contains("h:help"), "bottom row: {bottom_row:?}");
+        assert!(
+            !bottom_row.contains("New directory"),
+            "the prompt label must not appear in the bottom status bar: {bottom_row:?}"
+        );
+        assert!(
+            !bottom_row.contains("newdir"),
+            "the prompt's typed content must not appear in the bottom status bar: {bottom_row:?}"
+        );
+
+        // It does appear somewhere in the frame, in the centered popup.
+        let mut full_screen = String::new();
+        for y in 0..24u16 {
+            for x in 0..80u16 {
+                full_screen.push_str(buffer[(x, y)].symbol());
+            }
+            full_screen.push('\n');
+        }
+        assert!(
+            full_screen.contains("New directory"),
+            "screen: {full_screen}"
+        );
+        assert!(full_screen.contains("newdir"), "screen: {full_screen}");
+    }
 }
