@@ -26,10 +26,12 @@
 //! browse into an archive without polluting `S-left`/`S-right`/the
 //! persisted history with archive-internal moves.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
@@ -37,9 +39,20 @@ use zip::ZipArchive;
 
 use crate::entry::{EntryKind, FsEntry};
 
+/// The full raw-entry listing of an archive, plus the `(mtime, len)` of the
+/// archive file it was read from — see `VirtualDir::list` for how this is
+/// kept valid across navigation and invalidated when the archive itself
+/// changes underneath a pane.
+#[derive(Debug)]
+struct CachedEntries {
+    mtime: Option<SystemTime>,
+    len: u64,
+    raw: Vec<RawEntry>,
+}
+
 /// A pane's position inside an archive: which `.zip` file, and which
 /// directory level within it (`inner == ""` is the archive root).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct VirtualDir {
     /// The real, on-disk path of the `.zip` file itself — this is what
     /// every zip read (listing, viewing, extracting) opens.
@@ -53,6 +66,68 @@ pub struct VirtualDir {
     /// are a zip convention, not a filesystem one) — `PathBuf::new()`
     /// (empty) means the archive root.
     pub inner: PathBuf,
+    /// The archive's full raw-entry listing, read once and reused for every
+    /// `list()` call (descend/go_parent/reload) as long as the archive
+    /// file's mtime+len haven't changed — see `list`. `Rc<RefCell<..>>`
+    /// rather than a plain field so cloning a `VirtualDir` (done once, in
+    /// `Pane::virtual_go_parent`) shares the same cache instead of
+    /// resetting it — sharing the cache across that clone is the entire
+    /// point, since go_parent immediately does another lookup with it.
+    entry_cache: Rc<RefCell<Option<CachedEntries>>>,
+}
+
+impl VirtualDir {
+    /// Enters Virtual Directory mode at `archive_path`'s root — an empty
+    /// entry cache, populated lazily on the first `list()` call.
+    pub fn new(archive_path: PathBuf) -> Self {
+        let archive_name = archive_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| archive_path.display().to_string());
+        Self {
+            archive_path,
+            archive_name,
+            inner: PathBuf::new(),
+            entry_cache: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    /// Lists the immediate children of `inner`, reusing the cached raw
+    /// entry list when the archive file hasn't changed since it was last
+    /// read — no reopening/reparsing/decompressing the archive on a cache
+    /// hit, regardless of how expensive that would be for this format (see
+    /// this module's doc comment on `.tar.xz`'s whole-buffer decompress).
+    ///
+    /// Validity check: re-`stat`s `archive_path` and compares `(mtime,
+    /// len)` against what the cache was built from. A changed value means
+    /// the archive itself was replaced — read fresh raw entries and
+    /// replace the cache. If the archive can no longer be `stat`ed at all
+    /// (e.g. deleted or on an unmounted volume) but a cache already exists,
+    /// the stale cache is served rather than erroring — a pane already
+    /// browsing an archive shouldn't lose the ability to navigate around
+    /// its previously-read listing just because the underlying file
+    /// vanished; only a real "not readable and never was" case (no cache,
+    /// can't stat, can't read) surfaces an error, exactly like before this
+    /// cache existed.
+    pub fn list(&self, inner: &Path) -> Result<Vec<FsEntry>> {
+        let stat = fs::metadata(&self.archive_path).ok();
+        let mut cache = self.entry_cache.borrow_mut();
+        let stale = match (&*cache, &stat) {
+            (Some(c), Some(m)) => c.mtime != m.modified().ok() || c.len != m.len(),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        if stale {
+            let raw = read_archive_raw_entries(&self.archive_path)?;
+            let (len, mtime) = match &stat {
+                Some(m) => (m.len(), m.modified().ok()),
+                None => (0, None),
+            };
+            *cache = Some(CachedEntries { mtime, len, raw });
+        }
+        let raw = &cache.as_ref().expect("just populated above").raw;
+        Ok(group_children(raw, inner))
+    }
 }
 
 /// Which archive backend a Virtual Directory reads through — see this
@@ -154,6 +229,7 @@ pub fn header_label(vd: &VirtualDir) -> String {
 /// `group_children`'s "one path component below `inner` is a direct
 /// child, anything deeper implies synthesized intermediate `Dir`s" logic
 /// exists exactly once regardless of archive format.
+#[derive(Debug)]
 struct RawEntry {
     path: PathBuf,
     kind: EntryKind,
@@ -168,11 +244,17 @@ struct RawEntry {
 /// See `read_zip_dir_entries`/`read_tar_dir_entries` for the two backends'
 /// own listing/path-safety notes.
 pub fn read_archive_dir_entries(archive_path: &Path, inner: &Path) -> Result<Vec<FsEntry>> {
+    let raw = read_archive_raw_entries(archive_path)?;
+    Ok(group_children(&raw, inner))
+}
+
+/// Reads every safe raw entry in `archive_path`, uncached — the shared
+/// backbone of both `read_archive_dir_entries` (grouped fresh every call)
+/// and `VirtualDir::list` (grouped from a cached copy of this same list).
+fn read_archive_raw_entries(archive_path: &Path) -> Result<Vec<RawEntry>> {
     match detect_archive_kind(archive_path) {
-        Some(ArchiveKind::Zip) => read_zip_dir_entries(archive_path, inner),
-        Some(ArchiveKind::Tar(compression)) => {
-            read_tar_dir_entries(archive_path, compression, inner)
-        }
+        Some(ArchiveKind::Zip) => read_zip_raw_entries(archive_path),
+        Some(ArchiveKind::Tar(compression)) => read_tar_raw_entries(archive_path, compression),
         None => bail!(
             "not a recognized archive format: {}",
             archive_path.display()
@@ -198,7 +280,7 @@ pub fn read_archive_dir_entries(archive_path: &Path, inner: &Path) -> Result<Vec
 /// `open`/extract to act on. This is stricter than
 /// `tasks::archive::run_unzip`'s "log and skip" policy since a plain
 /// directory listing has nowhere to log to.
-fn read_zip_dir_entries(archive_path: &Path, inner: &Path) -> Result<Vec<FsEntry>> {
+fn read_zip_raw_entries(archive_path: &Path) -> Result<Vec<RawEntry>> {
     let file = fs::File::open(archive_path)
         .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
     let mut archive = ZipArchive::new(file)
@@ -225,7 +307,7 @@ fn read_zip_dir_entries(archive_path: &Path, inner: &Path) -> Result<Vec<FsEntry
             mtime,
         });
     }
-    Ok(group_children(raw, inner))
+    Ok(raw)
 }
 
 /// The tar-family counterpart of `read_zip_dir_entries`: streams the whole
@@ -237,11 +319,7 @@ fn read_zip_dir_entries(archive_path: &Path, inner: &Path) -> Result<Vec<FsEntry
 /// (visible, but never synthesized as an intermediate directory — a
 /// symlink can't sensibly have children in a listing that never resolves
 /// it) rather than excluded, matching the plan's "list them visibly".
-fn read_tar_dir_entries(
-    archive_path: &Path,
-    compression: TarCompression,
-    inner: &Path,
-) -> Result<Vec<FsEntry>> {
+fn read_tar_raw_entries(archive_path: &Path, compression: TarCompression) -> Result<Vec<RawEntry>> {
     let mut archive = open_tar_archive(archive_path, compression)?;
     let mut raw = Vec::new();
     for entry in archive
@@ -282,7 +360,7 @@ fn read_tar_dir_entries(
             mtime,
         });
     }
-    Ok(group_children(raw, inner))
+    Ok(raw)
 }
 
 /// Groups `raw` (every safe entry in the whole archive) into the
@@ -299,7 +377,7 @@ fn read_tar_dir_entries(
 /// unconditionally; archives are vanishingly unlikely to have both a real
 /// entry *and* deeper entries "under" it at the same name; this matches
 /// the pre-existing zip-only behavior exactly.
-fn group_children(raw: Vec<RawEntry>, inner: &Path) -> Vec<FsEntry> {
+fn group_children(raw: &[RawEntry], inner: &Path) -> Vec<FsEntry> {
     struct Child {
         kind: EntryKind,
         size: u64,
@@ -957,21 +1035,93 @@ mod tests {
 
     #[test]
     fn header_label_formats_archive_and_inner_path() {
-        let vd = VirtualDir {
-            archive_path: PathBuf::from("/tmp/project.zip"),
-            archive_name: "project.zip".to_string(),
-            inner: PathBuf::from("src/nested"),
-        };
+        let mut vd = VirtualDir::new(PathBuf::from("/tmp/project.zip"));
+        vd.inner = PathBuf::from("src/nested");
         assert_eq!(header_label(&vd), "project.zip:/src/nested");
     }
 
     #[test]
     fn header_label_at_archive_root_shows_a_bare_slash() {
-        let vd = VirtualDir {
-            archive_path: PathBuf::from("/tmp/project.zip"),
-            archive_name: "project.zip".to_string(),
-            inner: PathBuf::new(),
-        };
+        let vd = VirtualDir::new(PathBuf::from("/tmp/project.zip"));
         assert_eq!(header_label(&vd), "project.zip:/");
+    }
+
+    // --- entry-list cache ---------------------------------------------------
+
+    #[test]
+    fn list_reuses_the_cache_even_after_the_archive_file_is_deleted() {
+        let (dir, archive_path) = make_archive();
+        let vd = VirtualDir::new(archive_path.clone());
+        let root = vd.list(Path::new("")).unwrap();
+        assert_eq!(root.len(), 2);
+
+        // Deleting the archive can't change what `stat` reports (there's
+        // nothing left to stat), so a cache hit must fall back to serving
+        // the already-cached listing rather than erroring.
+        fs::remove_file(&archive_path).unwrap();
+        let src = vd.list(Path::new("src")).unwrap();
+        let mut names: Vec<&str> = src.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["main.rs", "nested"]);
+        drop(dir);
+    }
+
+    #[test]
+    fn list_refreshes_when_the_archive_is_replaced_with_different_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("project.zip");
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut writer = ZipWriter::new(file);
+            writer
+                .start_file("a.txt", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"first").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let vd = VirtualDir::new(archive_path.clone());
+        let first = vd.list(Path::new("")).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "a.txt");
+
+        // Sleep isn't reliable enough across filesystems for an mtime-only
+        // diff, so the replacement archive also changes size — `list`'s
+        // staleness check is `(mtime, len)` together, and a size change
+        // alone is enough to force a refresh even if the filesystem's mtime
+        // resolution happens to make the timestamps compare equal.
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut writer = ZipWriter::new(file);
+            writer
+                .start_file("a.txt", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"first-and-then-some-more-bytes").unwrap();
+            writer
+                .start_file("b.txt", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"second").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let second = vd.list(Path::new("")).unwrap();
+        let mut names: Vec<&str> = second.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn cloning_a_virtual_dir_shares_the_same_cache() {
+        let (dir, archive_path) = make_archive();
+        let vd = VirtualDir::new(archive_path.clone());
+        vd.list(Path::new("")).unwrap();
+        let cloned = vd.clone();
+
+        fs::remove_file(&archive_path).unwrap();
+        // If the clone didn't share the cache, this would try to re-read
+        // the now-deleted archive from scratch and fail.
+        let entries = cloned.list(Path::new("")).unwrap();
+        assert_eq!(entries.len(), 2);
+        drop(dir);
     }
 }

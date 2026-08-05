@@ -127,7 +127,18 @@ pub struct Pane {
 
 impl Pane {
     pub fn new(cwd: PathBuf) -> Result<Self> {
-        let mut pane = Self {
+        let mut pane = Self::new_empty(cwd);
+        pane.reload()?;
+        Ok(pane)
+    }
+
+    /// Builds a pane with an empty listing and no I/O at all — the
+    /// "not yet loaded" placeholder `App::new_unloaded` uses so the first
+    /// frame can be drawn before `reload()` (which may block on a slow
+    /// mount or a huge directory) ever runs. Every other piece of state
+    /// matches exactly what `Pane::new` sets up before its own `reload()`.
+    pub fn new_empty(cwd: PathBuf) -> Self {
+        Self {
             cwd,
             entries: Vec::new(),
             cursor: 0,
@@ -141,9 +152,7 @@ impl Pane {
             forward: Vec::new(),
             virtual_dir: None,
             visible_cache: RefCell::new(None),
-        };
-        pane.reload()?;
-        Ok(pane)
+        }
     }
 
     /// Marks the `visible_entries()` cache stale — see `visible_cache`'s
@@ -167,7 +176,7 @@ impl Pane {
     /// the current inner level for a virtual one.
     pub fn reload(&mut self) -> Result<()> {
         self.entries = match &self.virtual_dir {
-            Some(vd) => virtual_dir::read_archive_dir_entries(&vd.archive_path, &vd.inner)?,
+            Some(vd) => vd.list(&vd.inner)?,
             None => read_dir_entries(&self.cwd)?,
         };
         self.invalidate_visible_cache();
@@ -353,22 +362,15 @@ impl Pane {
     /// filter reset — except `cwd` is untouched (see the struct's doc
     /// comment on `virtual_dir`).
     pub fn enter_virtual(&mut self, archive_path: PathBuf) -> Result<()> {
-        let entries = virtual_dir::read_archive_dir_entries(&archive_path, Path::new(""))?;
-        let archive_name = archive_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| archive_path.display().to_string());
+        let vd = VirtualDir::new(archive_path);
+        let entries = vd.list(Path::new(""))?;
         // Mirrors `go_parent`'s own cursor_memory bookkeeping: recording
         // "the archive's own name" here is what lets `virtual_go_parent`
         // restore the cursor onto the .zip file when it exits back out,
         // via the exact same `restore_cursor_onto` real panes already use.
         self.cursor_memory
-            .insert(self.cwd.clone(), archive_name.clone());
-        self.virtual_dir = Some(VirtualDir {
-            archive_path,
-            archive_name,
-            inner: PathBuf::new(),
-        });
+            .insert(self.cwd.clone(), vd.archive_name.clone());
+        self.virtual_dir = Some(vd);
         self.entries = entries;
         self.cursor = 0;
         self.marks.clear();
@@ -382,7 +384,7 @@ impl Pane {
         let Some(vd) = &self.virtual_dir else {
             return Ok(());
         };
-        let entries = virtual_dir::read_archive_dir_entries(&vd.archive_path, &inner_path)?;
+        let entries = vd.list(&inner_path)?;
         self.virtual_dir.as_mut().unwrap().inner = inner_path;
         self.entries = entries;
         self.cursor = 0;
@@ -419,7 +421,7 @@ impl Pane {
             .unwrap_or_default();
         let new_inner = vd.inner.parent().map(Path::to_path_buf).unwrap_or_default();
 
-        let entries = virtual_dir::read_archive_dir_entries(&vd.archive_path, &new_inner)?;
+        let entries = vd.list(&new_inner)?;
         self.virtual_dir.as_mut().unwrap().inner = new_inner.clone();
         self.entries = entries;
         self.marks.clear();

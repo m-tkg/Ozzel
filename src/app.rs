@@ -418,12 +418,32 @@ fn viewer_search_haystack<'a>(
 }
 
 impl App {
+    /// Builds the app with both panes already loaded — a plain
+    /// `new_unloaded` followed immediately by `load_initial_dirs`. Every
+    /// test in this codebase uses this (via `test_app`/direct calls) and
+    /// expects a ready-to-use listing straight away; `main.rs`'s real
+    /// startup path uses `new_unloaded` instead so it can draw a first
+    /// frame before either directory read runs — see that method's doc
+    /// comment.
     pub fn new(left: PathBuf, right: PathBuf, config: Config) -> anyhow::Result<Self> {
+        let mut app = Self::new_unloaded(left, right, config)?;
+        app.load_initial_dirs()?;
+        Ok(app)
+    }
+
+    /// Builds the app with both panes empty and unread — no filesystem
+    /// access at all beyond what `build_keymap`/`Config` already did.
+    /// `main.rs` uses this so the terminal's very first frame (entering
+    /// the alternate screen, an empty two-pane layout) can be drawn
+    /// *before* `load_initial_dirs`'s directory reads ever run, so a slow
+    /// mount (NFS/SMB) or a huge directory never leaves the screen blank
+    /// and frozen right after startup with no feedback at all.
+    pub fn new_unloaded(left: PathBuf, right: PathBuf, config: Config) -> anyhow::Result<Self> {
         let keymap = build_keymap(&config)?;
         let (tx, task_rx) = mpsc::channel();
 
         Ok(Self {
-            panes: [Pane::new(left)?, Pane::new(right)?],
+            panes: [Pane::new_empty(left), Pane::new_empty(right)],
             active: ActivePane::Left,
             should_quit: false,
             mode: Mode::Normal,
@@ -451,6 +471,19 @@ impl App {
             function_list_cache: None,
             needs_redraw: true,
         })
+    }
+
+    /// Performs the initial directory read for both panes that
+    /// `new_unloaded` skipped — see its doc comment. Left/right are loaded
+    /// in that fixed order and the first failure is returned immediately
+    /// (matching `new`'s previous all-in-one-constructor behavior, back
+    /// when `Pane::new`'s own `?` did this inline); `main.rs`'s `run` calls
+    /// this once, right after drawing the first (empty) frame.
+    pub fn load_initial_dirs(&mut self) -> anyhow::Result<()> {
+        self.panes[0].reload()?;
+        self.panes[1].reload()?;
+        self.needs_redraw = true;
+        Ok(())
     }
 
     pub fn active_pane(&self) -> &Pane {
@@ -3832,6 +3865,55 @@ mod tests {
 
     fn test_app(left: &Path, right: &Path) -> App {
         App::new(left.to_path_buf(), right.to_path_buf(), Config::default()).unwrap()
+    }
+
+    // --- deferred initial directory load (`new_unloaded`/`load_initial_dirs`) ---
+
+    #[test]
+    fn new_unloaded_builds_both_panes_with_no_entries_and_no_io() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+
+        let app = App::new_unloaded(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config::default(),
+        )
+        .unwrap();
+        assert!(app.panes[0].entries.is_empty());
+        assert!(app.panes[1].entries.is_empty());
+    }
+
+    #[test]
+    fn load_initial_dirs_populates_both_panes_matching_a_plain_new() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+
+        let mut app = App::new_unloaded(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Config::default(),
+        )
+        .unwrap();
+        app.load_initial_dirs().unwrap();
+
+        let eager = test_app(dir.path(), dir.path());
+        assert_eq!(app.panes[0].entries.len(), eager.panes[0].entries.len());
+        assert_eq!(app.panes[0].entries[0].name, "a.txt");
+        assert!(app.needs_redraw);
+    }
+
+    #[test]
+    fn load_initial_dirs_propagates_a_reload_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+
+        let mut app =
+            App::new_unloaded(gone.clone(), dir.path().to_path_buf(), Config::default()).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+
+        assert!(app.load_initial_dirs().is_err());
     }
 
     /// Drains tasks in a loop until none are running, or panics after a

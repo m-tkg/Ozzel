@@ -299,7 +299,11 @@ fn main() -> anyhow::Result<()> {
 
     install_panic_hook();
     let mut guard = TerminalGuard::new(mouse)?;
-    let mut app = App::new(left, right, config)?;
+    // Panes start empty — `run` draws one frame before either directory
+    // gets read (see `App::load_initial_dirs`'s doc comment), so a slow
+    // mount or huge directory never leaves the alternate screen blank and
+    // frozen right after startup.
+    let mut app = App::new_unloaded(left, right, config)?;
 
     // History/bookmarks are loaded after the terminal is already up (unlike
     // config): a missing or corrupt file here is never fatal, just an
@@ -457,6 +461,17 @@ fn run(
     app: &mut App,
     keyboard_enhancement: bool,
 ) -> anyhow::Result<()> {
+    // Drawn once, unconditionally, before `load_initial_dirs`'s directory
+    // reads ever run: `app` arrives with both panes empty (`main`'s
+    // `App::new_unloaded`), so this is what actually puts something on
+    // screen the instant the alternate screen opens, rather than leaving
+    // it blank while a slow mount or huge directory is read. A real read
+    // failure here (bad permissions etc.) surfaces as `run`'s own `Err`
+    // exactly like a directory-read failure used to surface from `App::new`
+    // itself, before this split existed.
+    terminal.draw(|frame| ui::draw(frame, &mut *app))?;
+    app.load_initial_dirs()?;
+
     loop {
         // Gated on the dirty flag rather than drawn unconditionally every
         // iteration (Phase 1 hot-path fix): `ui::draw` used to run on every
