@@ -2,6 +2,8 @@
 
 `ozzel` is a TUI (text user interface) file manager written in Rust. It displays two directories side by side in left and right panes, and lets you copy, move, delete, zip, and unzip files with single-key commands. It runs cross-platform on macOS, Linux, and Windows.
 
+![The two-pane view: git status markers and a branch tag on the left pane, marked files in yellow, the cursor row highlighted, and the log pane below](docs/images/main-view.png)
+
 ## Overview
 
 - Two-pane directory browser (`Tab` to switch panes, `Enter` to open, `Backspace` to go to the parent directory)
