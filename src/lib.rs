@@ -16,6 +16,7 @@ pub mod app;
 pub mod cli;
 pub mod color;
 pub mod config;
+pub mod diff;
 pub mod entry;
 pub mod event;
 pub mod external;

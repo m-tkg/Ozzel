@@ -19,6 +19,7 @@ fn open_action_opens_the_built_in_viewer_on_a_file() {
             scroll,
             h_scroll,
             truncated,
+            syntax: _,
             search,
         } => {
             assert_eq!(path, &dir.path().join("notes.txt"));

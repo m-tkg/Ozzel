@@ -231,6 +231,7 @@ impl Keymap {
             ("A", Chmod),
             ("T", Touch),
             ("I", FileInfo),
+            ("=", Diff),
             ("h", Help),
             ("?", Help),
             ("H", HistoryJump),

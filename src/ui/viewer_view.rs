@@ -11,7 +11,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_segmentation::UnicodeSegmentation;
@@ -19,7 +19,7 @@ use unicode_width::UnicodeWidthStr;
 
 #[cfg(test)]
 use crate::mode::{LineEditor, SearchDirection};
-use crate::mode::{Mode, ViewMode, ViewerSearch};
+use crate::mode::{Mode, ViewMode, ViewerSearch, ViewerSyntax};
 use crate::ui::text;
 use crate::viewer::{self, HEX_BYTES_PER_LINE, Matcher};
 
@@ -43,6 +43,7 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
         scroll,
         h_scroll,
         truncated,
+        syntax,
         search,
     } = mode
     else {
@@ -72,7 +73,16 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
                 .iter()
                 .skip(*scroll)
                 .take(viewport_height)
-                .map(|line| styled_line(line, *h_scroll, viewport_width, matcher))
+                .map(|line| {
+                    let styled = styled_line(line, *h_scroll, viewport_width, matcher);
+                    // A diff line's base style rides the whole `Line`;
+                    // search-match spans keep their own explicit style on
+                    // top, so highlights stay visible inside colored lines.
+                    match diff_line_style(*syntax, line) {
+                        Some(style) => styled.style(style),
+                        None => styled,
+                    }
+                })
                 .collect();
             frame.render_widget(Paragraph::new(visible), rows[0]);
 
@@ -155,6 +165,28 @@ pub fn render(frame: &mut Frame, area: Rect, mode: &Mode) {
     );
     let footer_style = Style::default().add_modifier(Modifier::REVERSED);
     frame.render_widget(Paragraph::new(footer).style(footer_style), rows[1]);
+}
+
+/// The base style for one text-mode line under `ViewerSyntax::Diff`
+/// (`None` = terminal default): unified-diff headers bold, hunk markers
+/// cyan, additions green, removals red. Ordinary context lines — and
+/// every line under `Plain` — stay unstyled. The `+++`/`---` checks come
+/// before the one-char ones, which would otherwise shadow them.
+fn diff_line_style(syntax: ViewerSyntax, line: &str) -> Option<Style> {
+    if syntax != ViewerSyntax::Diff {
+        return None;
+    }
+    if line.starts_with("+++") || line.starts_with("---") {
+        Some(Style::default().add_modifier(Modifier::BOLD))
+    } else if line.starts_with("@@") {
+        Some(Style::default().fg(Color::Cyan))
+    } else if line.starts_with('+') {
+        Some(Style::default().fg(Color::Green))
+    } else if line.starts_with('-') {
+        Some(Style::default().fg(Color::Red))
+    } else {
+        None
+    }
 }
 
 /// Builds one rendered `Line` for `line`'s visible slice
@@ -341,6 +373,7 @@ mod tests {
             scroll: 0,
             h_scroll: 0,
             truncated: false,
+            syntax: ViewerSyntax::Plain,
             search: ViewerSearch::Idle,
         };
 
@@ -392,6 +425,7 @@ mod tests {
             scroll: 0,
             h_scroll: 0,
             truncated: false,
+            syntax: ViewerSyntax::Plain,
             search,
         }
     }
