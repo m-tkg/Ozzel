@@ -15,15 +15,17 @@ use crate::mode::{Mode, SettingsEditor, SettingsScreen, TextField};
 use crate::settings::{self, Category};
 use crate::ui::text;
 
-// raspi-config (whiptail/newt) palette: blue backdrop, light-gray dialog
-// body with black text, red selection bar. Fixed on purpose — the point is
-// that the settings screen looks unmistakably different from file panes.
+// raspi-config (whiptail/newt) inspired palette: blue backdrop, dark-gray
+// dialog body with white text, red selection bar. Fixed on purpose — the
+// point is that the settings screen looks unmistakably different from file
+// panes. The dialog uses indexed 237 (#3a3a3a) rather than `Color::DarkGray`
+// because the ANSI "bright black" slot renders light on some terminal themes.
 fn backdrop_style() -> Style {
     Style::default().fg(Color::White).bg(Color::Blue)
 }
 
 fn dialog_style() -> Style {
-    Style::default().fg(Color::Black).bg(Color::Gray)
+    Style::default().fg(Color::White).bg(Color::Indexed(237))
 }
 
 fn selected_style() -> Style {
@@ -32,8 +34,8 @@ fn selected_style() -> Style {
 
 fn title_style() -> Style {
     Style::default()
-        .fg(Color::Red)
-        .bg(Color::Gray)
+        .fg(Color::LightRed)
+        .bg(Color::Indexed(237))
         .add_modifier(Modifier::BOLD)
 }
 
