@@ -62,6 +62,7 @@ const FIXED_KEY_LINES: &[&str] = &[
     "Prompt (rename/mkdir/zip name/touch time/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
     "Confirm dialogs: y/Y proceed, any other key (including Esc) cancels",
     "Chmod dialog: arrows move over the rwx grid, Space toggles, 0-7 set the highlighted row, Enter applies, Esc cancels",
+    "Sync dialog (Y): Up/Down choose update copy vs mirror, Enter confirms (mirror always re-confirms its deletions), Esc cancels",
     "File info: Esc/Enter/q close",
     "Select menu (history/bookmarks): Up/Down move, Enter select, Esc cancel, d delete (bookmarks only)",
     "Viewer: Up/Down/j/k, Space/f/PageDown, b/PageUp, d/u (half page), g/Home top, G/End bottom, Left/Right scroll horizontally (text mode), Tab toggle text/hex, /,? search, n/N next/prev match, Esc clears a search then closes, q closes",

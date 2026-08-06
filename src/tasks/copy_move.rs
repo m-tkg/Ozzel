@@ -36,7 +36,8 @@ enum TransferMode {
 
 /// One entry failed but the task keeps going (logged, not fatal) versus
 /// the whole task being cancelled (stops immediately).
-enum OpOutcome {
+// `pub(crate)`: `tasks::sync` drives the same copy helpers.
+pub(crate) enum OpOutcome {
     Cancelled,
     Failed(String),
 }
@@ -44,22 +45,24 @@ enum OpOutcome {
 /// Everything a single copy/move step needs, bundled so the recursive
 /// copy/move helpers below don't have to thread six-plus separate
 /// arguments through every call.
-struct TransferCtx<'a> {
-    tx: &'a Sender<TaskEvent>,
-    id: TaskId,
-    cancel: &'a Arc<AtomicBool>,
-    done_bytes: u64,
-    total_bytes: u64,
-    throttle: &'a mut Throttle,
+// `pub(crate)` (fields included): `tasks::sync` builds one to reuse
+// `copy_one`/`copy_file_chunked` with the same progress/cancel plumbing.
+pub(crate) struct TransferCtx<'a> {
+    pub(crate) tx: &'a Sender<TaskEvent>,
+    pub(crate) id: TaskId,
+    pub(crate) cancel: &'a Arc<AtomicBool>,
+    pub(crate) done_bytes: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) throttle: &'a mut Throttle,
     /// The chunked-copy read buffer, allocated once per task and reused for
     /// every file over `WHOLE_FILE_COPY_THRESHOLD` — a bulk copy/move of
     /// many large files previously re-zeroed a fresh 1 MiB `Vec` per file;
     /// this way the allocation happens once regardless of file count.
-    buf: Vec<u8>,
+    pub(crate) buf: Vec<u8>,
 }
 
 impl TransferCtx<'_> {
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
 
@@ -222,7 +225,7 @@ fn run_transfer(
 /// Copies `src` (file, dir, or symlink) to `dest`, recursing into
 /// directories with `walkdir` and reporting byte progress for regular
 /// files. Symlinks are recreated as links, never followed.
-fn copy_one(ctx: &mut TransferCtx, src: &Path, dest: &Path) -> Result<(), OpOutcome> {
+pub(crate) fn copy_one(ctx: &mut TransferCtx, src: &Path, dest: &Path) -> Result<(), OpOutcome> {
     let meta = fs::symlink_metadata(src).map_err(|e| OpOutcome::Failed(e.to_string()))?;
 
     if meta.is_symlink() {
@@ -361,14 +364,14 @@ fn move_via_copy_then_delete(
 }
 
 #[cfg(unix)]
-fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
     let target = fs::read_link(src)?;
     std::os::unix::fs::symlink(&target, dest)?;
     Ok(())
 }
 
 #[cfg(windows)]
-fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
     let target = fs::read_link(src)?;
     if target.is_dir() {
         std::os::windows::fs::symlink_dir(&target, dest)?;
@@ -379,7 +382,7 @@ fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
     anyhow::bail!(
         "symlinks are not supported on this platform: {} -> {}",
         src.display(),
@@ -387,7 +390,7 @@ fn copy_symlink(src: &Path, dest: &Path) -> anyhow::Result<()> {
     )
 }
 
-fn path_size(path: &Path) -> u64 {
+pub(crate) fn path_size(path: &Path) -> u64 {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
