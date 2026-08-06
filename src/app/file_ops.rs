@@ -754,6 +754,323 @@ impl App {
         });
     }
 
+    /// `@` (symlink): creates one symbolic link per marked (or cursor)
+    /// entry in the other pane's directory, each pointing at the source's
+    /// absolute path. Same confirm gate as Copy/Move
+    /// (`config.confirm_operations`).
+    pub(super) fn begin_symlink(&mut self) {
+        if self.reject_if_virtual("symlink") {
+            return;
+        }
+        if self.other_pane().is_virtual() {
+            self.log_error("cannot create symlinks in a virtual directory (archive) pane");
+            return;
+        }
+        let targets = self.active_pane().marked_or_cursor();
+        if targets.is_empty() {
+            self.log_error("no entry selected to symlink");
+            return;
+        }
+        let dest_dir = self.other_pane().cwd.clone();
+        if dest_dir == self.active_pane().cwd {
+            self.log_error("both panes show the same directory — the link name would collide");
+            return;
+        }
+        if !self.config.confirm_operations {
+            self.execute_symlink(targets, dest_dir);
+            return;
+        }
+        let message = format!(
+            "Symlink {} item(s) -> {}? (y/n)",
+            targets.len(),
+            dest_dir.display()
+        );
+        self.confirm(message, PendingOp::Symlink { targets, dest_dir });
+    }
+
+    /// The actual (synchronous) symlink creation `begin_symlink`/
+    /// `execute_pending` end in: per-source create with individual
+    /// success/failure logging, then reload.
+    fn execute_symlink(&mut self, targets: Vec<PathBuf>, dest_dir: PathBuf) {
+        let mut created = 0usize;
+        let mut failed = 0usize;
+        for src in &targets {
+            match ops::create_symlink(src, &dest_dir) {
+                Ok(dest) => {
+                    self.log_info(format!("symlink: {} -> {}", dest.display(), src.display()));
+                    created += 1;
+                }
+                Err(err) => {
+                    self.log_error(err.to_string());
+                    failed += 1;
+                }
+            }
+        }
+        if failed > 0 {
+            self.log_error(format!("symlink: {created} created, {failed} failed"));
+        } else {
+            self.log_info(format!("symlink: {created} created"));
+        }
+        self.reload_both();
+        for pane in &mut self.panes {
+            pane.clear_marks();
+        }
+    }
+
+    /// `A` (chmod): opens the 3x3 rwx toggle dialog for the marked (or
+    /// cursor) entries, prefilled with the first target's current mode.
+    /// Unix only — the mode bits simply don't exist elsewhere, so on other
+    /// platforms this logs and does nothing (rather than a lossy
+    /// readonly-flag-only imitation).
+    pub(super) fn begin_chmod(&mut self) {
+        if self.reject_if_virtual("chmod") {
+            return;
+        }
+        #[cfg(not(unix))]
+        {
+            self.log_error("chmod is not supported on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let targets = self.active_pane().marked_or_cursor();
+            if targets.is_empty() {
+                self.log_error("no entry selected to chmod");
+                return;
+            }
+            let bits = std::fs::symlink_metadata(&targets[0])
+                .map(|m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode() & 0o777
+                })
+                .unwrap_or(0o644);
+            self.mode = Mode::Chmod {
+                state: ChmodState {
+                    targets,
+                    bits,
+                    cursor: 0,
+                },
+            };
+        }
+    }
+
+    /// Fixed keys for the chmod dialog: arrows move over the 3x3 grid,
+    /// Space toggles the highlighted bit, `0`-`7` set the highlighted
+    /// row's class to that octal digit, Enter applies the edited mode to
+    /// every target, Esc cancels.
+    pub(super) fn handle_chmod_key(&mut self, code: KeyCode) {
+        let Mode::Chmod { state } = &mut self.mode else {
+            return;
+        };
+        match code {
+            KeyCode::Up => {
+                if state.cursor >= 3 {
+                    state.cursor -= 3;
+                }
+            }
+            KeyCode::Down => {
+                if state.cursor + 3 < 9 {
+                    state.cursor += 3;
+                }
+            }
+            KeyCode::Left => {
+                if state.cursor % 3 > 0 {
+                    state.cursor -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if state.cursor % 3 < 2 {
+                    state.cursor += 1;
+                }
+            }
+            KeyCode::Char(' ') => {
+                state.bits ^= ChmodState::bit_at(state.cursor);
+            }
+            KeyCode::Char(c @ '0'..='7') => {
+                let digit = c as u32 - '0' as u32;
+                let row = state.cursor / 3;
+                let shift = 3 * (2 - row as u32);
+                state.bits = (state.bits & !(0o7 << shift)) | (digit << shift);
+            }
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                let Mode::Chmod { state } = std::mem::replace(&mut self.mode, Mode::Normal) else {
+                    return;
+                };
+                self.execute_chmod(state);
+            }
+            _ => {}
+        }
+    }
+
+    /// Applies the dialog's edited mode to every target. Unix only, like
+    /// `begin_chmod` — on other platforms the dialog can't even open, so
+    /// this is unreachable there (compiled to a no-op body for
+    /// completeness).
+    fn execute_chmod(&mut self, state: ChmodState) {
+        #[cfg(unix)]
+        {
+            let mut changed = 0usize;
+            let mut failed = 0usize;
+            for target in &state.targets {
+                match ops::chmod(target, state.bits) {
+                    Ok(()) => changed += 1,
+                    Err(err) => {
+                        self.log_error(err.to_string());
+                        failed += 1;
+                    }
+                }
+            }
+            let summary = format!(
+                "chmod {:03o}: {changed} changed{}",
+                state.bits,
+                if failed > 0 {
+                    format!(", {failed} failed")
+                } else {
+                    String::new()
+                }
+            );
+            if failed > 0 {
+                self.log_error(summary);
+            } else {
+                self.log_info(summary);
+            }
+            self.reload_both();
+            for pane in &mut self.panes {
+                pane.clear_marks();
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = state;
+        }
+    }
+
+    /// `T` (touch): prompts for a timestamp (prefilled with the cursor
+    /// entry's mtime) and applies it to the marked (or cursor) entries'
+    /// modified/accessed times on commit. Empty input means "now".
+    pub(super) fn begin_touch(&mut self) {
+        if self.reject_if_virtual("touch") {
+            return;
+        }
+        let targets = self.active_pane().marked_or_cursor();
+        if targets.is_empty() {
+            self.log_error("no entry selected to touch");
+            return;
+        }
+        let prefill = self
+            .active_pane()
+            .selected_entry()
+            .and_then(|e| e.mtime)
+            .map(|t| {
+                let dt: DateTime<Local> = t.into();
+                dt.format("%Y-%m-%d %H:%M:%S").to_string()
+            })
+            .unwrap_or_default();
+        self.mode = Mode::Prompt {
+            kind: PromptKind::TouchTime { targets },
+            input: LineEditor::from_str(&prefill),
+        };
+    }
+
+    /// The committed touch prompt: parses the typed timestamp (three
+    /// formats, shortest first-match wins; empty = now) and applies it to
+    /// every target.
+    pub(super) fn commit_touch(&mut self, targets: Vec<PathBuf>, value: String) {
+        let value = value.trim();
+        let time = if value.is_empty() {
+            std::time::SystemTime::now()
+        } else {
+            match parse_touch_time(value) {
+                Some(t) => t,
+                None => {
+                    self.log_error(format!(
+                        "invalid time (expected YYYY-MM-DD [HH:MM[:SS]]): {value}"
+                    ));
+                    return;
+                }
+            }
+        };
+        let mut changed = 0usize;
+        let mut failed = 0usize;
+        for target in &targets {
+            match ops::set_times(target, time) {
+                Ok(()) => changed += 1,
+                Err(err) => {
+                    self.log_error(err.to_string());
+                    failed += 1;
+                }
+            }
+        }
+        let dt: DateTime<Local> = time.into();
+        let summary = format!(
+            "touch {}: {changed} changed{}",
+            dt.format("%Y-%m-%d %H:%M:%S"),
+            if failed > 0 {
+                format!(", {failed} failed")
+            } else {
+                String::new()
+            }
+        );
+        if failed > 0 {
+            self.log_error(summary);
+        } else {
+            self.log_info(summary);
+        }
+        self.reload_both();
+        for pane in &mut self.panes {
+            pane.clear_marks();
+        }
+    }
+
+    /// `I` (file_info): builds the metadata listing for the cursor entry —
+    /// everything re-read fresh from disk right now, not from the possibly
+    /// stale `FsEntry` — and opens the read-only info modal.
+    pub(super) fn begin_file_info(&mut self) {
+        if self.reject_if_virtual("file_info") {
+            return;
+        }
+        let Some(entry) = self.active_pane().selected_entry() else {
+            self.log_error("no entry selected");
+            return;
+        };
+        let path = entry.path.clone();
+        let name = entry.name.clone();
+        match build_file_info(&path, &name) {
+            Ok(mut info) => {
+                let marks = self.active_pane().marks.len();
+                if marks > 0 {
+                    // Shallow sum of the marked *files* (directories
+                    // excluded — that's `z`/calc_dir_size's job), straight
+                    // from fresh metadata like the rest of the dialog.
+                    let total: u64 = self
+                        .active_pane()
+                        .marks
+                        .iter()
+                        .filter_map(|p| std::fs::symlink_metadata(p).ok())
+                        .filter(|m| m.is_file())
+                        .map(|m| m.len())
+                        .sum();
+                    info.rows.push((String::new(), String::new()));
+                    info.rows.push((
+                        "marked".to_string(),
+                        format!("{marks} item(s), files total {total} bytes"),
+                    ));
+                }
+                self.mode = Mode::FileInfo {
+                    info: Box::new(info),
+                };
+            }
+            Err(err) => self.log_error(err.to_string()),
+        }
+    }
+
+    /// Fixed keys for the file-info modal: any of Esc/`q`/Enter closes it.
+    pub(super) fn handle_file_info_key(&mut self, code: KeyCode) {
+        if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+            self.mode = Mode::Normal;
+        }
+    }
+
     /// Fixed confirmation keys for `Mode::Confirm`; never consults the
     /// keymap. `y`/`Y` executes the pending op, anything else (including
     /// Esc) cancels.
@@ -773,6 +1090,7 @@ impl App {
     fn execute_pending(&mut self, op: PendingOp) {
         match op {
             PendingOp::Delete { targets } => self.spawn_delete(targets),
+            PendingOp::Symlink { targets, dest_dir } => self.execute_symlink(targets, dest_dir),
             PendingOp::Transfer {
                 kind,
                 pairs,
@@ -796,4 +1114,172 @@ impl App {
             PendingOp::Quit => self.should_quit = true,
         }
     }
+}
+
+/// Parses the touch prompt's timestamp: full date-time first, then the
+/// minute- and day-granularity short forms (missing parts zero-filled).
+/// Interpreted in local time; an ambiguous local time (DST fold) resolves
+/// to the earlier instant.
+fn parse_touch_time(value: &str) -> Option<std::time::SystemTime> {
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone};
+    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M"))
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+        })?;
+    let local = Local.from_local_datetime(&naive).earliest()?;
+    Some(local.into())
+}
+
+/// Builds the file-info modal's rows from a fresh `symlink_metadata` read
+/// (plus `read_link` for symlinks) — never from the pane's cached
+/// `FsEntry`, so what the dialog shows is what's on disk right now.
+fn build_file_info(path: &Path, name: &str) -> anyhow::Result<crate::mode::FileInfoData> {
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to stat: {}", path.display()))?;
+    let mut rows: Vec<(String, String)> = Vec::new();
+
+    rows.push(("path".to_string(), path.display().to_string()));
+    let kind = if meta.file_type().is_symlink() {
+        "symlink"
+    } else if meta.is_dir() {
+        "directory"
+    } else {
+        "file"
+    };
+    rows.push(("type".to_string(), kind.to_string()));
+
+    if meta.file_type().is_symlink() {
+        match std::fs::read_link(path) {
+            Ok(target) => {
+                let dangling = if path.metadata().is_err() {
+                    " (dangling)"
+                } else {
+                    ""
+                };
+                rows.push((
+                    "link to".to_string(),
+                    format!("{}{dangling}", target.display()),
+                ));
+            }
+            Err(err) => rows.push(("link to".to_string(), format!("<unreadable: {err}>"))),
+        }
+    }
+
+    rows.push((
+        "size".to_string(),
+        format!(
+            "{} bytes ({})",
+            crate::ui::pane_view::group_thousands(meta.len()),
+            crate::ui::pane_view::human_size(meta.len())
+        ),
+    ));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let entry_kind = if meta.file_type().is_symlink() {
+            EntryKind::Symlink
+        } else if meta.is_dir() {
+            EntryKind::Dir
+        } else {
+            EntryKind::File
+        };
+        rows.push((
+            "permissions".to_string(),
+            format!(
+                "{} ({:04o})",
+                crate::ui::pane_view::unix_permission_string(entry_kind, meta.mode()),
+                meta.mode() & 0o7777
+            ),
+        ));
+        let owner = user_name(meta.uid())
+            .map(|n| format!("{n} ({})", meta.uid()))
+            .unwrap_or_else(|| meta.uid().to_string());
+        let group = group_name(meta.gid())
+            .map(|n| format!("{n} ({})", meta.gid()))
+            .unwrap_or_else(|| meta.gid().to_string());
+        rows.push(("owner".to_string(), format!("{owner} : {group}")));
+        rows.push(("links".to_string(), meta.nlink().to_string()));
+        rows.push(("inode".to_string(), meta.ino().to_string()));
+    }
+
+    fn time_row(label: &str, t: std::io::Result<std::time::SystemTime>) -> (String, String) {
+        let value = t
+            .map(|t| {
+                let dt: DateTime<Local> = t.into();
+                dt.format("%Y-%m-%d %H:%M:%S").to_string()
+            })
+            .unwrap_or_else(|_| "-".to_string());
+        (label.to_string(), value)
+    }
+    rows.push(time_row("modified", meta.modified()));
+    rows.push(time_row("accessed", meta.accessed()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::new(meta.ctime().max(0) as u64, meta.ctime_nsec().max(0) as u32);
+        let dt: DateTime<Local> = ctime.into();
+        rows.push((
+            "changed".to_string(),
+            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        ));
+    }
+    #[cfg(not(unix))]
+    rows.push(time_row("created", meta.created()));
+
+    Ok(crate::mode::FileInfoData {
+        title: name.to_string(),
+        rows,
+    })
+}
+
+/// uid -> user name via `getpwuid_r`; `None` on any failure (the caller
+/// falls back to the bare number). One fixed-size buffer, no ERANGE
+/// retry — a name that doesn't fit in 1 KiB just shows numerically.
+#[cfg(unix)]
+fn user_name(uid: u32) -> Option<String> {
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = [0u8; 1024];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
+    Some(name.to_string_lossy().into_owned())
+}
+
+/// gid -> group name via `getgrgid_r`; same contract as `user_name`.
+#[cfg(unix)]
+fn group_name(gid: u32) -> Option<String> {
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut buf = [0u8; 1024];
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getgrgid_r(
+            gid,
+            &mut grp,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(grp.gr_name) };
+    Some(name.to_string_lossy().into_owned())
 }

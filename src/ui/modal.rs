@@ -51,6 +51,9 @@ pub fn render_prompt_box(frame: &mut Frame, area: Rect, mode: &Mode) {
             )
         }
         PromptKind::ArchivePassword { .. } => "Password".to_string(),
+        PromptKind::TouchTime { targets } => {
+            format!("Touch {} item(s) (empty = now)", targets.len())
+        }
     };
     let mask = matches!(kind, PromptKind::ArchivePassword { .. });
     render_input_box(frame, area, &title, input, mask);
@@ -337,6 +340,127 @@ pub fn render_transfer_collision(frame: &mut Frame, area: Rect, mode: &Mode) {
                 ListItem::new(Line::styled(format!(" {label}"), style))
             }),
     );
+    frame.render_widget(List::new(rows), inner);
+}
+
+/// Draws the chmod dialog (`Mode::Chmod`): a 3x3 rwx toggle grid (rows =
+/// user/group/other), the highlighted cell in reverse video, and a live
+/// `-rwxr-xr-x (0755)` readout of the mode being edited. No-op if `mode`
+/// is not `Chmod`.
+pub fn render_chmod(frame: &mut Frame, area: Rect, mode: &Mode) {
+    let Mode::Chmod { state } = mode else {
+        return;
+    };
+
+    let title = format!("Permissions ({} item(s))", state.targets.len());
+    const ROW_LABELS: [&str; 3] = ["user ", "group", "other"];
+    const BIT_CHARS: [char; 3] = ['r', 'w', 'x'];
+
+    // 3 grid rows + blank + live readout + blank + hint
+    let hint = "Space: toggle  0-7: set row  Enter: apply  Esc: cancel";
+    let inner_width = UnicodeWidthStr::width(hint).max(UnicodeWidthStr::width(title.as_str()));
+    let width = (inner_width as u16 + 4).clamp(1, area.width);
+    let height = 9u16.clamp(1, area.height);
+    let popup = centered_rect(area, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut rows: Vec<ListItem> = Vec::new();
+    for (row, row_label) in ROW_LABELS.iter().enumerate() {
+        let mut spans: Vec<ratatui::text::Span> =
+            vec![ratatui::text::Span::raw(format!(" {row_label}  "))];
+        for (col, bit_char) in BIT_CHARS.iter().enumerate() {
+            let cursor = row * 3 + col;
+            let bit = crate::mode::ChmodState::bit_at(cursor);
+            let ch = if state.bits & bit != 0 {
+                *bit_char
+            } else {
+                '-'
+            };
+            let style = if cursor == state.cursor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            spans.push(ratatui::text::Span::styled(format!(" {ch} "), style));
+        }
+        rows.push(ListItem::new(Line::from(spans)));
+    }
+    rows.push(ListItem::new(Line::raw(String::new())));
+    let mut readout = String::with_capacity(10);
+    readout.push('-');
+    const BITS: [u32; 9] = [
+        0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
+    ];
+    for (i, mask) in BITS.iter().enumerate() {
+        readout.push(if state.bits & mask != 0 {
+            BIT_CHARS[i % 3]
+        } else {
+            '-'
+        });
+    }
+    rows.push(ListItem::new(Line::raw(format!(
+        " {readout} ({:03o})",
+        state.bits
+    ))));
+    rows.push(ListItem::new(Line::raw(String::new())));
+    rows.push(ListItem::new(Line::styled(
+        hint,
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    frame.render_widget(List::new(rows), inner);
+}
+
+/// Draws the file-info modal (`Mode::FileInfo`): the pre-built
+/// `label: value` rows, labels right-padded so values align. No-op if
+/// `mode` is not `FileInfo`.
+pub fn render_file_info(frame: &mut Frame, area: Rect, mode: &Mode) {
+    let Mode::FileInfo { info } = mode else {
+        return;
+    };
+
+    let label_width = info
+        .rows
+        .iter()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<String> = info
+        .rows
+        .iter()
+        .map(|(label, value)| {
+            if label.is_empty() && value.is_empty() {
+                String::new()
+            } else {
+                format!("{label:<label_width$}  {value}")
+            }
+        })
+        .collect();
+
+    let inner_width = lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(info.title.as_str()));
+    let width = (inner_width as u16 + 4).clamp(1, area.width);
+    let height = (lines.len() as u16 + 2).clamp(1, area.height);
+    let popup = centered_rect(area, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(info.title.as_str())
+        .borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows: Vec<ListItem> = lines
+        .into_iter()
+        .map(|l| ListItem::new(Line::raw(l)))
+        .collect();
     frame.render_widget(List::new(rows), inner);
 }
 

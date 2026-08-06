@@ -185,6 +185,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
             render_status_bar(frame, rows[2], app);
             modal::render_sort_select(frame, area, &app.mode);
         }
+        Mode::Chmod { .. } => {
+            render_status_bar(frame, rows[2], app);
+            modal::render_chmod(frame, area, &app.mode);
+        }
+        Mode::FileInfo { .. } => {
+            render_status_bar(frame, rows[2], app);
+            modal::render_file_info(frame, area, &app.mode);
+        }
         Mode::Normal => render_status_bar(frame, rows[2], app),
         Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } | Mode::Settings { .. } => {
             unreachable!("handled by the full-frame takeover return above")

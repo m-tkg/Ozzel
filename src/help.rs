@@ -59,8 +59,10 @@ pub fn build_display_lines(keymap: &Keymap) -> Vec<String> {
 /// The fixed (non-remappable) keys of every other mode, since none of them
 /// consult the `Keymap` and so have no other way to show up here.
 const FIXED_KEY_LINES: &[&str] = &[
-    "Prompt (rename/mkdir/zip name/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
+    "Prompt (rename/mkdir/zip name/touch time/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
     "Confirm dialogs: y/Y proceed, any other key (including Esc) cancels",
+    "Chmod dialog: arrows move over the rwx grid, Space toggles, 0-7 set the highlighted row, Enter applies, Esc cancels",
+    "File info: Esc/Enter/q close",
     "Select menu (history/bookmarks): Up/Down move, Enter select, Esc cancel, d delete (bookmarks only)",
     "Viewer: Up/Down/j/k, Space/f/PageDown, b/PageUp, d/u (half page), g/Home top, G/End bottom, Left/Right scroll horizontally (text mode), Tab toggle text/hex, /,? search, n/N next/prev match, Esc clears a search then closes, q closes",
     "This help screen: same less-style scrolling and /,?,n/N search as the viewer, q/Esc/h close (Esc clears a search first)",
