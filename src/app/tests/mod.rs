@@ -11,4 +11,5 @@ mod pager;
 mod settings;
 mod sorting;
 mod startup;
+mod sync_dirs;
 mod virtual_dir;

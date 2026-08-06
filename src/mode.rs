@@ -250,6 +250,13 @@ pub enum ViewerSearch {
 pub const COLLISION_CHOICES: [&str; 5] =
     ["Overwrite", "Rename", "Skip", "Overwrite All", "Skip All"];
 
+/// The two sync modes the `Mode::SyncSelect` dialog offers, in
+/// display/cursor order — index 1 (`mirror`) is the destructive one.
+pub const SYNC_CHOICES: [&str; 2] = [
+    "Update copy — copy new/missing files only",
+    "Mirror — make dest identical (EXTRA FILES IN DEST WILL BE DELETED)",
+];
+
 /// Everything a same-name collision dialog needs to walk its conflicts
 /// one at a time: the destination pairs already settled (`resolved` —
 /// non-colliding sources start here), the colliding sources still to ask
@@ -336,6 +343,15 @@ pub enum PendingOp {
     Symlink {
         targets: Vec<PathBuf>,
         dest_dir: PathBuf,
+    },
+    /// A confirmed directory sync ready to spawn (see
+    /// `App::begin_sync_dirs` / `tasks::sync`). `mirror: true` also
+    /// deletes destination-only entries — that variant always goes
+    /// through a `Mode::Confirm` regardless of `confirm_operations`.
+    SyncDirs {
+        src: PathBuf,
+        dest: PathBuf,
+        mirror: bool,
     },
     /// A confirmed Copy/Move ready to spawn, as exact `(src, dest)`
     /// pairs. Reached only through the *no-collision* confirm
@@ -532,6 +548,15 @@ pub enum Mode {
         /// A `re:` pattern's compile error from the last run
         /// (`FilterSpec::error`), shown under the input line.
         error: Option<String>,
+    },
+    /// The sync-mode dialog (`Y`): choose between "update copy" and
+    /// "mirror" for syncing the active pane's directory onto the other
+    /// pane's (see `SYNC_CHOICES` / `App::handle_sync_select_key`).
+    /// `src`/`dest` are captured at open time, like every other dialog.
+    SyncSelect {
+        src: PathBuf,
+        dest: PathBuf,
+        cursor: usize,
     },
     /// The chmod dialog (`A`): a centered 3x3 rwx toggle grid. Fixed keys
     /// (see `App::handle_chmod_key`): arrows move over the grid, Space

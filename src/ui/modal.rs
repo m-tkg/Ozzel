@@ -343,6 +343,64 @@ pub fn render_transfer_collision(frame: &mut Frame, area: Rect, mode: &Mode) {
     frame.render_widget(List::new(rows), inner);
 }
 
+/// Draws the sync-mode dialog (`Mode::SyncSelect`, the `Y` action): the
+/// source/destination info lines and the two `SYNC_CHOICES` rows with the
+/// highlight on `cursor` — same info-lines-plus-choices layout as the
+/// transfer-collision dialog. No-op if `mode` is not `SyncSelect`.
+pub fn render_sync_select(frame: &mut Frame, area: Rect, mode: &Mode) {
+    let Mode::SyncSelect { src, dest, cursor } = mode else {
+        return;
+    };
+
+    let title = "Sync direction";
+    let info_lines = [
+        format!("from: {}", src.display()),
+        format!("to:   {}", dest.display()),
+    ];
+
+    let inner_width = crate::mode::SYNC_CHOICES
+        .iter()
+        .map(|label| UnicodeWidthStr::width(*label) + 1)
+        .chain(
+            info_lines
+                .iter()
+                .map(|l| UnicodeWidthStr::width(l.as_str())),
+        )
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(title));
+    let width = (inner_width as u16 + 4).clamp(1, area.width);
+    // borders + 2 info lines + 1 blank + 2 choices
+    let height = (crate::mode::SYNC_CHOICES.len() as u16 + info_lines.len() as u16 + 3)
+        .clamp(1, area.height);
+    let popup = centered_rect(area, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut rows: Vec<ListItem> = info_lines
+        .iter()
+        .map(|line| ListItem::new(Line::raw(line.clone())))
+        .collect();
+    rows.push(ListItem::new(Line::raw(String::new())));
+    rows.extend(
+        crate::mode::SYNC_CHOICES
+            .iter()
+            .enumerate()
+            .map(|(idx, label)| {
+                let style = if idx == *cursor {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::styled(format!(" {label}"), style))
+            }),
+    );
+    frame.render_widget(List::new(rows), inner);
+}
+
 /// Draws the chmod dialog (`Mode::Chmod`): a 3x3 rwx toggle grid (rows =
 /// user/group/other), the highlighted cell in reverse video, and a live
 /// `-rwxr-xr-x (0755)` readout of the mode being edited. No-op if `mode`

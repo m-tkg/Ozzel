@@ -8,6 +8,7 @@ pub mod copy_move;
 pub mod delete;
 pub mod dir_size;
 pub mod git_status;
+pub mod sync;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

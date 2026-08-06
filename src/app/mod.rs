@@ -24,8 +24,8 @@ use crate::help::HelpLine;
 use crate::keymap::{KeyCombo, Keymap};
 use crate::mode::{
     COLLISION_CHOICES, ChmodState, CollisionInfo, CollisionState, LineEditor, Mode,
-    PasswordPending, PendingOp, PromptKind, SearchDirection, SelectKind, SettingsEditor,
-    SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch, ViewerSyntax,
+    PasswordPending, PendingOp, PromptKind, SYNC_CHOICES, SearchDirection, SelectKind,
+    SettingsEditor, SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch, ViewerSyntax,
 };
 use crate::ops;
 use crate::pane::{CursorAnchor, PAGE_SIZE, Pane, SortKey};
@@ -760,6 +760,7 @@ impl App {
                 Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
                 Mode::FileSearch { .. } => self.handle_file_search_key(code, modifiers),
                 Mode::SortSelect { .. } => self.handle_sort_select_key(code),
+                Mode::SyncSelect { .. } => self.handle_sync_select_key(code),
                 Mode::Chmod { .. } => self.handle_chmod_key(code),
                 Mode::FileInfo { .. } => self.handle_file_info_key(code),
                 Mode::Settings { .. } => self.handle_settings_key(code, modifiers),
@@ -1058,6 +1059,10 @@ impl App {
             }
             Action::Diff => {
                 self.begin_diff();
+                Ok(())
+            }
+            Action::SyncDirs => {
+                self.begin_sync_dirs();
                 Ok(())
             }
         };

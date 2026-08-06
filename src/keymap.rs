@@ -232,6 +232,7 @@ impl Keymap {
             ("T", Touch),
             ("I", FileInfo),
             ("=", Diff),
+            ("Y", SyncDirs),
             ("h", Help),
             ("?", Help),
             ("H", HistoryJump),

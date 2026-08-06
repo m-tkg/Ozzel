@@ -72,7 +72,9 @@ fn run_trash(id: TaskId, tx: &Sender<TaskEvent>, targets: &[PathBuf]) {
 /// terminal without an Automation permission grant. Every other platform
 /// uses the crate's own default (`freedesktop.org` trash spec on Linux,
 /// the Windows shell API on Windows), which needs no such workaround.
-fn trash_all(targets: &[PathBuf]) -> Result<(), trash::Error> {
+// `pub(crate)`: `tasks::sync`'s mirror phase deletes through the same
+// behavior-respecting path.
+pub(crate) fn trash_all(targets: &[PathBuf]) -> Result<(), trash::Error> {
     #[cfg(target_os = "macos")]
     {
         use trash::macos::{DeleteMethod, TrashContextExtMacos};
@@ -130,7 +132,7 @@ fn run_permanent(
     let _ = tx.send(TaskEvent::Finished { id, result });
 }
 
-fn delete_one_permanently(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn delete_one_permanently(path: &Path) -> anyhow::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
         fs::remove_dir_all(path)?;

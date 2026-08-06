@@ -79,6 +79,10 @@ pub enum Action {
     /// pane's directory and shows the unified diff in the viewer, colored
     /// (`ViewerSyntax::Diff`). See `App::begin_diff`.
     Diff,
+    /// Syncs the active pane's directory onto the other pane's, after a
+    /// mode dialog (update copy vs mirror-with-deletes). See
+    /// `App::begin_sync_dirs` / `tasks::sync`.
+    SyncDirs,
     Filter,
     ClearFilter,
     /// Prefix-jump incremental search (`Mode::JumpSearch`): pure cursor
@@ -181,7 +185,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 55] = [
+    pub const ALL: [Action; 56] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -218,6 +222,7 @@ impl Action {
         Action::Touch,
         Action::FileInfo,
         Action::Diff,
+        Action::SyncDirs,
         Action::Filter,
         Action::ClearFilter,
         Action::JumpSearch,
@@ -248,7 +253,7 @@ impl Action {
             Mark | MarkAll => ActionCategory::Marks,
             Rename | RenameMarks | Mkdir | Delete | Copy | Move | Duplicate | CopyPath
             | CalcDirSize | ZipMarked | Unzip | CancelTasks | Symlink | Chmod | Touch
-            | FileInfo | Diff => ActionCategory::FileOps,
+            | FileInfo | Diff | SyncDirs => ActionCategory::FileOps,
             Filter | ClearFilter | JumpSearch | FileSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
@@ -298,6 +303,7 @@ impl Action {
             Touch => "Set the modified time of marked entries (or the cursor entry)",
             FileInfo => "Show detailed information about the cursor entry",
             Diff => "Diff the cursor file against the same-named file in the other pane",
+            SyncDirs => "Sync this pane's directory onto the other pane (update copy or mirror)",
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
             JumpSearch => "Jump the cursor to entries by typed prefix",
@@ -365,6 +371,7 @@ impl Action {
             Touch => "touch",
             FileInfo => "file_info",
             Diff => "diff",
+            SyncDirs => "sync_dirs",
             HistoryJump => "history_jump",
             HistoryBack => "history_back",
             HistoryForward => "history_forward",

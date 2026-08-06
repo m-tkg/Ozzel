@@ -817,6 +817,94 @@ impl App {
         }
     }
 
+    /// `Y` (sync_dirs): opens the sync-mode dialog for syncing the active
+    /// pane's whole directory onto the other pane's. Same-directory and
+    /// nested (either-way) pane pairs are rejected up front — a mirror of
+    /// a directory into its own ancestor/descendant would eat itself.
+    pub(super) fn begin_sync_dirs(&mut self) {
+        if self.reject_if_virtual("sync_dirs") {
+            return;
+        }
+        if self.other_pane().is_virtual() {
+            self.log_error("cannot sync into a virtual directory (archive) pane");
+            return;
+        }
+        let src = self.active_pane().cwd.clone();
+        let dest = self.other_pane().cwd.clone();
+        if src == dest {
+            self.log_error("both panes show the same directory — nothing to sync");
+            return;
+        }
+        if dest.starts_with(&src) || src.starts_with(&dest) {
+            self.log_error("cannot sync between a directory and its own subdirectory");
+            return;
+        }
+        self.mode = Mode::SyncSelect {
+            src,
+            dest,
+            cursor: 0,
+        };
+    }
+
+    /// Fixed keys for the sync-mode dialog: up/down move over
+    /// `SYNC_CHOICES`, Enter picks (update goes through the ordinary
+    /// `confirm_operations` gate; mirror *always* confirms, spelling out
+    /// the deletions), Esc cancels.
+    pub(super) fn handle_sync_select_key(&mut self, code: KeyCode) {
+        let Mode::SyncSelect { cursor, .. } = &mut self.mode else {
+            return;
+        };
+        match code {
+            KeyCode::Up => *cursor = cursor.checked_sub(1).unwrap_or(SYNC_CHOICES.len() - 1),
+            KeyCode::Down => *cursor = (*cursor + 1) % SYNC_CHOICES.len(),
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                let Mode::SyncSelect { src, dest, cursor } =
+                    std::mem::replace(&mut self.mode, Mode::Normal)
+                else {
+                    return;
+                };
+                let mirror = cursor == 1;
+                if mirror {
+                    // Never gated on confirm_operations: this one deletes.
+                    let message = format!(
+                        "Mirror sync: entries in {} not present in {} will be DELETED. Proceed? (y/n)",
+                        dest.display(),
+                        src.display()
+                    );
+                    self.confirm(message, PendingOp::SyncDirs { src, dest, mirror });
+                } else if self.config.confirm_operations {
+                    let message = format!(
+                        "Sync (update) {} -> {}? (y/n)",
+                        src.display(),
+                        dest.display()
+                    );
+                    self.confirm(message, PendingOp::SyncDirs { src, dest, mirror });
+                } else {
+                    self.spawn_sync(src, dest, mirror);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Hands the actual sync off to a background task (see
+    /// `tasks::sync::run_sync`); see `spawn_transfer` for the completion
+    /// story (the reload both panes get afterward is exactly right here).
+    fn spawn_sync(&mut self, src: PathBuf, dest: PathBuf, mirror: bool) {
+        let mode_label = if mirror { "mirror" } else { "update" };
+        self.log_info(format!(
+            "sync ({mode_label}): {} -> {}",
+            src.display(),
+            dest.display()
+        ));
+        let behavior = self.config.delete_behavior;
+        let desc = format!("sync ({mode_label}) to {}", dest.display());
+        self.tasks.spawn(desc, move |id, tx, cancel| {
+            crate::tasks::sync::run_sync(id, tx, cancel, src, dest, mirror, behavior);
+        });
+    }
+
     /// `A` (chmod): opens the 3x3 rwx toggle dialog for the marked (or
     /// cursor) entries, prefilled with the first target's current mode.
     /// Unix only — the mode bits simply don't exist elsewhere, so on other
@@ -1091,6 +1179,7 @@ impl App {
         match op {
             PendingOp::Delete { targets } => self.spawn_delete(targets),
             PendingOp::Symlink { targets, dest_dir } => self.execute_symlink(targets, dest_dir),
+            PendingOp::SyncDirs { src, dest, mirror } => self.spawn_sync(src, dest, mirror),
             PendingOp::Transfer {
                 kind,
                 pairs,
