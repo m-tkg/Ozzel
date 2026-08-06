@@ -497,7 +497,7 @@ mod tests {
             // A wide (e.g. CJK) glyph occupies two cells: the first holds
             // the real symbol, the second holds a placeholder — naively
             // concatenating every cell's symbol would insert that
-            // placeholder in the middle of, say, "動作" and break a plain
+            // placeholder in the middle of a CJK string and break a plain
             // `.contains(...)` check. Skip ahead by each symbol's actual
             // display width instead.
             let mut x = 0u16;

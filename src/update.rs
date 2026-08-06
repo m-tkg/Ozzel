@@ -78,18 +78,18 @@ pub fn decide_update(current: &str, remote: Option<&str>, force: bool) -> Update
 /// `llmeter` project's `self_update`.
 pub fn self_update(force: bool) -> anyhow::Result<()> {
     let current = env!("CARGO_PKG_VERSION");
-    println!("現在のバージョン: {current}");
+    println!("current version: {current}");
 
     let remote = fetch_remote_version();
     match decide_update(current, remote.as_deref(), force) {
         UpdateDecision::AlreadyLatest => {
             let remote = remote.expect("AlreadyLatest implies a known remote version");
-            println!("最新版です（{remote}）。--force で強制再インストールできる。");
+            println!("already up to date ({remote}). Use --force to reinstall anyway.");
             return Ok(());
         }
         UpdateDecision::Install => match &remote {
-            Some(remote) => println!("リモートのバージョン: {remote}。更新する。"),
-            None => println!("リモートのバージョン確認に失敗。そのまま再インストールする。"),
+            Some(remote) => println!("remote version: {remote}. Updating."),
+            None => println!("could not determine the remote version. Reinstalling anyway."),
         },
     }
 
@@ -97,9 +97,9 @@ pub fn self_update(force: bool) -> anyhow::Result<()> {
         .args(["install", "--git", REPO_URL, "--force"])
         .status();
     match status {
-        Ok(s) if s.success() => println!("更新完了。"),
-        Ok(s) => bail!("cargo install が失敗した (exit: {s})"),
-        Err(e) => bail!("cargo を実行できない: {e}（cargo のインストールが必要）"),
+        Ok(s) if s.success() => println!("update complete."),
+        Ok(s) => bail!("cargo install failed (exit: {s})"),
+        Err(e) => bail!("could not run cargo: {e} (cargo must be installed)"),
     }
     Ok(())
 }

@@ -50,7 +50,7 @@ fn default_dim_inactive() -> bool {
     true
 }
 
-/// Cyan (水色) for directories.
+/// Cyan for directories.
 fn default_directory_color() -> Color {
     Color::Cyan
 }

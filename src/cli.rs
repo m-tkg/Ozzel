@@ -52,9 +52,9 @@ pub struct Cli {
 pub enum Command {
     /// Update ozzel to the latest version on GitHub (`cargo install --git`)
     #[command(after_help = "\
-GitHub の main ブランチの版と比較し、新しければ
-`cargo install --git https://github.com/m-tkg/Ozzel --force` を実行する。
-ビルドに1〜2分かかる。cargo が必要。")]
+Compares against the version on GitHub's main branch and, if it is newer,
+runs `cargo install --git https://github.com/m-tkg/Ozzel --force`.
+The build takes a minute or two. Requires cargo.")]
     Update {
         /// Reinstall even if the remote version matches the current one
         #[arg(long)]
