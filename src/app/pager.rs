@@ -105,11 +105,110 @@ impl App {
                     scroll: 0,
                     h_scroll: 0,
                     truncated: loaded.truncated,
+                    syntax: ViewerSyntax::Plain,
                     search: ViewerSearch::Idle,
                 };
             }
             Err(err) => self.log_error(format!("{}: {err}", path.display())),
         }
+    }
+
+    /// `=` (diff): diffs the cursor file against the same-named file in
+    /// the other pane's directory and shows the unified diff in the
+    /// viewer (`ViewerSyntax::Diff` colors it; scroll/search/close are
+    /// the ordinary viewer keys). Identical files and binary files log a
+    /// note instead of opening an empty/garbled view.
+    pub(super) fn begin_diff(&mut self) {
+        if self.reject_if_virtual("diff") {
+            return;
+        }
+        if self.other_pane().is_virtual() {
+            self.log_error("cannot diff against a virtual directory (archive) pane");
+            return;
+        }
+        let Some(entry) = self.active_pane().selected_entry() else {
+            self.log_error("no entry selected to diff");
+            return;
+        };
+        if entry.is_dir_like() {
+            self.log_error("diff works on files, not directories");
+            return;
+        }
+        let name = entry.name.clone();
+        let left_path = entry.path.clone();
+        let right_path = self.other_pane().cwd.join(&name);
+        if right_path == left_path {
+            self.log_error("both panes show the same file");
+            return;
+        }
+        if !right_path.is_file() {
+            self.log_error(format!("no file named '{name}' in the other pane"));
+            return;
+        }
+
+        let (left_bytes, left_truncated) = match viewer::read_capped(&left_path) {
+            Ok(read) => read,
+            Err(err) => {
+                self.log_error(format!("{}: {err}", left_path.display()));
+                return;
+            }
+        };
+        let (right_bytes, right_truncated) = match viewer::read_capped(&right_path) {
+            Ok(read) => read,
+            Err(err) => {
+                self.log_error(format!("{}: {err}", right_path.display()));
+                return;
+            }
+        };
+        if viewer::looks_binary(&left_bytes) || viewer::looks_binary(&right_bytes) {
+            self.log_info(format!(
+                "binary files — not diffing (left: {} bytes, right: {} bytes)",
+                left_bytes.len(),
+                right_bytes.len()
+            ));
+            return;
+        }
+        if left_bytes == right_bytes {
+            self.log_info(format!("{name}: files are identical"));
+            return;
+        }
+
+        let truncated = left_truncated || right_truncated;
+        let left_text = String::from_utf8_lossy(&left_bytes);
+        let right_text = String::from_utf8_lossy(&right_bytes);
+        let unified = crate::diff::unified(
+            &left_path.display().to_string(),
+            &right_path.display().to_string(),
+            &left_text,
+            &right_text,
+        );
+        if unified.is_empty() {
+            // Byte-different but line-identical (e.g. a missing trailing
+            // newline the lossy decode collapsed) — still nothing to show.
+            self.log_info(format!("{name}: files are identical"));
+            return;
+        }
+
+        // The `[truncated]` label matters here more than in a plain view:
+        // a diff of two capped reads can claim agreement past the cap.
+        let title = format!(
+            "diff: {} | {}{}",
+            left_path.display(),
+            right_path.display(),
+            if truncated { " [truncated]" } else { "" }
+        );
+        let loaded = viewer::load_bytes(unified.into_bytes(), truncated);
+        self.mode = Mode::Viewer {
+            path: PathBuf::from(title),
+            lines: loaded.lines,
+            bytes: loaded.bytes,
+            view_mode: ViewMode::Text,
+            scroll: 0,
+            h_scroll: 0,
+            truncated,
+            syntax: ViewerSyntax::Diff,
+            search: ViewerSearch::Idle,
+        };
     }
 
     /// The Virtual Directory counterpart of `open_viewer`: extracts
@@ -182,6 +281,7 @@ impl App {
             scroll: 0,
             h_scroll: 0,
             truncated: loaded.truncated,
+            syntax: ViewerSyntax::Plain,
             search: ViewerSearch::Idle,
         };
     }

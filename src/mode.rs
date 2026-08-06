@@ -136,6 +136,17 @@ impl ViewMode {
     }
 }
 
+/// How the viewer's *text* mode styles its lines: `Plain` for ordinary
+/// files, `Diff` for the `=` action's generated unified diff (`+`/`-`
+/// green/red, `@@` cyan, `---`/`+++` bold). Hex mode and every scroll/
+/// search key ignore this entirely — it's purely a per-line base style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewerSyntax {
+    #[default]
+    Plain,
+    Diff,
+}
+
 /// Which way a viewer search (`/` vs `?`) reads the file — `n` repeats the
 /// last search in this direction, `N` in the reverse of it, exactly like
 /// `less`.
@@ -439,6 +450,9 @@ pub enum Mode {
         h_scroll: usize,
         /// The file was larger than the viewer's size cap and got cut off.
         truncated: bool,
+        /// Text-mode line styling — `Plain` for real files, `Diff` for
+        /// the `=` action's generated unified diff. See `ViewerSyntax`.
+        syntax: ViewerSyntax,
         /// `less`-style `/`/`?` search state — see `ViewerSearch`.
         search: ViewerSearch,
     },

@@ -25,7 +25,7 @@ use crate::keymap::{KeyCombo, Keymap};
 use crate::mode::{
     COLLISION_CHOICES, ChmodState, CollisionInfo, CollisionState, LineEditor, Mode,
     PasswordPending, PendingOp, PromptKind, SearchDirection, SelectKind, SettingsEditor,
-    SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch,
+    SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch, ViewerSyntax,
 };
 use crate::ops;
 use crate::pane::{CursorAnchor, PAGE_SIZE, Pane, SortKey};
@@ -1054,6 +1054,10 @@ impl App {
             }
             Action::FileInfo => {
                 self.begin_file_info();
+                Ok(())
+            }
+            Action::Diff => {
+                self.begin_diff();
                 Ok(())
             }
         };

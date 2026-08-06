@@ -80,7 +80,9 @@ pub fn load_bytes(bytes: Vec<u8>, truncated: bool) -> LoadedFile {
     }
 }
 
-fn read_capped(path: &Path) -> Result<(Vec<u8>, bool), LoadError> {
+// `pub(crate)`: the `=` (diff) action reads both sides through the exact
+// same cap the viewer itself uses (see `App::begin_diff`).
+pub(crate) fn read_capped(path: &Path) -> Result<(Vec<u8>, bool), LoadError> {
     let metadata = fs::metadata(path).map_err(|e| LoadError::Io(e.to_string()))?;
     let file_len = metadata.len();
     let to_read = file_len.min(SIZE_CAP) as usize;
@@ -93,7 +95,9 @@ fn read_capped(path: &Path) -> Result<(Vec<u8>, bool), LoadError> {
     Ok((buf, file_len > SIZE_CAP))
 }
 
-fn looks_binary(bytes: &[u8]) -> bool {
+// `pub(crate)`: the `=` (diff) action refuses to diff binary files using
+// the same sniff the viewer uses to pick its initial mode.
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     let sniff_len = bytes.len().min(BINARY_SNIFF_LEN);
     bytes[..sniff_len].contains(&0)
 }

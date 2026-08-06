@@ -75,6 +75,10 @@ pub enum Action {
     /// permissions, owner/group, timestamps, inode, link target, ...),
     /// re-read from disk at open time. See `App::begin_file_info`.
     FileInfo,
+    /// Diffs the cursor file against the same-named file in the other
+    /// pane's directory and shows the unified diff in the viewer, colored
+    /// (`ViewerSyntax::Diff`). See `App::begin_diff`.
+    Diff,
     Filter,
     ClearFilter,
     /// Prefix-jump incremental search (`Mode::JumpSearch`): pure cursor
@@ -177,7 +181,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 54] = [
+    pub const ALL: [Action; 55] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -213,6 +217,7 @@ impl Action {
         Action::Chmod,
         Action::Touch,
         Action::FileInfo,
+        Action::Diff,
         Action::Filter,
         Action::ClearFilter,
         Action::JumpSearch,
@@ -243,7 +248,7 @@ impl Action {
             Mark | MarkAll => ActionCategory::Marks,
             Rename | RenameMarks | Mkdir | Delete | Copy | Move | Duplicate | CopyPath
             | CalcDirSize | ZipMarked | Unzip | CancelTasks | Symlink | Chmod | Touch
-            | FileInfo => ActionCategory::FileOps,
+            | FileInfo | Diff => ActionCategory::FileOps,
             Filter | ClearFilter | JumpSearch | FileSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
@@ -292,6 +297,7 @@ impl Action {
             Chmod => "Edit permissions of marked entries (or the cursor entry)",
             Touch => "Set the modified time of marked entries (or the cursor entry)",
             FileInfo => "Show detailed information about the cursor entry",
+            Diff => "Diff the cursor file against the same-named file in the other pane",
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
             JumpSearch => "Jump the cursor to entries by typed prefix",
@@ -358,6 +364,7 @@ impl Action {
             Chmod => "chmod",
             Touch => "touch",
             FileInfo => "file_info",
+            Diff => "diff",
             HistoryJump => "history_jump",
             HistoryBack => "history_back",
             HistoryForward => "history_forward",
