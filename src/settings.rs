@@ -107,7 +107,7 @@ pub enum ItemKind {
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 7] = [
+pub const BEHAVIOR_ITEMS: [Item; 8] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations（コピー/移動前に確認）",
@@ -141,6 +141,14 @@ pub const BEHAVIOR_ITEMS: [Item; 7] = [
     Item {
         key: "dim_inactive",
         label: "dim_inactive（非アクティブ側を薄暗く）",
+        kind: ItemKind::Bool,
+    },
+    // Appended last (rather than next to its `g`-key relatives) so the
+    // longstanding items above keep their positions — tests and muscle
+    // memory both index into this array.
+    Item {
+        key: "file_search_incremental",
+        label: "file_search_incremental（ファイル名検索を入力の度に実行）",
         kind: ItemKind::Bool,
     },
 ];
@@ -267,6 +275,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "confirm_quit" => config.confirm_quit,
                 "quit_cd" => config.quit_cd,
                 "mouse" => config.mouse,
+                "file_search_incremental" => config.file_search_incremental,
                 "show_permissions" => config.show_permissions,
                 "dim_inactive" => config.colors.dim_inactive,
                 _ => unreachable!("bool item key {:?}", item.key),

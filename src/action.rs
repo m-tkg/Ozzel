@@ -48,6 +48,13 @@ pub enum Action {
     /// typed so far (case-insensitive), `..` excluded. See
     /// `App::begin_jump_search`.
     JumpSearch,
+    /// Recursive file-*name* search under the active pane's cwd
+    /// (`Mode::FileSearch`): a snapshot of the whole subtree, narrowed by
+    /// the same query grammar the pane filter uses (substring by default,
+    /// `re:` for a regex); selecting a hit jumps the pane to its parent
+    /// directory with the cursor on it. See `App::begin_file_search` and
+    /// `crate::file_search`.
+    FileSearch,
     ZipMarked,
     Unzip,
     /// Cancels every currently-running background task (copy/move/delete/
@@ -135,7 +142,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 45] = [
+    pub const ALL: [Action; 46] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -166,6 +173,7 @@ impl Action {
         Action::Filter,
         Action::ClearFilter,
         Action::JumpSearch,
+        Action::FileSearch,
         Action::HistoryJump,
         Action::HistoryBack,
         Action::HistoryForward,
@@ -193,7 +201,7 @@ impl Action {
             Mark | MarkAll => ActionCategory::Marks,
             Rename | Mkdir | Delete | Copy | Move | Duplicate | CopyPath | ZipMarked | Unzip
             | CancelTasks => ActionCategory::FileOps,
-            Filter | ClearFilter | JumpSearch => ActionCategory::Filter,
+            Filter | ClearFilter | JumpSearch | FileSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
             }
@@ -236,6 +244,7 @@ impl Action {
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
             JumpSearch => "Jump the cursor to entries by typed prefix",
+            FileSearch => "Search file names recursively under the current directory",
             HistoryJump => "Open the directory history menu",
             HistoryBack => "Go back to the previous directory in this pane",
             HistoryForward => "Go forward to the next directory in this pane",
@@ -286,6 +295,7 @@ impl Action {
             Filter => "filter",
             ClearFilter => "clear_filter",
             JumpSearch => "jump_search",
+            FileSearch => "file_search",
             ZipMarked => "zip_marked",
             Unzip => "unzip",
             CancelTasks => "cancel_tasks",

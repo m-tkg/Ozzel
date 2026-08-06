@@ -19,6 +19,7 @@ pub mod config;
 pub mod entry;
 pub mod event;
 pub mod external;
+pub mod file_search;
 pub mod filter;
 pub mod function_list;
 pub mod help;

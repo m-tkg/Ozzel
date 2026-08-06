@@ -54,6 +54,13 @@ confirm_quit = true
 # 参照してください。
 quit_cd = true
 
+# --- ファイル名検索の実行タイミング ------------------------------------------
+# デフォルト true: `g` のファイル名検索（カレントディレクトリ配下を再帰検索）
+# は入力の度に結果を更新します（インクリメンタル）。false にすると、入力中は
+# 前回の結果を表示したままにし、Enter を押したときだけ検索を実行します
+# （巨大なツリーで毎キーストロークの再マッチが重い場合向け）。
+file_search_incremental = true
+
 # --- マウス操作 -------------------------------------------------------------
 # デフォルト true: クリックでのペイン/カーソル移動、ホイールでのスクロール、
 # ドラッグでの範囲トグルマーク（通過した行のマーク状態を反転）、
@@ -140,7 +147,8 @@ executable = "yellow"
 # cursor_up, cursor_down, focus_left, focus_right, page_up, page_down,
 # top, bottom, switch_pane, open, parent, cycle_sort, toggle_hidden,
 # swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
-# duplicate, copy_path, filter, clear_filter, zip_marked, unzip,
+# duplicate, copy_path, filter, clear_filter, jump_search, file_search,
+# zip_marked, unzip,
 # cancel_tasks, history_jump, history_back, history_forward, bookmark_jump,
 # bookmark_add, go_home, command_line, open_editor, open_default,
 # help, edit_config, show_log, function_list, settings, quit
@@ -192,6 +200,7 @@ cancel_tasks = ["C-k"]
 filter = ["/", "f"]
 clear_filter = ["Esc"]
 jump_search = ["\\"]
+file_search = ["g"]
 history_jump = ["H"]
 history_back = ["S-Left"]
 history_forward = ["S-Right"]

@@ -9,6 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::action::Action;
+use crate::file_search::FileSearchTree;
 use crate::keymap::KeyCombo;
 use crate::settings::Category;
 use crate::viewer::Matcher;
@@ -327,6 +328,33 @@ pub enum Mode {
     FunctionList {
         input: LineEditor,
         cursor: usize,
+    },
+    /// The recursive file-name search popup (`g`): the subtree under the
+    /// active pane's cwd, walked *once* into `tree` when the popup opened,
+    /// narrowed by the pane filter's query grammar (see
+    /// `crate::file_search`). Selecting a hit jumps the pane to its parent
+    /// directory with the cursor on it — see `App::handle_file_search_key`.
+    FileSearch {
+        input: LineEditor,
+        /// Index into `results` (the narrowed list), not `tree.entries`.
+        cursor: usize,
+        /// The one-shot snapshot — `Rc` because `Mode` is `Clone` and a
+        /// snapshot can hold up to `MAX_TREE_ENTRIES` entries; a refcount
+        /// bump beats deep-copying that on every mode clone (single-
+        /// threaded `App` state, so `Rc` over `Arc`).
+        tree: Rc<FileSearchTree>,
+        /// Indices into `tree.entries` matching the *last-run* query.
+        /// Always current in incremental mode; in Enter-run mode
+        /// (`config.file_search_incremental = false`) it deliberately lags
+        /// the input until the next `Enter`.
+        results: Vec<usize>,
+        /// The query `results` was computed from — `Enter`'s "re-run or
+        /// jump?" pivot: a mismatch against the current input means the
+        /// results are stale, so `Enter` re-runs instead of jumping.
+        last_run_query: String,
+        /// A `re:` pattern's compile error from the last run
+        /// (`FilterSpec::error`), shown under the input line.
+        error: Option<String>,
     },
     /// The full-frame settings screen (`S`/`S-s`): raspi-config-style
     /// category -> item -> editor navigation, see `crate::settings` for

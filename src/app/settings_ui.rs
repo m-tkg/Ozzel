@@ -247,6 +247,7 @@ impl App {
                     "confirm_quit" => self.config.confirm_quit,
                     "quit_cd" => self.config.quit_cd,
                     "mouse" => self.config.mouse,
+                    "file_search_incremental" => self.config.file_search_incremental,
                     "show_permissions" => self.config.show_permissions,
                     "dim_inactive" => self.config.colors.dim_inactive,
                     _ => unreachable!("unknown bool key {:?}", item.key),
