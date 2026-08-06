@@ -36,6 +36,64 @@ pub enum PromptKind {
     Duplicate {
         source: PathBuf,
     },
+    /// The rename branch of one `Mode::TransferCollision` decision:
+    /// collecting the new destination name for the collision currently
+    /// being asked about (`state.current`). Boxed — `CollisionState`
+    /// carries the whole remaining worklist, and `PromptKind` is embedded
+    /// in the frequently-moved `Mode`. Committing a valid, non-colliding
+    /// name resolves this entry and returns to the collision dialog for
+    /// the next one; a name that *also* collides re-asks the same entry;
+    /// Esc cancels the entire transfer (same as Esc in the dialog).
+    CollisionRename {
+        state: Box<CollisionState>,
+    },
+    /// Collecting a password for an encrypted zip (masked input — see
+    /// `ui::modal::render_prompt_box`). `pending` carries the operation
+    /// to retry once the password is typed; committing verifies it on the
+    /// main thread first (a wrong one logs and re-prompts) and, for the
+    /// Virtual-Directory-scoped operations, caches it on the `VirtualDir`
+    /// for the rest of the session. See `App::commit_archive_password`.
+    ArchivePassword {
+        pending: PasswordPending,
+    },
+    /// One step of `rename_marks` (`m`): renaming `current` (a name in
+    /// `dir`), with `queue` holding the names still to go. Committing one
+    /// rename re-enters `Mode::Prompt` with the next `RenameMany` state
+    /// (see `App::commit_rename_many`); Esc cancels the whole remainder.
+    /// `done`/`total` drive the `(n/total)` progress in the prompt title.
+    /// `dir` is captured at start time rather than re-read from the pane,
+    /// so a reload mid-sequence can't silently retarget the renames.
+    RenameMany {
+        dir: PathBuf,
+        current: String,
+        queue: std::collections::VecDeque<String>,
+        done: usize,
+        total: usize,
+    },
+}
+
+/// The operation a `PromptKind::ArchivePassword` retries once a password
+/// has been typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordPending {
+    /// Opening one archive-internal file in the built-in viewer.
+    View {
+        archive_path: PathBuf,
+        inner_path: PathBuf,
+    },
+    /// A Virtual Directory `C` extraction (continues into the normal
+    /// collision-confirm flow once the password verifies).
+    Extract {
+        archive_path: PathBuf,
+        inner_targets: Vec<PathBuf>,
+        dest_dir: PathBuf,
+    },
+    /// A whole-archive `u` unzip (continues into the overwrite-confirm
+    /// flow once the password verifies).
+    Unzip {
+        archive_path: PathBuf,
+        dest_dir: PathBuf,
+    },
 }
 
 /// Which jump menu a `Mode::Select` is showing — `d` (delete) only makes
@@ -169,20 +227,62 @@ pub enum ViewerSearch {
     },
 }
 
+/// The five answers the collision dialog (`Mode::TransferCollision`)
+/// offers for one same-name conflict, in display/cursor order.
+pub const COLLISION_CHOICES: [&str; 5] =
+    ["Overwrite", "Rename", "Skip", "Overwrite All", "Skip All"];
+
+/// Everything a same-name collision dialog needs to walk its conflicts
+/// one at a time: the destination pairs already settled (`resolved` —
+/// non-colliding sources start here), the colliding sources still to ask
+/// about (`pending`), and the one currently on screen (`current`). Built
+/// by `App::begin_transfer` when a Copy/Move finds collisions; consumed
+/// by `App::handle_transfer_collision_key`, which spawns the task from
+/// `resolved` once every conflict has an answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollisionState {
+    pub kind: TransferKind,
+    pub dest_dir: PathBuf,
+    /// `(src, exact dest)` pairs ready to transfer.
+    pub resolved: Vec<(PathBuf, PathBuf)>,
+    /// Colliding sources not yet asked about.
+    pub pending: std::collections::VecDeque<PathBuf>,
+    pub current: CollisionInfo,
+    /// 1-based ordinal of `current` among `total` collisions (title's
+    /// `(2/5)`).
+    pub index: usize,
+    pub total: usize,
+    /// Highlight index into `COLLISION_CHOICES`.
+    pub cursor: usize,
+}
+
+/// The display facts for one collision: both sides' size/mtime lines,
+/// pre-formatted by `App::collision_info` (the dialog renderer stays
+/// I/O-free), with `[New]` already appended to whichever side is newer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollisionInfo {
+    pub src: PathBuf,
+    /// `src`'s file name — the dest name it collides under, and the
+    /// prefill for the Rename branch.
+    pub name: String,
+    pub src_line: String,
+    pub dest_line: String,
+}
+
 /// The operation a `Mode::Confirm` will perform if the user answers yes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingOp {
     Delete {
         targets: Vec<PathBuf>,
     },
-    /// A confirmed Copy/Move ready to spawn. Despite the name, this covers
-    /// both cases that lead to a confirm dialog: an actual filename
-    /// collision, and (when `config.confirm_operations` is true, the
-    /// default) a plain transfer with no collision at all — the confirm
-    /// message itself distinguishes the two (see `App::begin_transfer`).
-    Overwrite {
+    /// A confirmed Copy/Move ready to spawn, as exact `(src, dest)`
+    /// pairs. Reached only through the *no-collision* confirm
+    /// (`config.confirm_operations`) — a transfer with same-name
+    /// collisions goes through `Mode::TransferCollision` instead, which
+    /// spawns directly without a second confirm.
+    Transfer {
         kind: TransferKind,
-        sources: Vec<PathBuf>,
+        pairs: Vec<(PathBuf, PathBuf)>,
         dest_dir: PathBuf,
     },
     /// The archive path already existed; overwrite it.
@@ -191,10 +291,12 @@ pub enum PendingOp {
         archive_path: PathBuf,
     },
     /// One or more top-level entries in the archive already exist in the
-    /// destination directory; overwrite them.
+    /// destination directory; overwrite them. `password` (already
+    /// verified at prompt time) rides along for an encrypted zip.
     UnzipOverwrite {
         archive_path: PathBuf,
         dest_dir: PathBuf,
+        password: Option<String>,
     },
     /// A confirmed extraction from a Virtual Directory (`C` while the
     /// active pane is browsing inside a `.zip`): a partial extraction of
@@ -205,6 +307,9 @@ pub enum PendingOp {
         archive_path: PathBuf,
         inner_targets: Vec<PathBuf>,
         dest_dir: PathBuf,
+        /// Already verified at prompt time for an encrypted zip; `None`
+        /// for everything else.
+        password: Option<String>,
     },
     /// Confirmed by the quit-while-busy guard: tasks are still running but
     /// the user wants out anyway.
@@ -251,6 +356,13 @@ pub enum Mode {
     Confirm {
         message: String,
         on_yes: PendingOp,
+    },
+    /// The per-file same-name collision dialog a Copy/Move with conflicts
+    /// walks through before anything is spawned (one 5-way choice per
+    /// conflict — see `CollisionState`/`COLLISION_CHOICES`). Esc cancels
+    /// the whole transfer, not just the current entry.
+    TransferCollision {
+        state: CollisionState,
     },
     /// The built-in full-frame text viewer (`x`/`o`/Enter-on-file),
     /// `less`-like. Fixed keys only (see `App::handle_viewer_key`):
@@ -356,6 +468,15 @@ pub enum Mode {
         /// (`FilterSpec::error`), shown under the input line.
         error: Option<String>,
     },
+    /// The sort dialog (`t`): a small centered modal listing every
+    /// (sort key, direction) combination — Name↑, Name↓, Size↑, … —
+    /// `cursor` indexing that fixed 8-row list. Opens with the cursor on
+    /// the active pane's current state; Enter applies (and records the
+    /// choice per-directory — see `App::handle_sort_select_key`), Esc
+    /// closes without changing anything.
+    SortSelect {
+        cursor: usize,
+    },
     /// The full-frame settings screen (`S`/`S-s`): raspi-config-style
     /// category -> item -> editor navigation, see `crate::settings` for
     /// the category/item catalog and persistence, `App::handle_settings_key`
@@ -400,6 +521,9 @@ pub enum TextField {
 pub enum SettingsEditor {
     /// `delete_behavior`'s two-way select: `cursor` 0 = trash, 1 = permanent.
     DeleteBehavior { cursor: usize },
+    /// `size_format`'s three-way select: `cursor` 0 = bytes,
+    /// 1 = bytes_grouped, 2 = human.
+    SizeFormat { cursor: usize },
     /// A curated named-color palette (`settings::COLOR_PALETTE`) plus one
     /// synthetic "custom hex" slot at the end (index
     /// `COLOR_PALETTE.len()`); `cursor` indexes across both. `editing_hex`
@@ -523,6 +647,20 @@ impl LineEditor {
             .iter()
             .map(|g| UnicodeWidthStr::width(g.as_str()))
             .sum()
+    }
+
+    /// The cursor's grapheme index (0..=grapheme_count) — masked
+    /// (password) rendering positions the cursor by this rather than
+    /// `cursor_display_col`, since each grapheme renders as exactly one
+    /// `*` column regardless of its real width.
+    pub fn cursor_grapheme_index(&self) -> usize {
+        self.cursor
+    }
+
+    /// How many graphemes the value holds — the number of `*`s a masked
+    /// render shows.
+    pub fn grapheme_count(&self) -> usize {
+        self.graphemes.len()
     }
 }
 

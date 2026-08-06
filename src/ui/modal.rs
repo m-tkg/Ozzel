@@ -36,13 +36,24 @@ pub fn render_prompt_box(frame: &mut Frame, area: Rect, mode: &Mode) {
         return;
     };
     let title = match kind {
-        PromptKind::Rename { .. } => "Rename",
-        PromptKind::Mkdir => "New directory",
-        PromptKind::ZipName { .. } => "Zip as",
-        PromptKind::Command => "Command",
-        PromptKind::Duplicate { .. } => "Duplicate as",
+        PromptKind::Rename { .. } => "Rename".to_string(),
+        PromptKind::Mkdir => "New directory".to_string(),
+        PromptKind::ZipName { .. } => "Zip as".to_string(),
+        PromptKind::Command => "Command".to_string(),
+        PromptKind::Duplicate { .. } => "Duplicate as".to_string(),
+        // `done` counts *finished* renames, so the entry currently being
+        // prompted for is number `done + 1`.
+        PromptKind::RenameMany { done, total, .. } => format!("Rename ({}/{})", done + 1, total),
+        PromptKind::CollisionRename { state } => {
+            format!(
+                "Rename to ({}/{}): {}",
+                state.index, state.total, state.current.name
+            )
+        }
+        PromptKind::ArchivePassword { .. } => "Password".to_string(),
     };
-    render_input_box(frame, area, title, input);
+    let mask = matches!(kind, PromptKind::ArchivePassword { .. });
+    render_input_box(frame, area, &title, input, mask);
 }
 
 /// The actual popup layout/rendering `render_prompt_box` delegates to —
@@ -50,7 +61,11 @@ pub fn render_prompt_box(frame: &mut Frame, area: Rect, mode: &Mode) {
 /// `Mode::Prompt`'s specific title-selection match, and so a future
 /// second caller (a text-input editor in the upcoming settings screen,
 /// say) can reuse it directly.
-fn render_input_box(frame: &mut Frame, area: Rect, title: &str, input: &LineEditor) {
+/// `mask` replaces the input's display (only — never its value) with one
+/// `*` per grapheme, for password entry. Cursor positioning under a mask
+/// uses the grapheme count directly (each `*` is one column), not the
+/// original text's display width.
+fn render_input_box(frame: &mut Frame, area: Rect, title: &str, input: &LineEditor, mask: bool) {
     // Width: half the frame is the normal case, but never narrower than
     // `PROMPT_BOX_MIN_WIDTH` (clamped down further only if the whole frame
     // itself is that small) and never wider than the frame itself — long
@@ -76,14 +91,24 @@ fn render_input_box(frame: &mut Frame, area: Rect, title: &str, input: &LineEdit
         .split(inner);
 
     let content_width = inner.width as usize;
-    let cursor_col = input.cursor_display_col();
+    // Under a mask, the rendered text is one single-width `*` per
+    // grapheme, so the cursor column is the grapheme index — the display
+    // width of the real value never appears anywhere on screen.
+    let (display_value, cursor_col) = if mask {
+        (
+            "*".repeat(input.grapheme_count()),
+            input.cursor_grapheme_index(),
+        )
+    } else {
+        (input.value(), input.cursor_display_col())
+    };
     // Keep the cursor's column inside the visible window: once it would
     // fall past the right edge, scroll the window to keep it exactly on
     // the last visible column — the same "reveal as you type" scrolling a
     // real single-line text input needs, built from the same display-
     // column math the viewer's horizontal scroll already uses.
     let start_col = cursor_col.saturating_sub(content_width.saturating_sub(1));
-    let visible = slice_display_cols(&input.value(), start_col, content_width);
+    let visible = slice_display_cols(&display_value, start_col, content_width);
     frame.render_widget(Paragraph::new(visible), rows[0]);
 
     if rows.len() > 1 && rows[1].height > 0 {
@@ -202,6 +227,119 @@ pub fn render_select(frame: &mut Frame, area: Rect, mode: &Mode) {
     frame.render_widget(List::new(rows), inner);
 }
 
+/// The sort dialog's display rows, index-aligned with
+/// `App::SORT_DIALOG_CHOICES` — the key handler and this renderer must
+/// agree on the ordering, so both are fixed arrays of the same length
+/// (asserted by a test below).
+pub const SORT_DIALOG_LABELS: [&str; 8] = [
+    "name  ↑ ascending",
+    "name  ↓ descending",
+    "size  ↑ ascending",
+    "size  ↓ descending",
+    "mtime ↑ ascending",
+    "mtime ↓ descending",
+    "ext   ↑ ascending",
+    "ext   ↓ descending",
+];
+
+/// Draws the centered sort dialog (`Mode::SortSelect`, the `t` action):
+/// the fixed (key, direction) rows with the highlight on `cursor`. No-op
+/// if `mode` is not `SortSelect`.
+pub fn render_sort_select(frame: &mut Frame, area: Rect, mode: &Mode) {
+    let Mode::SortSelect { cursor } = mode else {
+        return;
+    };
+
+    let title = "Sort";
+    let inner_width = SORT_DIALOG_LABELS
+        .iter()
+        .map(|label| UnicodeWidthStr::width(*label))
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(title));
+    let width = (inner_width as u16 + 4).clamp(1, area.width);
+    let height = (SORT_DIALOG_LABELS.len() as u16 + 2).clamp(1, area.height);
+    let popup = centered_rect(area, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows: Vec<ListItem> = SORT_DIALOG_LABELS
+        .iter()
+        .enumerate()
+        .map(|(idx, label)| {
+            let style = if idx == *cursor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::styled(*label, style))
+        })
+        .collect();
+    frame.render_widget(List::new(rows), inner);
+}
+
+/// Draws the per-file transfer-collision dialog (`Mode::TransferCollision`):
+/// a title naming the conflicting entry with `(n/total)` progress, both
+/// sides' pre-formatted size/mtime lines (the newer side already carries
+/// `[New]` — see `App::collision_info`), and the five answers with the
+/// highlight on `cursor`. No-op if `mode` is not `TransferCollision`.
+pub fn render_transfer_collision(frame: &mut Frame, area: Rect, mode: &Mode) {
+    let Mode::TransferCollision { state } = mode else {
+        return;
+    };
+
+    let title = format!(
+        "Overwrite? ({}/{}): {}",
+        state.index, state.total, state.current.name
+    );
+    let info_lines = [&state.current.src_line, &state.current.dest_line];
+
+    let inner_width = crate::mode::COLLISION_CHOICES
+        .iter()
+        .map(|label| UnicodeWidthStr::width(*label) + 1)
+        .chain(
+            info_lines
+                .iter()
+                .map(|l| UnicodeWidthStr::width(l.as_str())),
+        )
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(title.as_str()));
+    let width = (inner_width as u16 + 4).clamp(1, area.width);
+    // borders + 2 info lines + 1 blank + 5 choices
+    let height = (crate::mode::COLLISION_CHOICES.len() as u16 + info_lines.len() as u16 + 3)
+        .clamp(1, area.height);
+    let popup = centered_rect(area, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut rows: Vec<ListItem> = info_lines
+        .iter()
+        .map(|line| ListItem::new(Line::raw((*line).clone())))
+        .collect();
+    rows.push(ListItem::new(Line::raw(String::new())));
+    rows.extend(
+        crate::mode::COLLISION_CHOICES
+            .iter()
+            .enumerate()
+            .map(|(idx, label)| {
+                let style = if idx == state.cursor {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::styled(format!(" {label}"), style))
+            }),
+    );
+    frame.render_widget(List::new(rows), inner);
+}
+
 /// Draws a centered confirm box with `message` on top of `area` (normally
 /// the whole frame).
 pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
@@ -265,6 +403,30 @@ mod tests {
             rows.push(row);
         }
         (rows.join("\n"), (cursor.x, cursor.y))
+    }
+
+    #[test]
+    fn archive_password_prompt_masks_the_typed_value() {
+        let (screen, cursor) = render_prompt(
+            60,
+            20,
+            PromptKind::ArchivePassword {
+                pending: crate::mode::PasswordPending::Unzip {
+                    archive_path: std::path::PathBuf::from("/a/secret.zip"),
+                    dest_dir: std::path::PathBuf::from("/b"),
+                },
+            },
+            "hunter2",
+        );
+        assert!(screen.contains("Password"), "screen: {screen}");
+        assert!(
+            !screen.contains("hunter2"),
+            "the raw password must never render: {screen}"
+        );
+        assert!(screen.contains("*******"), "screen: {screen}");
+        // Cursor sits one past the 7 asterisks.
+        let star_row = screen.lines().position(|l| l.contains("*******")).unwrap() as u16;
+        assert_eq!(cursor.1, star_row);
     }
 
     #[test]

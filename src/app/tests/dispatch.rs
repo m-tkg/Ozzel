@@ -216,12 +216,12 @@ fn cancel_tasks_action_makes_a_real_copy_worker_finish_cancelled() {
     std::fs::write(src_dir.path().join("a.txt"), b"hello").unwrap();
 
     let mut app = test_app(src_dir.path(), dest_dir.path());
-    let sources = vec![src_dir.path().join("a.txt")];
+    let pairs = vec![(src_dir.path().join("a.txt"), dest_dir.path().join("a.txt"))];
     let dest = dest_dir.path().to_path_buf();
     app.tasks.spawn("copy 1 item", move |id, tx, cancel| {
         // Give `cancel_running_tasks` below a chance to run first.
         std::thread::sleep(Duration::from_millis(50));
-        crate::tasks::copy_move::run_copy(id, tx, cancel, sources, dest);
+        crate::tasks::copy_move::run_copy(id, tx, cancel, pairs, dest);
     });
     assert_eq!(app.tasks.running.len(), 1);
 

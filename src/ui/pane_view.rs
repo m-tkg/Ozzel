@@ -14,10 +14,11 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::color::dim_color;
+use crate::config::SizeFormat;
 use crate::entry::EntryKind;
 #[cfg(test)]
 use crate::entry::FsEntry;
-use crate::pane::{Pane, VisibleItem};
+use crate::pane::{Pane, SortKey, VisibleItem};
 use crate::ui::layout::PaneLayout;
 use crate::ui::text;
 use crate::virtual_dir;
@@ -33,7 +34,6 @@ use unicode_segmentation::UnicodeSegmentation;
 const INACTIVE_CURSOR_DIM_FACTOR: f32 = 0.5;
 
 const MARK_COL_WIDTH: usize = 1;
-const SIZE_COL_WIDTH: usize = 9;
 const MTIME_COL_WIDTH: usize = 14;
 /// `drwxr-xr-x` — type char + 3x(rwx).
 #[cfg(unix)]
@@ -42,11 +42,27 @@ const PERMS_COL_WIDTH: usize = 10;
 /// `windows_permission_string`).
 #[cfg(not(unix))]
 const PERMS_COL_WIDTH: usize = 3;
+
+/// The size column's width for one `SizeFormat` — no longer a single
+/// constant, since raw/grouped byte counts need more room than the `1.5M`
+/// human form: `Human` keeps the historical 9; `Bytes` fits u64 sizes up
+/// to ~10 TB (13 digits); `BytesGrouped` the same plus its 4 commas.
+fn size_col_width(fmt: SizeFormat) -> usize {
+    match fmt {
+        SizeFormat::Human => 9,
+        SizeFormat::Bytes => 13,
+        SizeFormat::BytesGrouped => 17,
+    }
+}
+
 /// Below this pane width, the permissions column is dropped entirely
 /// (before the name column starts getting mangled) even when
 /// `show_permissions` is on — see `format_row`'s caller in `render`.
-const MIN_WIDTH_FOR_PERMS_COL: usize =
-    MARK_COL_WIDTH + SIZE_COL_WIDTH + MTIME_COL_WIDTH + PERMS_COL_WIDTH + 3 + 4;
+/// Depends on the size column's (format-dependent) width, so wider size
+/// formats drop the permissions column sooner.
+fn min_width_for_perms_col(fmt: SizeFormat) -> usize {
+    MARK_COL_WIDTH + size_col_width(fmt) + MTIME_COL_WIDTH + PERMS_COL_WIDTH + 3 + 4
+}
 
 /// Color/dim settings for rendering a pane, derived from `config::ColorsConfig`
 /// by `ui/mod.rs`. Kept as its own small `Copy` struct (rather than passing
@@ -74,6 +90,7 @@ pub fn render(
     active: bool,
     colors: PaneColors,
     show_permissions: bool,
+    size_format: SizeFormat,
 ) -> PaneLayout {
     // The inactive pane dims when configured to (default on); its cursor
     // row dims along with everything else (see the cursor-row style below)
@@ -119,6 +136,12 @@ pub fn render(
     if let Some(filter) = &pane.filter {
         title_source.push_str(&format!(" [flt: {}]", filter.raw));
     }
+    // A sort tag only when the pane deviates from the (Name, ascending)
+    // default — the common case stays visually quiet.
+    if (pane.sort, pane.ascending) != (SortKey::Name, true) {
+        let arrow = if pane.ascending { "↑" } else { "↓" };
+        title_source.push_str(&format!(" [s:{}{arrow}]", pane.sort.as_str()));
+    }
     let header_lines = wrap_header_lines(&title_source, title_budget);
 
     let block = Block::default()
@@ -160,7 +183,8 @@ pub fn render(
         };
     }
 
-    let show_perms_col = show_permissions && inner.width as usize >= MIN_WIDTH_FOR_PERMS_COL;
+    let show_perms_col =
+        show_permissions && inner.width as usize >= min_width_for_perms_col(size_format);
     let viewport_height = inner.height as usize;
     let cursor = pane.cursor.min(items.len().saturating_sub(1));
     let start = scroll_offset(cursor, items.len(), viewport_height);
@@ -172,7 +196,20 @@ pub fn render(
         .take(viewport_height)
         .map(|(idx, item)| {
             let marked = matches!(item, VisibleItem::Entry(e) if pane.marks.contains(&e.path));
-            let text = format_row(item, inner.width as usize, marked, show_perms_col);
+            let dir_size = match item {
+                VisibleItem::Entry(e) if e.is_dir_like() => {
+                    pane.dir_size_overrides.get(&e.path).copied()
+                }
+                _ => None,
+            };
+            let text = format_row(
+                item,
+                inner.width as usize,
+                marked,
+                show_perms_col,
+                size_format,
+                dir_size,
+            );
             let type_color = match item {
                 VisibleItem::Parent => None,
                 VisibleItem::Entry(e) => {
@@ -374,7 +411,14 @@ fn scroll_offset(cursor: usize, len: usize, viewport_height: usize) -> usize {
 /// a frame agrees on whether the column exists at all; when it does, `..`
 /// gets a blank column of the same width rather than omitting it, so every
 /// row's other columns stay aligned.
-fn format_row(item: &VisibleItem<'_>, width: usize, marked: bool, show_perms_col: bool) -> String {
+fn format_row(
+    item: &VisibleItem<'_>,
+    width: usize,
+    marked: bool,
+    show_perms_col: bool,
+    size_format: SizeFormat,
+    dir_size: Option<u64>,
+) -> String {
     let (name, size_text, mtime_text, perms_text) = match item {
         VisibleItem::Parent => (
             "..".to_string(),
@@ -383,10 +427,16 @@ fn format_row(item: &VisibleItem<'_>, width: usize, marked: bool, show_perms_col
             " ".repeat(PERMS_COL_WIDTH),
         ),
         VisibleItem::Entry(e) => {
+            // A directory whose size the `z` (calc_dir_size) task has
+            // computed shows the real number in place of `<DIR>` for as
+            // long as the pane stays in this directory.
             let size_text = if e.is_dir_like() {
-                "<DIR>".to_string()
+                match dir_size {
+                    Some(bytes) => format_size(bytes, size_format),
+                    None => "<DIR>".to_string(),
+                }
             } else {
-                human_size(e.size)
+                format_size(e.size, size_format)
             };
             let mtime_text = e.mtime.map(format_mtime).unwrap_or_default();
             let perms_text = format_permissions(e.kind, e.unix_mode, e.readonly);
@@ -407,14 +457,15 @@ fn format_row(item: &VisibleItem<'_>, width: usize, marked: bool, show_perms_col
     };
 
     let mark_col = if marked { "*" } else { " " };
-    let mut reserved = MARK_COL_WIDTH + SIZE_COL_WIDTH + MTIME_COL_WIDTH + 2; // two single-space separators
+    let size_width = size_col_width(size_format);
+    let mut reserved = MARK_COL_WIDTH + size_width + MTIME_COL_WIDTH + 2; // two single-space separators
     if show_perms_col {
         reserved += PERMS_COL_WIDTH + 1; // one more separator
     }
     let name_width = width.saturating_sub(reserved).max(3);
 
     let name_col = text::pad_right(&text::truncate_right(&name, name_width), name_width);
-    let size_col = text::pad_left(&size_text, SIZE_COL_WIDTH);
+    let size_col = text::pad_left(&size_text, size_width);
     let mtime_col = text::pad_left(&mtime_text, MTIME_COL_WIDTH);
 
     if show_perms_col {
@@ -422,6 +473,30 @@ fn format_row(item: &VisibleItem<'_>, width: usize, marked: bool, show_perms_col
     } else {
         format!("{mark_col}{name_col} {size_col} {mtime_col}")
     }
+}
+
+/// Renders `bytes` per the configured `SizeFormat` — the single dispatch
+/// point the size column goes through (`v` cycles the config value).
+fn format_size(bytes: u64, fmt: SizeFormat) -> String {
+    match fmt {
+        SizeFormat::Human => human_size(bytes),
+        SizeFormat::Bytes => bytes.to_string(),
+        SizeFormat::BytesGrouped => group_thousands(bytes),
+    }
+}
+
+/// `1234567` -> `"1,234,567"`.
+fn group_thousands(bytes: u64) -> String {
+    let digits = bytes.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let offset = digits.len() % 3;
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && i % 3 == offset % 3 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn human_size(bytes: u64) -> String {
@@ -438,7 +513,9 @@ fn human_size(bytes: u64) -> String {
     format!("{size:.1}{}", UNITS[unit])
 }
 
-fn format_mtime(t: SystemTime) -> String {
+// `pub(crate)`: also formats the src/dest mtimes in the transfer-collision
+// dialog (`App::collision_info`), so both places render times identically.
+pub(crate) fn format_mtime(t: SystemTime) -> String {
     let dt: DateTime<Local> = t.into();
     dt.format("%y-%m-%d %H:%M").to_string()
 }
@@ -653,14 +730,95 @@ mod tests {
     }
 
     #[test]
+    fn format_size_dispatches_all_three_formats() {
+        assert_eq!(format_size(1536, SizeFormat::Human), "1.5K");
+        assert_eq!(format_size(1536, SizeFormat::Bytes), "1536");
+        assert_eq!(format_size(1536, SizeFormat::BytesGrouped), "1,536");
+    }
+
+    #[test]
+    fn group_thousands_places_commas_correctly() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1000), "1,000");
+        assert_eq!(group_thousands(123456), "123,456");
+        assert_eq!(group_thousands(1234567), "1,234,567");
+        assert_eq!(group_thousands(1000000000), "1,000,000,000");
+    }
+
+    #[test]
+    fn size_col_width_fits_the_widest_rendered_value() {
+        // u64 sizes up to ~10 TB (13 digits, 17 with commas): the column
+        // widths must hold them without shifting the row layout.
+        assert!(
+            group_thousands(9_999_999_999_999).len() <= size_col_width(SizeFormat::BytesGrouped)
+        );
+        assert!(9_999_999_999_999u64.to_string().len() <= size_col_width(SizeFormat::Bytes));
+    }
+
+    #[test]
+    fn format_row_shows_dir_size_override_in_place_of_dir_marker() {
+        use std::path::PathBuf;
+        use std::time::SystemTime;
+        let dir = FsEntry {
+            name: "sub".to_string(),
+            name_lower: "sub".to_string(),
+            ext_lower: String::new(),
+            path: PathBuf::from("sub"),
+            kind: EntryKind::Dir,
+            size: 0,
+            mtime: Some(SystemTime::UNIX_EPOCH),
+            is_hidden: false,
+            unix_mode: None,
+            readonly: false,
+            is_executable: false,
+            symlink_target: None,
+        };
+        let with_override = format_row(
+            &VisibleItem::Entry(&dir),
+            60,
+            false,
+            false,
+            SizeFormat::Bytes,
+            Some(256),
+        );
+        assert!(with_override.contains("256"), "{with_override:?}");
+        assert!(!with_override.contains("<DIR>"), "{with_override:?}");
+
+        let without = format_row(
+            &VisibleItem::Entry(&dir),
+            60,
+            false,
+            false,
+            SizeFormat::Bytes,
+            None,
+        );
+        assert!(without.contains("<DIR>"), "{without:?}");
+    }
+
+    #[test]
     fn format_row_parent_row_has_no_size_or_mtime() {
-        let row = format_row(&VisibleItem::Parent, 40, false, false);
+        let row = format_row(
+            &VisibleItem::Parent,
+            40,
+            false,
+            false,
+            SizeFormat::Human,
+            None,
+        );
         assert!(row.trim_start().starts_with(".."));
     }
 
     #[test]
     fn format_row_marks_prepend_asterisk() {
-        let row = format_row(&VisibleItem::Parent, 40, true, false);
+        let row = format_row(
+            &VisibleItem::Parent,
+            40,
+            true,
+            false,
+            SizeFormat::Human,
+            None,
+        );
         assert!(row.starts_with('*'));
     }
 
@@ -703,8 +861,8 @@ mod tests {
         let item = VisibleItem::Entry(&entry);
         let expected_perms = format_permissions(EntryKind::File, unix_mode, readonly);
 
-        let with = format_row(&item, 60, false, true);
-        let without = format_row(&item, 60, false, false);
+        let with = format_row(&item, 60, false, true, SizeFormat::Human, None);
+        let without = format_row(&item, 60, false, false, SizeFormat::Human, None);
         assert!(with.contains(&expected_perms));
         assert!(!without.contains(&expected_perms));
         assert_eq!(UnicodeWidthStr::width(with.as_str()), 60);
@@ -733,7 +891,14 @@ mod tests {
     #[test]
     fn format_row_shows_dir_size_for_a_directory_symlink_and_appends_the_link_marker() {
         let entry = symlink_entry("mylink", crate::entry::SymlinkTarget::Dir);
-        let row = format_row(&VisibleItem::Entry(&entry), 60, false, false);
+        let row = format_row(
+            &VisibleItem::Entry(&entry),
+            60,
+            false,
+            false,
+            SizeFormat::Human,
+            None,
+        );
         assert!(row.contains("<DIR>"), "row: {row:?}");
         assert!(row.contains("mylink@"), "row: {row:?}");
     }
@@ -741,7 +906,14 @@ mod tests {
     #[test]
     fn format_row_shows_human_size_for_a_file_symlink_and_still_appends_the_link_marker() {
         let entry = symlink_entry("mylink", crate::entry::SymlinkTarget::File);
-        let row = format_row(&VisibleItem::Entry(&entry), 60, false, false);
+        let row = format_row(
+            &VisibleItem::Entry(&entry),
+            60,
+            false,
+            false,
+            SizeFormat::Human,
+            None,
+        );
         assert!(!row.contains("<DIR>"), "row: {row:?}");
         assert!(row.contains("mylink@"), "row: {row:?}");
     }
@@ -750,8 +922,28 @@ mod tests {
     fn format_row_never_appends_the_link_marker_to_a_real_directory_or_file() {
         let dir = entry_for_test("adir", EntryKind::Dir);
         let file = entry_for_test("afile.txt", EntryKind::File);
-        assert!(!format_row(&VisibleItem::Entry(&dir), 60, false, false).contains('@'));
-        assert!(!format_row(&VisibleItem::Entry(&file), 60, false, false).contains('@'));
+        assert!(
+            !format_row(
+                &VisibleItem::Entry(&dir),
+                60,
+                false,
+                false,
+                SizeFormat::Human,
+                None
+            )
+            .contains('@')
+        );
+        assert!(
+            !format_row(
+                &VisibleItem::Entry(&file),
+                60,
+                false,
+                false,
+                SizeFormat::Human,
+                None
+            )
+            .contains('@')
+        );
     }
 
     fn entry_for_test(name: &str, kind: EntryKind) -> FsEntry {
@@ -829,7 +1021,15 @@ mod tests {
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
                 .draw(|frame| {
-                    render(frame, frame.area(), &pane, active, colors, false);
+                    render(
+                        frame,
+                        frame.area(),
+                        &pane,
+                        active,
+                        colors,
+                        false,
+                        SizeFormat::Human,
+                    );
                 })
                 .unwrap();
             // Row 0 is the top border; the cursor (".." ) row is the first

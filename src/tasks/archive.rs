@@ -1,10 +1,12 @@
 //! Background zip create/extract workers. Runs on its own thread (spawned
 //! by `TaskManager::spawn`); reports per-file progress, throttled like the
 //! copy/move worker. `run_extract` (Virtual Directory marks/`C`
-//! extraction) also handles the tar family via `virtual_dir`'s streaming
-//! primitives — zip creation (`run_zip`) and the separate whole-archive
-//! `u`/`Unzip` action (`run_unzip`/`top_level_collisions`) stay zip-only,
-//! unchanged; extending those to the tar family isn't in scope here.
+//! extraction) also handles the tar family and bare `.gz`/`.bz2`
+//! (`ArchiveKind::Single`) via `virtual_dir`'s streaming primitives, and
+//! decrypts password-protected zip entries when a (pre-verified) password
+//! is passed along — zip creation (`run_zip`) and the separate
+//! whole-archive `u`/`Unzip` action (`run_unzip`/`top_level_collisions`)
+//! stay zip-only; extending those to the tar family isn't in scope here.
 
 use std::collections::HashSet;
 use std::fs;
@@ -221,7 +223,11 @@ pub fn top_level_collisions(archive_path: &Path, dest_dir: &Path) -> anyhow::Res
     let mut seen = HashSet::new();
     let mut collisions = Vec::new();
     for i in 0..archive.len() {
-        let entry = archive.by_index(i)?;
+        // `by_index_raw` (metadata only): a name check needs no
+        // decompression, and — the actual bug this fixes — no decryption
+        // either, so the collision check works on a password-protected
+        // zip instead of failing before the password was ever asked for.
+        let entry = archive.by_index_raw(i)?;
         let Some(relative) = entry.enclosed_name() else {
             continue;
         };
@@ -244,8 +250,16 @@ pub fn run_unzip(
     cancel: Arc<AtomicBool>,
     archive_path: PathBuf,
     dest_dir: PathBuf,
+    password: Option<String>,
 ) {
-    let result = run_unzip_inner(id, &tx, &cancel, &archive_path, &dest_dir);
+    let result = run_unzip_inner(
+        id,
+        &tx,
+        &cancel,
+        &archive_path,
+        &dest_dir,
+        password.as_deref(),
+    );
     let outcome = match result {
         Ok(count) => Ok(format!(
             "extracted {count} file(s) to {}",
@@ -265,6 +279,7 @@ fn run_unzip_inner(
     cancel: &Arc<AtomicBool>,
     archive_path: &Path,
     dest_dir: &Path,
+    password: Option<&str>,
 ) -> anyhow::Result<usize> {
     let file = fs::File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
@@ -278,7 +293,7 @@ fn run_unzip_inner(
             anyhow::bail!("cancelled");
         }
 
-        let mut entry = archive.by_index(i)?;
+        let mut entry = virtual_dir::zip_entry_reader(&mut archive, i, password)?;
         let display_name = entry.name().to_string();
 
         if !is_valid_utf8_name(entry.name_raw()) {
@@ -387,6 +402,7 @@ pub fn run_extract(
     archive_path: PathBuf,
     inner_targets: Vec<PathBuf>,
     dest_dir: PathBuf,
+    password: Option<String>,
 ) {
     let ctx = ExtractCtx {
         id,
@@ -395,9 +411,14 @@ pub fn run_extract(
         archive_path: &archive_path,
         inner_targets: &inner_targets,
         dest_dir: &dest_dir,
+        password: password.as_deref(),
     };
     let result = match virtual_dir::detect_archive_kind(&archive_path) {
         Some(ArchiveKind::Tar(compression)) => run_tar_extract_inner(&ctx, compression),
+        // A bare `.gz`/`.bz2` MUST have its own arm here: the `_` catch-all
+        // below silently treats anything else as zip, which would fail
+        // opaquely for a Single archive.
+        Some(ArchiveKind::Single(compression)) => run_single_extract_inner(&ctx, compression),
         // `Some(ArchiveKind::Zip)` and, defensively, `None` (can't
         // actually happen — Virtual Directory mode is only ever entered
         // via `App::begin_open`'s `virtual_dir::is_archive_file` check,
@@ -432,6 +453,9 @@ struct ExtractCtx<'a> {
     archive_path: &'a Path,
     inner_targets: &'a [PathBuf],
     dest_dir: &'a Path,
+    /// zip only (`Some` decrypts encrypted entries with it); the tar
+    /// family and Single archives ignore it.
+    password: Option<&'a str>,
 }
 
 /// One planned extraction step: which archive entry (`index`) lands at
@@ -515,7 +539,7 @@ fn run_extract_inner(ctx: &ExtractCtx) -> anyhow::Result<usize> {
         if let Some(parent) = p.dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut entry = archive.by_index(p.index)?;
+        let mut entry = virtual_dir::zip_entry_reader(&mut archive, p.index, ctx.password)?;
         let mut out = fs::File::create(&p.dest)?;
         let mut buf = vec![0u8; CHUNK_SIZE];
         loop {
@@ -691,6 +715,74 @@ fn run_tar_extract_inner(
     Ok(extracted)
 }
 
+/// The `ArchiveKind::Single` (bare `.gz`/`.bz2`) counterpart of
+/// `run_extract_inner`: at most one target — the synthesized payload
+/// entry — streamed through the decoder to `dest_dir/<payload name>` in
+/// cancellable chunks. Progress uses gzip's ISIZE as `total` when
+/// available (bzip2 records nothing, so `0` — same static-gauge story as
+/// the tar path).
+fn run_single_extract_inner(
+    ctx: &ExtractCtx,
+    compression: virtual_dir::SingleCompression,
+) -> anyhow::Result<usize> {
+    let payload = virtual_dir::single_payload_name(ctx.archive_path);
+    let mut extracted = 0usize;
+
+    for target in ctx.inner_targets {
+        if target != Path::new(&payload) {
+            send_log(
+                ctx.tx,
+                ctx.id,
+                format!("{}: not found in archive, skipped", target.display()),
+            );
+            continue;
+        }
+        let dest = ctx.dest_dir.join(&payload);
+        let mut reader = virtual_dir::open_single_reader(ctx.archive_path, compression)?;
+        let mut out = fs::File::create(&dest)
+            .with_context(|| format!("failed to create {}", dest.display()))?;
+        let total = virtual_dir::detect_archive_kind(ctx.archive_path)
+            .and_then(|k| match k {
+                ArchiveKind::Single(virtual_dir::SingleCompression::Gzip) => {
+                    // Listed size == gzip ISIZE; reuse it as the gauge total.
+                    virtual_dir::read_archive_dir_entries(ctx.archive_path, Path::new(""))
+                        .ok()
+                        .and_then(|entries| entries.first().map(|e| e.size))
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        let mut throttle = Throttle::new(PROGRESS_MIN_INTERVAL);
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        let mut done = 0u64;
+        loop {
+            if ctx.cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("cancelled");
+            }
+            let n = reader
+                .read(&mut buf)
+                .with_context(|| format!("failed to decompress {}", ctx.archive_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+            done += n as u64;
+            if throttle.allow(Instant::now()) {
+                let _ = ctx.tx.send(TaskEvent::Progress {
+                    id: ctx.id,
+                    done,
+                    total,
+                    detail: payload.clone(),
+                });
+            }
+        }
+        extracted += 1;
+    }
+
+    Ok(extracted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +790,150 @@ mod tests {
 
     fn drain(rx: &mpsc::Receiver<TaskEvent>) -> Vec<TaskEvent> {
         rx.try_iter().collect()
+    }
+
+    fn make_encrypted_zip(dir: &Path) -> PathBuf {
+        let path = dir.join("secret.zip");
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, "hunter2");
+        writer.start_file("inner/secret.txt", options).unwrap();
+        writer.write_all(b"classified").unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn run_extract_on_a_single_gz_writes_the_payload_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let payload = b"single gz to disk";
+        let archive_path = dir.path().join("notes.txt.gz");
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            enc.write_all(payload).unwrap();
+            enc.finish().unwrap();
+        }
+
+        let (tx, rx) = mpsc::channel();
+        run_extract(
+            TaskId::next(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            archive_path,
+            vec![PathBuf::from("notes.txt")],
+            dest_dir.path().to_path_buf(),
+            None,
+        );
+
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert_eq!(
+            fs::read(dest_dir.path().join("notes.txt")).unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn top_level_collisions_works_on_an_encrypted_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let archive_path = make_encrypted_zip(dir.path());
+
+        // No collision yet — and, the regression under test, no error
+        // either (the metadata-only scan must not require a password).
+        assert!(
+            top_level_collisions(&archive_path, dest_dir.path())
+                .unwrap()
+                .is_empty()
+        );
+        fs::create_dir(dest_dir.path().join("inner")).unwrap();
+        assert_eq!(
+            top_level_collisions(&archive_path, dest_dir.path()).unwrap(),
+            vec![dest_dir.path().join("inner")]
+        );
+    }
+
+    #[test]
+    fn run_unzip_extracts_an_encrypted_zip_with_the_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let archive_path = make_encrypted_zip(dir.path());
+
+        let (tx, rx) = mpsc::channel();
+        run_unzip(
+            TaskId::next(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            archive_path,
+            dest_dir.path().to_path_buf(),
+            Some("hunter2".to_string()),
+        );
+
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert_eq!(
+            fs::read(dest_dir.path().join("inner/secret.txt")).unwrap(),
+            b"classified"
+        );
+    }
+
+    #[test]
+    fn run_unzip_without_a_password_fails_cleanly_on_an_encrypted_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let archive_path = make_encrypted_zip(dir.path());
+
+        let (tx, rx) = mpsc::channel();
+        run_unzip(
+            TaskId::next(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            archive_path,
+            dest_dir.path().to_path_buf(),
+            None,
+        );
+
+        match drain(&rx).last() {
+            Some(TaskEvent::Finished {
+                result: Err(msg), ..
+            }) => assert!(msg.contains("password"), "{msg}"),
+            other => panic!("expected Finished(Err(password ...)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_extract_reads_an_encrypted_zip_with_the_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let archive_path = make_encrypted_zip(dir.path());
+
+        let (tx, rx) = mpsc::channel();
+        run_extract(
+            TaskId::next(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            archive_path,
+            vec![PathBuf::from("inner/secret.txt")],
+            dest_dir.path().to_path_buf(),
+            Some("hunter2".to_string()),
+        );
+
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert_eq!(
+            fs::read(dest_dir.path().join("secret.txt")).unwrap(),
+            b"classified"
+        );
     }
 
     #[test]
@@ -753,6 +989,7 @@ mod tests {
             cancel2,
             archive_path,
             extract_dir.path().to_path_buf(),
+            None,
         );
 
         assert!(matches!(
@@ -794,7 +1031,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let id = TaskId::next();
-        run_unzip(id, tx, cancel, archive_path, dest_dir.path().to_path_buf());
+        run_unzip(
+            id,
+            tx,
+            cancel,
+            archive_path,
+            dest_dir.path().to_path_buf(),
+            None,
+        );
 
         let events = drain(&rx);
         assert!(
@@ -906,6 +1150,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("readme.txt")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         assert!(matches!(
@@ -933,6 +1178,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("src")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         assert!(matches!(
@@ -964,6 +1210,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("nope.txt")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         let events = drain(&rx);
@@ -999,6 +1246,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("safe")],
             dest_dir.path().to_path_buf(),
+            None,
         );
         let _ = drain(&rx);
 
@@ -1051,6 +1299,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("readme.txt")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         assert!(matches!(
@@ -1078,6 +1327,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("src")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         assert!(matches!(
@@ -1109,6 +1359,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("nope.txt")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         let events = drain(&rx);
@@ -1144,6 +1395,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("readme.txt")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         assert!(matches!(
@@ -1188,6 +1440,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("safe")],
             dest_dir.path().to_path_buf(),
+            None,
         );
         let _ = drain(&rx);
 
@@ -1228,6 +1481,7 @@ mod tests {
             archive_path,
             vec![PathBuf::from("link.txt")],
             dest_dir.path().to_path_buf(),
+            None,
         );
 
         let events = drain(&rx);

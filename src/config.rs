@@ -30,6 +30,41 @@ pub enum DeleteBehavior {
     Permanent,
 }
 
+/// How the size column renders file sizes — cycled at runtime by the `v`
+/// (toggle_size_format) action, which also persists the new value back to
+/// the config file. `Human` is the pre-existing `1.5M`-style display and
+/// stays the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeFormat {
+    Bytes,
+    BytesGrouped,
+    #[default]
+    Human,
+}
+
+impl SizeFormat {
+    /// Cycle order for the `v` action: bytes → bytes_grouped → human → …
+    pub fn next(self) -> Self {
+        match self {
+            SizeFormat::Bytes => SizeFormat::BytesGrouped,
+            SizeFormat::BytesGrouped => SizeFormat::Human,
+            SizeFormat::Human => SizeFormat::Bytes,
+        }
+    }
+
+    /// The snake_case form written to config.toml / shown in logs and the
+    /// settings screen — must match this enum's `rename_all` casing (the
+    /// round-trip is tested).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SizeFormat::Bytes => "bytes",
+            SizeFormat::BytesGrouped => "bytes_grouped",
+            SizeFormat::Human => "human",
+        }
+    }
+}
+
 /// `#90EE90` ("light green" in CSS terms) — a soft pastel that reads
 /// clearly as a cursor highlight without the harshness of pure ANSI green.
 /// Requires a truecolor-capable terminal; on one that only supports the
@@ -130,6 +165,21 @@ fn default_file_search_incremental() -> bool {
 /// wants ozzel touching it.
 fn default_quit_cd() -> bool {
     true
+}
+
+/// Name sorting treats digit runs as numbers by default (`file2` before
+/// `file10`) — the ordering virtually every modern file manager uses. A
+/// top-level `natural_sort = false` restores strict lexicographic order.
+fn default_natural_sort() -> bool {
+    true
+}
+
+/// Single-step cursor movement (`Up`/`Down`) stops at the list edges by
+/// default. A top-level `cursor_wrap = true` makes it wrap around instead
+/// (past the last row lands on the first and vice versa); page movement,
+/// Home/End, and the mouse wheel always clamp regardless.
+fn default_cursor_wrap() -> bool {
+    false
 }
 
 fn deserialize_color<'de, D>(deserializer: D) -> std::result::Result<Color, D::Error>
@@ -241,6 +291,19 @@ pub struct Config {
     /// "don't break existing configs" reason as its neighbors.
     #[serde(default = "default_file_search_incremental")]
     pub file_search_incremental: bool,
+    /// Whether name sorting compares digit runs as numbers (`file2` <
+    /// `file10`) — see `default_natural_sort`. Kept top-level for the same
+    /// "don't break existing configs" reason as its neighbors.
+    #[serde(default = "default_natural_sort")]
+    pub natural_sort: bool,
+    /// Whether single-step cursor movement wraps around at the list edges —
+    /// see `default_cursor_wrap`. Kept top-level like its neighbors.
+    #[serde(default = "default_cursor_wrap")]
+    pub cursor_wrap: bool,
+    /// How the size column renders sizes — cycled by `v`
+    /// (toggle_size_format), which persists the choice here.
+    #[serde(default)]
+    pub size_format: SizeFormat,
     /// Whether the permissions column (`drwxr-xr-x` / Windows fallback)
     /// renders at all — see `ui::pane_view`. Dropped automatically under a
     /// narrow pane width regardless of this setting; this is the "never
@@ -281,6 +344,9 @@ impl Default for Config {
             quit_cd: default_quit_cd(),
             command_line_interactive: default_command_line_interactive(),
             file_search_incremental: default_file_search_incremental(),
+            natural_sort: default_natural_sort(),
+            cursor_wrap: default_cursor_wrap(),
+            size_format: SizeFormat::default(),
             show_permissions: default_show_permissions(),
             mouse: default_mouse(),
             keys: HashMap::new(),

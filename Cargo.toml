@@ -55,7 +55,10 @@ trash = "5.2.6"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.0"
 walkdir = "2.5.0"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# `aes-crypto` (pure Rust: aes/hmac/pbkdf2/sha1/zeroize — no C toolchain,
+# same bar as every other dependency) enables reading AES-encrypted zips;
+# legacy ZipCrypto decryption needs no feature at all.
+zip = { version = "8.6.0", default-features = false, features = ["deflate", "aes-crypto"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

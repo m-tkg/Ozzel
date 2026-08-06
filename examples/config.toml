@@ -67,6 +67,30 @@ quit_cd = true
 # re-matching on every keystroke is heavy on a huge tree).
 file_search_incremental = true
 
+# --- Natural (digit-as-number) sort ------------------------------------------
+# Default true: name sorting compares digit runs as numbers, so
+# file2.txt comes before file10.txt (the ordering most modern file
+# managers use). Set to false for strict lexicographic order
+# (file10.txt before file2.txt).
+# natural_sort = true
+
+# --- Cursor wrap-around ------------------------------------------------------
+# Default false: single-step cursor movement (Up/Down) stops at the top
+# and bottom of the list. Set to true to wrap around instead (one step
+# past the last row lands on the first, and vice versa). PageUp/
+# PageDown, Home/End, and the mouse wheel always stop at the edges
+# regardless of this setting.
+# cursor_wrap = true
+
+# --- Size column format ------------------------------------------------------
+# How the size column renders file sizes:
+#   "human" (default): 1.5K / 2.3M style
+#   "bytes": raw byte count (1536)
+#   "bytes_grouped": byte count with thousands separators (1,536)
+# The `v` key cycles through these at runtime and writes the choice back
+# here, so this value normally maintains itself.
+# size_format = "human"
+
 # --- Shell mode for the : command --------------------------------------------
 # Default false: `:` commands run in a non-interactive shell (unix:
 # $SHELL -c, Windows: %COMSPEC% /C). A non-interactive shell does not
@@ -208,12 +232,16 @@ focus_right = ["Right", "l"]
 open = ["Enter", "o"]
 parent = ["Backspace"]
 cycle_sort = ["s"]
+sort_dialog = ["t"]
+toggle_size_format = ["v"]
+calc_dir_size = ["z"]
 toggle_hidden = ["."]
 swap_panes = ["w"]
 refresh = ["C-r"]
 mark = ["Space"]
 mark_all = ["a"]
 rename = ["R", "r"]
+rename_marks = ["m"]
 mkdir = ["K"]
 delete = ["D", "d"]
 copy = ["C"]

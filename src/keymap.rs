@@ -172,7 +172,11 @@ impl Keymap {
     /// visible entry starting with what's typed — distinct from `f`/`/`'s
     /// filter, which hides non-matching entries), `g` opens the recursive
     /// file-name search popup (`crate::file_search`), and `S-s` (capital
-    /// `S`) opens the settings screen (`crate::settings`).
+    /// `S`) opens the settings screen (`crate::settings`). `t` opens the
+    /// sort dialog (key + direction in one modal, alongside `s`'s cycle),
+    /// `v` cycles the size display format, `z` computes directory sizes
+    /// in the background, and `m` renames the marked entries one prompt
+    /// at a time.
     pub fn defaults() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -197,6 +201,9 @@ impl Keymap {
             ("S-enter", OpenDefault),
             ("backspace", Parent),
             ("s", CycleSort),
+            ("t", SortDialog),
+            ("v", ToggleSizeFormat),
+            ("z", CalcDirSize),
             (".", ToggleHidden),
             ("w", SwapPanes),
             ("C-r", Refresh),
@@ -204,6 +211,7 @@ impl Keymap {
             ("a", MarkAll),
             ("r", Rename),
             ("R", Rename),
+            ("m", RenameMarks),
             ("K", Mkdir),
             ("d", Delete),
             ("D", Delete),

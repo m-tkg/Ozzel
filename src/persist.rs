@@ -59,6 +59,56 @@ impl History {
     }
 }
 
+/// How many per-directory sort preferences are remembered.
+const SORT_PREFS_CAP: usize = 200;
+
+/// One remembered sort choice for one directory. `key` is
+/// `SortKey::as_str`'s string form rather than the enum itself — this
+/// module deliberately never depends upward on app-layer types (see the
+/// module doc), and a stale/unknown string in a hand-edited file simply
+/// fails `SortKey::from_str` and gets ignored at the call site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortPrefEntry {
+    pub path: PathBuf,
+    pub key: String,
+    pub ascending: bool,
+}
+
+/// MRU list of per-directory sort choices, persisted as
+/// `sort_prefs.json` (a separate file from `history.json`, so the history
+/// schema stays untouched). Shared across both panes — "how this
+/// directory sorts" is a property of the directory, not of which pane
+/// happened to visit it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortPrefs {
+    #[serde(default)]
+    pub entries: Vec<SortPrefEntry>,
+}
+
+impl SortPrefs {
+    pub fn get(&self, path: &Path) -> Option<(&str, bool)> {
+        self.entries
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| (e.key.as_str(), e.ascending))
+    }
+
+    /// Records `path`'s sort choice, moving it to the front (MRU) and
+    /// trimming to `SORT_PREFS_CAP` — same shape as `History::record`.
+    pub fn record(&mut self, path: PathBuf, key: &str, ascending: bool) {
+        self.entries.retain(|e| e.path != path);
+        self.entries.insert(
+            0,
+            SortPrefEntry {
+                path,
+                key: key.to_string(),
+                ascending,
+            },
+        );
+        self.entries.truncate(SORT_PREFS_CAP);
+    }
+}
+
 /// An ordered, deduplicated list of bookmarked directories.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmarks {
@@ -97,6 +147,12 @@ fn history_path() -> Option<PathBuf> {
 /// Private — only `load_bookmarks`/`save_bookmarks` in this module use it.
 fn bookmarks_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("bookmarks.json"))
+}
+
+/// Path to `sort_prefs.json`, if this platform has a resolvable data dir.
+/// Private — only `load_sort_prefs`/`save_sort_prefs` in this module use it.
+fn sort_prefs_path() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join("sort_prefs.json"))
 }
 
 fn data_dir() -> Option<PathBuf> {
@@ -142,9 +198,21 @@ pub fn load_bookmarks() -> (Bookmarks, Option<String>) {
     }
 }
 
+pub fn load_sort_prefs() -> (SortPrefs, Option<String>) {
+    match sort_prefs_path() {
+        Some(path) => load_json(&path),
+        None => (SortPrefs::default(), None),
+    }
+}
+
 pub fn save_history(history: &History) -> Result<()> {
     let path = history_path().context("no data directory available")?;
     save_json(&path, history)
+}
+
+pub fn save_sort_prefs(prefs: &SortPrefs) -> Result<()> {
+    let path = sort_prefs_path().context("no data directory available")?;
+    save_json(&path, prefs)
 }
 
 pub fn save_bookmarks(bookmarks: &Bookmarks) -> Result<()> {
@@ -228,6 +296,46 @@ mod tests {
         history.record(Side::Right, PathBuf::from("/right-only"));
         assert_eq!(history.ring(Side::Left), &[PathBuf::from("/left-only")]);
         assert_eq!(history.ring(Side::Right), &[PathBuf::from("/right-only")]);
+    }
+
+    #[test]
+    fn sort_prefs_record_dedups_and_moves_to_front() {
+        let mut prefs = SortPrefs::default();
+        prefs.record(PathBuf::from("/a"), "name", true);
+        prefs.record(PathBuf::from("/b"), "size", false);
+        prefs.record(PathBuf::from("/a"), "mtime", false); // re-record
+        assert_eq!(prefs.get(Path::new("/a")), Some(("mtime", false)));
+        assert_eq!(prefs.get(Path::new("/b")), Some(("size", false)));
+        assert_eq!(prefs.entries.len(), 2);
+        assert_eq!(prefs.entries[0].path, PathBuf::from("/a"), "MRU front");
+        assert_eq!(prefs.get(Path::new("/never-seen")), None);
+    }
+
+    #[test]
+    fn sort_prefs_record_caps_length() {
+        let mut prefs = SortPrefs::default();
+        for i in 0..(SORT_PREFS_CAP + 10) {
+            prefs.record(PathBuf::from(format!("/dir{i}")), "name", true);
+        }
+        assert_eq!(prefs.entries.len(), SORT_PREFS_CAP);
+        assert_eq!(
+            prefs.entries[0].path,
+            PathBuf::from(format!("/dir{}", SORT_PREFS_CAP + 9))
+        );
+    }
+
+    #[test]
+    fn sort_prefs_round_trip_through_a_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sort_prefs.json");
+
+        let mut prefs = SortPrefs::default();
+        prefs.record(PathBuf::from("/projects"), "size", false);
+        save_json(&path, &prefs).unwrap();
+
+        let (loaded, warning): (SortPrefs, Option<String>) = load_json(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded, prefs);
     }
 
     #[test]

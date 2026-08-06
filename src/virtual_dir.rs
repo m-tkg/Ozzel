@@ -74,6 +74,13 @@ pub struct VirtualDir {
     /// resetting it — sharing the cache across that clone is the entire
     /// point, since go_parent immediately does another lookup with it.
     entry_cache: Rc<RefCell<Option<CachedEntries>>>,
+    /// The password that successfully decrypted an entry of this archive,
+    /// cached for the rest of this Virtual Directory session so browsing
+    /// several files in one encrypted zip asks only once. Same
+    /// `Rc<RefCell<..>>` clone-sharing story as `entry_cache` (so
+    /// `virtual_go_parent`'s clone keeps it); dropped with the
+    /// `VirtualDir` when the pane exits the archive. Never persisted.
+    password: Rc<RefCell<Option<String>>>,
 }
 
 impl VirtualDir {
@@ -89,7 +96,26 @@ impl VirtualDir {
             archive_name,
             inner: PathBuf::new(),
             entry_cache: Rc::new(RefCell::new(None)),
+            password: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// The session-cached password, if one has been accepted — see the
+    /// field's doc comment.
+    pub fn cached_password(&self) -> Option<String> {
+        self.password.borrow().clone()
+    }
+
+    /// Remembers `password` for the rest of this Virtual Directory
+    /// session (called after a decrypt actually succeeded with it).
+    pub fn cache_password(&self, password: String) {
+        *self.password.borrow_mut() = Some(password);
+    }
+
+    /// Forgets a cached password that turned out to be wrong after all
+    /// (the archive changed underneath, say).
+    pub fn clear_password(&self) {
+        *self.password.borrow_mut() = None;
     }
 
     /// Lists the immediate children of `inner`, reusing the cached raw
@@ -136,6 +162,51 @@ impl VirtualDir {
 pub enum ArchiveKind {
     Zip,
     Tar(TarCompression),
+    /// A single compressed file with no container around it (`.gz`/`.bz2`
+    /// alone, not `.tar.gz`/`.tar.bz2`) — browsed as a synthetic
+    /// one-entry archive whose sole entry is the decompressed payload
+    /// (see `read_single_raw_entry`).
+    Single(SingleCompression),
+}
+
+/// The compression wrapping an `ArchiveKind::Single` payload. A subset of
+/// `TarCompression` on purpose: xz stays tar-only for now (`lzma-rs` has
+/// no streaming `Read` adapter — see `TarCompression`'s doc comment — and
+/// plain `.xz` files are far rarer than `.gz`/`.bz2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SingleCompression {
+    Gzip,
+    Bzip2,
+}
+
+/// How a genuinely password-related zip failure is distinguished from any
+/// other archive error: mapped out of the `zip` crate's errors by
+/// [`map_zip_error`] and downcast back (`err.downcast_ref::<ZipPasswordError>()`)
+/// by the UI layer, which reacts by prompting for (or re-prompting after
+/// a wrong) password instead of just logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ZipPasswordError {
+    #[error("password required")]
+    PasswordRequired,
+    #[error("wrong password")]
+    InvalidPassword,
+}
+
+/// Wraps a `zip` crate error, lifting the two password cases into
+/// [`ZipPasswordError`] so callers can `downcast_ref` them; everything
+/// else passes through as-is. The "password required" case arrives as
+/// `UnsupportedArchive` with a fixed message rather than its own variant,
+/// so it's matched by the message the crate itself defines
+/// (`ZipError::PASSWORD_REQUIRED`).
+pub fn map_zip_error(err: zip::result::ZipError) -> anyhow::Error {
+    use zip::result::ZipError;
+    match &err {
+        ZipError::UnsupportedArchive(msg) if *msg == ZipError::PASSWORD_REQUIRED => {
+            anyhow::Error::new(ZipPasswordError::PasswordRequired)
+        }
+        ZipError::InvalidPassword => anyhow::Error::new(ZipPasswordError::InvalidPassword),
+        _ => anyhow::Error::new(err),
+    }
 }
 
 /// How a tar-family archive's byte stream is compressed, if at all —
@@ -189,6 +260,15 @@ pub fn detect_archive_kind(path: &Path) -> Option<ArchiveKind> {
         if name.ends_with(suffix) {
             return Some(ArchiveKind::Tar(*compression));
         }
+    }
+    // Bare compressed files — checked strictly *after* the tar suffixes,
+    // so `.tar.gz` has already matched as Tar(Gzip) above and never gets
+    // here (`.tgz`/`.tbz2` don't end in `.gz`/`.bz2` at all).
+    if name.ends_with(".gz") {
+        return Some(ArchiveKind::Single(SingleCompression::Gzip));
+    }
+    if name.ends_with(".bz2") {
+        return Some(ArchiveKind::Single(SingleCompression::Bzip2));
     }
     None
 }
@@ -255,11 +335,85 @@ fn read_archive_raw_entries(archive_path: &Path) -> Result<Vec<RawEntry>> {
     match detect_archive_kind(archive_path) {
         Some(ArchiveKind::Zip) => read_zip_raw_entries(archive_path),
         Some(ArchiveKind::Tar(compression)) => read_tar_raw_entries(archive_path, compression),
+        Some(ArchiveKind::Single(compression)) => {
+            Ok(vec![read_single_raw_entry(archive_path, compression)?])
+        }
         None => bail!(
             "not a recognized archive format: {}",
             archive_path.display()
         ),
     }
+}
+
+/// The name a bare `.gz`/`.bz2` payload is listed (and extracted) under:
+/// the archive's file name with its final extension stripped (`notes.txt.gz`
+/// -> `notes.txt`), falling back to `"data"` for a bare `.gz` with nothing
+/// in front of the dot.
+pub fn single_payload_name(archive_path: &Path) -> String {
+    let stem = archive_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if stem.is_empty() {
+        "data".to_string()
+    } else {
+        stem
+    }
+}
+
+/// Synthesizes the one-entry listing of a bare `.gz`/`.bz2` — see
+/// `ArchiveKind::Single`. The entry's mtime is the archive file's own
+/// (neither format records one usably: bzip2 not at all, gzip optionally
+/// but rarely). Size: gzip's footer stores the uncompressed size mod 2^32
+/// (ISIZE, the last 4 little-endian bytes — inaccurate above 4 GiB, an
+/// accepted display-only caveat); bzip2 stores nothing, so `0` — the
+/// column just shows the placeholder-ish zero until the file is opened.
+fn read_single_raw_entry(archive_path: &Path, compression: SingleCompression) -> Result<RawEntry> {
+    let meta = fs::metadata(archive_path)
+        .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
+    let size = match compression {
+        SingleCompression::Gzip => gzip_isize(archive_path).unwrap_or(0),
+        SingleCompression::Bzip2 => 0,
+    };
+    Ok(RawEntry {
+        path: PathBuf::from(single_payload_name(archive_path)),
+        kind: EntryKind::File,
+        size,
+        mtime: meta.modified().ok(),
+    })
+}
+
+/// The gzip footer's ISIZE field: uncompressed length mod 2^32, from the
+/// file's last 4 bytes. `None` for anything too short to have a footer.
+fn gzip_isize(archive_path: &Path) -> Option<u64> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = fs::File::open(archive_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len < 18 {
+        // gzip header (10) + footer (8): anything shorter isn't a valid
+        // gzip stream at all, let alone one with a trustworthy footer.
+        return None;
+    }
+    file.seek(SeekFrom::End(-4)).ok()?;
+    let mut buf = [0u8; 4];
+    file.read_exact(&mut buf).ok()?;
+    Some(u32::from_le_bytes(buf) as u64)
+}
+
+/// The `Read` decoder for a bare `.gz`/`.bz2` payload — the Single
+/// counterpart of `open_tar_archive`, shared by the in-memory viewer path
+/// (`extract_single_from_single`) and `tasks::archive`'s to-disk
+/// extraction.
+pub fn open_single_reader(
+    archive_path: &Path,
+    compression: SingleCompression,
+) -> Result<Box<dyn Read>> {
+    let file = fs::File::open(archive_path)
+        .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
+    Ok(match compression {
+        SingleCompression::Gzip => Box::new(flate2::read::GzDecoder::new(file)),
+        SingleCompression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(file)),
+    })
 }
 
 /// Reads `archive_path`'s central directory into `RawEntry`s — see
@@ -498,6 +652,52 @@ pub fn open_tar_archive(
     Ok(tar::Archive::new(reader))
 }
 
+/// Whether any entry in `archive_path` (a zip) is encrypted — the cheap
+/// metadata-only scan `begin_extract`/`begin_unzip` use to decide whether
+/// to ask for a password *before* spawning a task that would only fail.
+pub fn zip_has_encrypted_entries(archive_path: &Path) -> Result<bool> {
+    let file = fs::File::open(archive_path)
+        .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
+    let mut archive = ZipArchive::new(file)
+        .with_context(|| format!("not a valid zip archive: {}", archive_path.display()))?;
+    for i in 0..archive.len() {
+        if archive.by_index_raw(i)?.encrypted() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Verifies `password` against the first encrypted entry by actually
+/// decrypting one byte of it — run on the main thread before spawning an
+/// extraction, so a typo'd password fails at the prompt (re-askable)
+/// rather than mid-task. `Ok(())` when nothing is encrypted at all. Note
+/// legacy ZipCrypto's checksum lets ~1/256 wrong passwords through this
+/// check; those still fail later, inside the task, as a logged error.
+pub fn verify_zip_password(archive_path: &Path, password: &str) -> Result<()> {
+    let file = fs::File::open(archive_path)
+        .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
+    let mut archive = ZipArchive::new(file)
+        .with_context(|| format!("not a valid zip archive: {}", archive_path.display()))?;
+    let mut target = None;
+    for i in 0..archive.len() {
+        let raw = archive.by_index_raw(i)?;
+        if raw.encrypted() && raw.size() > 0 {
+            target = Some(i);
+            break;
+        }
+    }
+    let Some(index) = target else {
+        return Ok(());
+    };
+    let mut entry = zip_entry_reader(&mut archive, index, Some(password))?;
+    let mut probe = [0u8; 1];
+    entry
+        .read_exact(&mut probe)
+        .map_err(|e| anyhow::anyhow!("failed to verify password: {e}"))?;
+    Ok(())
+}
+
 /// The tar-family equivalent of zip's `enclosed_name()`: `None` for a
 /// path that's absolute, has a Windows path prefix, or contains a `..`
 /// component anywhere — i.e. one that would escape the archive root if
@@ -529,15 +729,25 @@ pub fn enclosed_tar_path(path: &Path) -> Option<PathBuf> {
 /// `size_cap` bytes, same truncation contract as `viewer::load`'s
 /// on-disk path (`(bytes, truncated)`). Dispatches on `detect_archive_kind`
 /// the same way `read_archive_dir_entries` does.
+/// `password` only matters for zip (`Some` decrypts with it, `None` reads
+/// plain entries and surfaces [`ZipPasswordError::PasswordRequired`] on an
+/// encrypted one); the tar family and bare `.gz`/`.bz2` have no
+/// encryption concept and ignore it.
 pub fn extract_single_to_memory(
     archive_path: &Path,
     inner_path: &Path,
     size_cap: u64,
+    password: Option<&str>,
 ) -> Result<(Vec<u8>, bool)> {
     match detect_archive_kind(archive_path) {
-        Some(ArchiveKind::Zip) => extract_single_from_zip(archive_path, inner_path, size_cap),
+        Some(ArchiveKind::Zip) => {
+            extract_single_from_zip(archive_path, inner_path, size_cap, password)
+        }
         Some(ArchiveKind::Tar(compression)) => {
             extract_single_from_tar(archive_path, compression, inner_path, size_cap)
+        }
+        Some(ArchiveKind::Single(compression)) => {
+            extract_single_from_single(archive_path, compression, inner_path, size_cap)
         }
         None => bail!(
             "not a recognized archive format: {}",
@@ -546,13 +756,36 @@ pub fn extract_single_to_memory(
     }
 }
 
-/// A genuinely encrypted zip entry surfaces `by_index`'s own "password
-/// required" error here, which is exactly the "log clear error" the plan
-/// asks for — there's no special case to write.
+/// Opens zip entry `index` for reading, decrypting with `password` when
+/// one is supplied *and the entry is actually encrypted* (a plain entry
+/// in a partially-encrypted archive must not go through the decrypt path
+/// — `by_index_decrypt` would misinterpret its leading bytes as a crypto
+/// header). Password-shaped failures come back as [`ZipPasswordError`]
+/// via [`map_zip_error`]. The one shared "read an entry's bytes with an
+/// optional password" primitive — the viewer path here and
+/// `tasks::archive`'s extraction both go through it.
+pub fn zip_entry_reader<'a, R: io::Read + io::Seek>(
+    archive: &'a mut ZipArchive<R>,
+    index: usize,
+    password: Option<&str>,
+) -> Result<zip::read::ZipFile<'a, R>> {
+    let encrypted = archive.by_index_raw(index)?.encrypted();
+    let result = match password {
+        Some(pw) if encrypted => archive.by_index_decrypt(index, pw.as_bytes()),
+        _ => archive.by_index(index),
+    };
+    result.map_err(map_zip_error)
+}
+
+/// A genuinely encrypted zip entry surfaces as
+/// [`ZipPasswordError::PasswordRequired`]/[`InvalidPassword`] here (see
+/// [`zip_entry_reader`]), which is what lets the UI prompt for a password
+/// and retry instead of just logging an opaque error.
 fn extract_single_from_zip(
     archive_path: &Path,
     inner_path: &Path,
     size_cap: u64,
+    password: Option<&str>,
 ) -> Result<(Vec<u8>, bool)> {
     let file = fs::File::open(archive_path)
         .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
@@ -571,7 +804,7 @@ fn extract_single_from_zip(
         bail!("not found in archive: {}", inner_path.display());
     };
 
-    let mut entry = archive.by_index(index)?;
+    let mut entry = zip_entry_reader(&mut archive, index, password)?;
     let full_size = entry.size();
     let to_read = full_size.min(size_cap) as usize;
     let mut buf = vec![0u8; to_read];
@@ -579,6 +812,31 @@ fn extract_single_from_zip(
         .read_exact(&mut buf)
         .with_context(|| format!("failed to read {}", inner_path.display()))?;
     Ok((buf, full_size > size_cap))
+}
+
+/// The Single (bare `.gz`/`.bz2`) viewer path: streams the decoder up to
+/// `size_cap` bytes, probing one byte further to learn whether the
+/// payload was truncated (neither format's header states the exact
+/// uncompressed size reliably — see `read_single_raw_entry`).
+fn extract_single_from_single(
+    archive_path: &Path,
+    compression: SingleCompression,
+    inner_path: &Path,
+    size_cap: u64,
+) -> Result<(Vec<u8>, bool)> {
+    let expected = single_payload_name(archive_path);
+    if inner_path != Path::new(&expected) {
+        bail!("not found in archive: {}", inner_path.display());
+    }
+    let mut reader = open_single_reader(archive_path, compression)?;
+    let mut buf = Vec::new();
+    reader
+        .by_ref()
+        .take(size_cap)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("failed to decompress {}", archive_path.display()))?;
+    let truncated = buf.len() as u64 == size_cap && reader.read(&mut [0u8; 1])? > 0;
+    Ok((buf, truncated))
 }
 
 /// tar is sequential — there's no random access by name the way zip's
@@ -718,6 +976,160 @@ mod tests {
         (dir, archive_path)
     }
 
+    fn make_gz(dir: &Path, name: &str, payload: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        let file = fs::File::create(&path).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap();
+        path
+    }
+
+    fn make_bz2(dir: &Path, name: &str, payload: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        let file = fs::File::create(&path).unwrap();
+        let mut enc = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap();
+        path
+    }
+
+    fn make_encrypted_zip(dir: &Path) -> PathBuf {
+        let path = dir.join("secret.zip");
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, "hunter2");
+        writer.start_file("secret.txt", options).unwrap();
+        writer.write_all(b"top secret payload").unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn single_gz_lists_one_entry_with_isize_and_extracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = b"hello single gzip payload";
+        let path = make_gz(dir.path(), "notes.txt.gz", payload);
+
+        let entries = read_archive_dir_entries(&path, Path::new("")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "notes.txt");
+        assert_eq!(entries[0].kind, EntryKind::File);
+        assert_eq!(entries[0].size, payload.len() as u64, "gzip ISIZE footer");
+
+        let (bytes, truncated) =
+            extract_single_to_memory(&path, Path::new("notes.txt"), 1024, None).unwrap();
+        assert_eq!(bytes, payload);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn single_gz_respects_the_size_cap_and_reports_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = vec![b'x'; 100];
+        let path = make_gz(dir.path(), "big.gz", &payload);
+
+        let (bytes, truncated) =
+            extract_single_to_memory(&path, Path::new("big"), 10, None).unwrap();
+        assert_eq!(bytes.len(), 10);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn single_bz2_lists_one_entry_with_unknown_size_and_extracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = b"bzip2 payload here";
+        let path = make_bz2(dir.path(), "notes.txt.bz2", payload);
+
+        let entries = read_archive_dir_entries(&path, Path::new("")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "notes.txt");
+        assert_eq!(entries[0].size, 0, "bzip2 records no uncompressed size");
+
+        let (bytes, truncated) =
+            extract_single_to_memory(&path, Path::new("notes.txt"), 1024, None).unwrap();
+        assert_eq!(bytes, payload);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn single_extract_of_a_wrong_inner_name_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = make_gz(dir.path(), "notes.txt.gz", b"x");
+        let err = extract_single_to_memory(&path, Path::new("wrong-name"), 1024, None).unwrap_err();
+        assert!(err.to_string().contains("not found in archive"));
+    }
+
+    #[test]
+    fn encrypted_zip_lists_without_a_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = make_encrypted_zip(dir.path());
+        let entries = read_archive_dir_entries(&path, Path::new("")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "secret.txt");
+        assert!(zip_has_encrypted_entries(&path).unwrap());
+    }
+
+    #[test]
+    fn encrypted_zip_read_without_password_is_password_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = make_encrypted_zip(dir.path());
+        let err = extract_single_to_memory(&path, Path::new("secret.txt"), 1024, None).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ZipPasswordError>(),
+            Some(&ZipPasswordError::PasswordRequired)
+        );
+    }
+
+    #[test]
+    fn encrypted_zip_reads_with_the_right_password_and_rejects_a_wrong_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = make_encrypted_zip(dir.path());
+
+        let (bytes, truncated) =
+            extract_single_to_memory(&path, Path::new("secret.txt"), 1024, Some("hunter2"))
+                .unwrap();
+        assert_eq!(bytes, b"top secret payload");
+        assert!(!truncated);
+
+        let err = extract_single_to_memory(&path, Path::new("secret.txt"), 1024, Some("nope"))
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ZipPasswordError>(),
+            Some(&ZipPasswordError::InvalidPassword)
+        );
+    }
+
+    #[test]
+    fn verify_zip_password_accepts_right_rejects_wrong_and_passes_plain() {
+        let dir = tempfile::tempdir().unwrap();
+        let encrypted = make_encrypted_zip(dir.path());
+        assert!(verify_zip_password(&encrypted, "hunter2").is_ok());
+        let err = verify_zip_password(&encrypted, "nope").unwrap_err();
+        assert!(err.downcast_ref::<ZipPasswordError>().is_some());
+
+        let (_plain_dir, plain) = make_archive();
+        assert!(!zip_has_encrypted_entries(&plain).unwrap());
+        assert!(
+            verify_zip_password(&plain, "anything").is_ok(),
+            "nothing encrypted -> nothing to verify against"
+        );
+    }
+
+    #[test]
+    fn plain_entries_in_a_zip_still_read_when_a_password_is_supplied() {
+        // A password in hand must not break reading *unencrypted* entries
+        // (zip_entry_reader only routes through decrypt for entries whose
+        // own flag says encrypted).
+        let (_dir, archive_path) = make_archive();
+        let (bytes, _) =
+            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 1024, Some("pw"))
+                .unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
     #[test]
     fn detect_archive_kind_matches_zip_and_every_tar_variant_case_insensitively() {
         use ArchiveKind::*;
@@ -737,7 +1149,13 @@ mod tests {
             ("a.tar.xz", Some(Tar(Xz))),
             ("a.txz", Some(Tar(Xz))),
             ("a", None),
-            ("a.gz", None), // a bare `.gz` with no `.tar` isn't a tar-family archive
+            // Bare compressed files are Single, and — the ordering
+            // regression this pins — a `.tar.gz` stays Tar(Gzip) even
+            // though it also ends in `.gz`.
+            ("a.gz", Some(Single(SingleCompression::Gzip))),
+            ("a.GZ", Some(Single(SingleCompression::Gzip))),
+            ("a.bz2", Some(Single(SingleCompression::Bzip2))),
+            ("notes.txt.gz", Some(Single(SingleCompression::Gzip))),
             ("a.txt", None),
         ];
         for (name, expected) in cases {
@@ -807,9 +1225,13 @@ mod tests {
     #[test]
     fn extract_single_to_memory_reads_the_full_small_file() {
         let (_dir, archive_path) = make_archive();
-        let (bytes, truncated) =
-            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 10 * 1024 * 1024)
-                .unwrap();
+        let (bytes, truncated) = extract_single_to_memory(
+            &archive_path,
+            Path::new("readme.txt"),
+            10 * 1024 * 1024,
+            None,
+        )
+        .unwrap();
         assert_eq!(bytes, b"hello");
         assert!(!truncated);
     }
@@ -818,7 +1240,7 @@ mod tests {
     fn extract_single_to_memory_truncates_at_the_cap() {
         let (_dir, archive_path) = make_archive();
         let (bytes, truncated) =
-            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 2).unwrap();
+            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 2, None).unwrap();
         assert_eq!(bytes, b"he");
         assert!(truncated);
     }
@@ -827,7 +1249,7 @@ mod tests {
     fn extract_single_to_memory_errors_on_a_missing_entry() {
         let (_dir, archive_path) = make_archive();
         let result =
-            extract_single_to_memory(&archive_path, Path::new("nope.txt"), 10 * 1024 * 1024);
+            extract_single_to_memory(&archive_path, Path::new("nope.txt"), 10 * 1024 * 1024, None);
         assert!(result.is_err());
     }
 
@@ -906,9 +1328,13 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["readme.txt", "src"]);
 
-        let (bytes, truncated) =
-            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 10 * 1024 * 1024)
-                .unwrap();
+        let (bytes, truncated) = extract_single_to_memory(
+            &archive_path,
+            Path::new("readme.txt"),
+            10 * 1024 * 1024,
+            None,
+        )
+        .unwrap();
         assert_eq!(bytes, b"hello");
         assert!(!truncated);
     }
@@ -921,9 +1347,13 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["readme.txt", "src"]);
 
-        let (bytes, truncated) =
-            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 10 * 1024 * 1024)
-                .unwrap();
+        let (bytes, truncated) = extract_single_to_memory(
+            &archive_path,
+            Path::new("readme.txt"),
+            10 * 1024 * 1024,
+            None,
+        )
+        .unwrap();
         assert_eq!(bytes, b"hello");
         assert!(!truncated);
     }
@@ -953,6 +1383,7 @@ mod tests {
             &archive_path,
             Path::new("日本語ディレクトリ/日本語ファイル.txt"),
             10 * 1024 * 1024,
+            None,
         )
         .unwrap();
         assert_eq!(bytes, "こんにちは".as_bytes());
@@ -1005,7 +1436,7 @@ mod tests {
     fn extract_single_to_memory_from_tar_truncates_at_the_cap() {
         let (_dir, archive_path) = make_tar_archive("project.tar", TarCompression::Plain);
         let (bytes, truncated) =
-            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 2).unwrap();
+            extract_single_to_memory(&archive_path, Path::new("readme.txt"), 2, None).unwrap();
         assert_eq!(bytes, b"he");
         assert!(truncated);
     }
@@ -1014,7 +1445,7 @@ mod tests {
     fn extract_single_to_memory_from_tar_errors_on_a_missing_entry() {
         let (_dir, archive_path) = make_tar_archive("project.tar", TarCompression::Plain);
         let result =
-            extract_single_to_memory(&archive_path, Path::new("nope.txt"), 10 * 1024 * 1024);
+            extract_single_to_memory(&archive_path, Path::new("nope.txt"), 10 * 1024 * 1024, None);
         assert!(result.is_err());
     }
 
