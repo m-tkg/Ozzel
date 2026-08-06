@@ -107,7 +107,7 @@ pub enum ItemKind {
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 8] = [
+pub const BEHAVIOR_ITEMS: [Item; 9] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations（コピー/移動前に確認）",
@@ -149,6 +149,11 @@ pub const BEHAVIOR_ITEMS: [Item; 8] = [
     Item {
         key: "file_search_incremental",
         label: "file_search_incremental（ファイル名検索を入力の度に実行）",
+        kind: ItemKind::Bool,
+    },
+    Item {
+        key: "command_line_interactive",
+        label: "command_line_interactive（: を対話シェル $SHELL -i で実行）",
         kind: ItemKind::Bool,
     },
 ];
@@ -276,6 +281,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "quit_cd" => config.quit_cd,
                 "mouse" => config.mouse,
                 "file_search_incremental" => config.file_search_incremental,
+                "command_line_interactive" => config.command_line_interactive,
                 "show_permissions" => config.show_permissions,
                 "dim_inactive" => config.colors.dim_inactive,
                 _ => unreachable!("bool item key {:?}", item.key),

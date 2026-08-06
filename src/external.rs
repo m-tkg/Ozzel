@@ -30,6 +30,14 @@ pub struct ExternalRequest {
     /// commands, so their output stays on screen and readable instead of
     /// being immediately overwritten by the redrawn TUI.
     pub pause_after: bool,
+    /// Whether to run the shell with `-i` (interactive) on unix, so the
+    /// user's rc file (`.zshrc`/`.bashrc`) is sourced and its aliases/
+    /// functions become usable. `true` only for `:` commands, and only
+    /// when `config.command_line_interactive` opts in — editors and
+    /// `[viewers]` templates always run non-interactive, since their
+    /// command lines come from config, not ad-hoc typing. No Windows
+    /// equivalent (`cmd.exe /C` has no interactive flag) — ignored there.
+    pub interactive: bool,
 }
 
 /// Quotes `s` for safe inclusion in a shell command line passed to
@@ -72,16 +80,18 @@ pub fn build_viewer_cmdline(template: &str, path: &Path) -> String {
 /// below, which take those values as plain arguments instead of reading
 /// the environment themselves — so both are directly unit-testable
 /// regardless of which OS is actually running the test.
-pub fn shell_command(cmdline: &str) -> (String, Vec<String>) {
+pub fn shell_command(cmdline: &str, interactive: bool) -> (String, Vec<String>) {
     if cfg!(windows) {
         let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
         windows_shell_command(&comspec, cmdline)
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        unix_shell_command(&shell, cmdline)
+        unix_shell_command(&shell, cmdline, interactive)
     }
 }
 
+/// `interactive` has no `cmd.exe` equivalent, so it's simply not part of
+/// this signature — see `ExternalRequest::interactive`'s doc comment.
 fn windows_shell_command(comspec: &str, cmdline: &str) -> (String, Vec<String>) {
     (
         comspec.to_string(),
@@ -89,11 +99,17 @@ fn windows_shell_command(comspec: &str, cmdline: &str) -> (String, Vec<String>) 
     )
 }
 
-fn unix_shell_command(shell: &str, cmdline: &str) -> (String, Vec<String>) {
-    (
-        shell.to_string(),
-        vec!["-c".to_string(), cmdline.to_string()],
-    )
+fn unix_shell_command(shell: &str, cmdline: &str, interactive: bool) -> (String, Vec<String>) {
+    // `-i` as its own argument (not fused into `-ic`) — every POSIX shell
+    // accepts both, but separate flags can't be misread as a single
+    // unknown option by a nonstandard $SHELL.
+    let mut args = Vec::with_capacity(3);
+    if interactive {
+        args.push("-i".to_string());
+    }
+    args.push("-c".to_string());
+    args.push(cmdline.to_string());
+    (shell.to_string(), args)
 }
 
 /// Runs `req.cmdline` with the TUI suspended:
@@ -153,7 +169,7 @@ pub fn run_suspended(
     execute!(io::stdout(), LeaveAlternateScreen, Show)
         .context("failed to leave alternate screen")?;
 
-    let (program, args) = shell_command(&req.cmdline);
+    let (program, args) = shell_command(&req.cmdline, req.interactive);
     let mut command = Command::new(&program);
     command
         .args(&args)
@@ -358,9 +374,19 @@ mod tests {
 
     #[test]
     fn unix_shell_command_uses_shell_dash_c() {
-        let (program, args) = unix_shell_command("/bin/zsh", "ls -la");
+        let (program, args) = unix_shell_command("/bin/zsh", "ls -la", false);
         assert_eq!(program, "/bin/zsh");
         assert_eq!(args, vec!["-c".to_string(), "ls -la".to_string()]);
+    }
+
+    #[test]
+    fn unix_shell_command_interactive_adds_dash_i_before_dash_c() {
+        let (program, args) = unix_shell_command("/bin/zsh", "myalias", true);
+        assert_eq!(program, "/bin/zsh");
+        assert_eq!(
+            args,
+            vec!["-i".to_string(), "-c".to_string(), "myalias".to_string()]
+        );
     }
 
     #[test]

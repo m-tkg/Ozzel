@@ -102,6 +102,18 @@ fn default_confirm_quit() -> bool {
     true
 }
 
+/// `:` commands run non-interactive by default: `$SHELL -c <cmdline>`,
+/// which never sources `.zshrc`/`.bashrc`, so interactive-shell aliases
+/// and functions aren't visible. A top-level
+/// `command_line_interactive = true` adds `-i` (`$SHELL -i -c ...`),
+/// sourcing the rc file and making them usable — at the cost of the rc's
+/// startup time and side effects on every `:` command. Unix only; ignored
+/// on Windows (`cmd.exe /C` has no interactive flag). Editors (`e`/`,`)
+/// and `[viewers]` commands are unaffected either way.
+fn default_command_line_interactive() -> bool {
+    false
+}
+
 /// The file-name search popup (`g` — see `App::begin_file_search`) re-runs
 /// its search on every keystroke by default. A top-level
 /// `file_search_incremental = false` switches to explicit runs instead:
@@ -217,6 +229,12 @@ pub struct Config {
     /// See `main.rs`'s `write_cwd_file` and the README's shell wrapper.
     #[serde(default = "default_quit_cd")]
     pub quit_cd: bool,
+    /// Whether `:` commands run in an interactive shell (`$SHELL -i -c`)
+    /// so rc-file aliases/functions work — see
+    /// `default_command_line_interactive`. Kept top-level for the same
+    /// "don't break existing configs" reason as its neighbors.
+    #[serde(default = "default_command_line_interactive")]
+    pub command_line_interactive: bool,
     /// Whether the file-name search popup (`g`) re-runs its search on
     /// every keystroke (`true`, the default) or only on `Enter` — see
     /// `default_file_search_incremental`. Kept top-level for the same
@@ -261,6 +279,7 @@ impl Default for Config {
             confirm_operations: default_confirm_operations(),
             confirm_quit: default_confirm_quit(),
             quit_cd: default_quit_cd(),
+            command_line_interactive: default_command_line_interactive(),
             file_search_incremental: default_file_search_incremental(),
             show_permissions: default_show_permissions(),
             mouse: default_mouse(),
