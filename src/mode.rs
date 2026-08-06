@@ -70,6 +70,13 @@ pub enum PromptKind {
         done: usize,
         total: usize,
     },
+    /// Collecting the timestamp for `touch` (`T`): prefilled with the
+    /// cursor entry's current mtime, applied to every path in `targets`
+    /// on commit (empty input = now). `targets` is captured at prompt-open
+    /// time, same story as `ZipName`'s. See `App::commit_touch`.
+    TouchTime {
+        targets: Vec<PathBuf>,
+    },
 }
 
 /// The operation a `PromptKind::ArchivePassword` retries once a password
@@ -269,11 +276,55 @@ pub struct CollisionInfo {
     pub dest_line: String,
 }
 
+/// The state of the chmod dialog (`Mode::Chmod`): a 3x3 grid of rwx
+/// toggles (rows = user/group/other, columns = r/w/x) editing one absolute
+/// mode applied to every path in `targets` on Enter. Only the lower 0o777
+/// is edited — `ops::chmod` preserves the setuid/setgid/sticky bits each
+/// target already has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChmodState {
+    pub targets: Vec<PathBuf>,
+    /// The mode being edited (lower 0o777 only).
+    pub bits: u32,
+    /// Grid position, 0..9: row = `cursor / 3` (user/group/other), column
+    /// = `cursor % 3` (r/w/x).
+    pub cursor: usize,
+}
+
+impl ChmodState {
+    /// The permission bit the grid cell at `cursor` toggles.
+    pub fn bit_at(cursor: usize) -> u32 {
+        let row = cursor / 3; // 0 = user, 1 = group, 2 = other
+        let col = cursor % 3; // 0 = r, 1 = w, 2 = x
+        let base = [0o400u32, 0o200, 0o100][col];
+        base >> (row * 3)
+    }
+}
+
+/// One pre-formatted `label: value` listing shown by the file-info modal
+/// (`Mode::FileInfo`), built by `App::begin_file_info` at open time (fresh
+/// `symlink_metadata`, owner/group resolution, ...) so the renderer stays
+/// I/O-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileInfoData {
+    /// The dialog title (the entry's name).
+    pub title: String,
+    /// `(label, value)` rows, already in display order. An empty label
+    /// renders as a separator/blank line.
+    pub rows: Vec<(String, String)>,
+}
+
 /// The operation a `Mode::Confirm` will perform if the user answers yes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingOp {
     Delete {
         targets: Vec<PathBuf>,
+    },
+    /// Confirmed symlink creation: one link per source in `targets`,
+    /// created in `dest_dir`. See `App::begin_symlink`.
+    Symlink {
+        targets: Vec<PathBuf>,
+        dest_dir: PathBuf,
     },
     /// A confirmed Copy/Move ready to spawn, as exact `(src, dest)`
     /// pairs. Reached only through the *no-collision* confirm
@@ -467,6 +518,22 @@ pub enum Mode {
         /// A `re:` pattern's compile error from the last run
         /// (`FilterSpec::error`), shown under the input line.
         error: Option<String>,
+    },
+    /// The chmod dialog (`A`): a centered 3x3 rwx toggle grid. Fixed keys
+    /// (see `App::handle_chmod_key`): arrows move over the grid, Space
+    /// toggles the highlighted bit, `0`-`7` set the highlighted row's
+    /// class as an octal digit, Enter applies to every target, Esc
+    /// cancels.
+    Chmod {
+        state: ChmodState,
+    },
+    /// The file-info modal (`I`): a read-only `label: value` listing of
+    /// the cursor entry's metadata, built once at open time. Any of
+    /// Esc/`q`/Enter closes it (see `App::handle_file_info_key`). Boxed —
+    /// the rows can be a couple hundred bytes and `Mode` moves around a
+    /// lot.
+    FileInfo {
+        info: Box<FileInfoData>,
     },
     /// The sort dialog (`t`): a small centered modal listing every
     /// (sort key, direction) combination — Name↑, Name↓, Size↑, … —

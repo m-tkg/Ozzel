@@ -58,6 +58,23 @@ pub enum Action {
     /// Copies the cursor entry's absolute path to the system clipboard
     /// (via an OSC 52 terminal escape — see `App::begin_copy_path`).
     CopyPath,
+    /// Creates symbolic links to the marked (or cursor) entries in the
+    /// other pane's directory, pointing at the sources' absolute paths.
+    /// See `App::begin_symlink`.
+    Symlink,
+    /// Opens the permission-editing dialog (`Mode::Chmod`): a 3x3 rwx
+    /// toggle grid applied to the marked (or cursor) entries. Unix only —
+    /// on other platforms it just logs that it isn't supported. See
+    /// `App::begin_chmod`.
+    Chmod,
+    /// Prompts for a timestamp (`YYYY-MM-DD HH:MM:SS`, empty = now) and
+    /// sets the marked (or cursor) entries' modified/accessed times to it.
+    /// See `App::begin_touch`.
+    Touch,
+    /// Opens a modal showing the cursor entry's full metadata (exact size,
+    /// permissions, owner/group, timestamps, inode, link target, ...),
+    /// re-read from disk at open time. See `App::begin_file_info`.
+    FileInfo,
     Filter,
     ClearFilter,
     /// Prefix-jump incremental search (`Mode::JumpSearch`): pure cursor
@@ -160,7 +177,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 50] = [
+    pub const ALL: [Action; 54] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -192,6 +209,10 @@ impl Action {
         Action::ZipMarked,
         Action::Unzip,
         Action::CancelTasks,
+        Action::Symlink,
+        Action::Chmod,
+        Action::Touch,
+        Action::FileInfo,
         Action::Filter,
         Action::ClearFilter,
         Action::JumpSearch,
@@ -221,7 +242,8 @@ impl Action {
             | ToggleHidden | SwapPanes | Refresh => ActionCategory::Movement,
             Mark | MarkAll => ActionCategory::Marks,
             Rename | RenameMarks | Mkdir | Delete | Copy | Move | Duplicate | CopyPath
-            | CalcDirSize | ZipMarked | Unzip | CancelTasks => ActionCategory::FileOps,
+            | CalcDirSize | ZipMarked | Unzip | CancelTasks | Symlink | Chmod | Touch
+            | FileInfo => ActionCategory::FileOps,
             Filter | ClearFilter | JumpSearch | FileSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
@@ -266,6 +288,10 @@ impl Action {
             ZipMarked => "Zip marked entries (or the cursor entry)",
             Unzip => "Unzip the cursor .zip file",
             CancelTasks => "Cancel all running background tasks",
+            Symlink => "Create symlinks to marked entries (or the cursor entry) in the other pane",
+            Chmod => "Edit permissions of marked entries (or the cursor entry)",
+            Touch => "Set the modified time of marked entries (or the cursor entry)",
+            FileInfo => "Show detailed information about the cursor entry",
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
             JumpSearch => "Jump the cursor to entries by typed prefix",
@@ -328,6 +354,10 @@ impl Action {
             ZipMarked => "zip_marked",
             Unzip => "unzip",
             CancelTasks => "cancel_tasks",
+            Symlink => "symlink",
+            Chmod => "chmod",
+            Touch => "touch",
+            FileInfo => "file_info",
             HistoryJump => "history_jump",
             HistoryBack => "history_back",
             HistoryForward => "history_forward",

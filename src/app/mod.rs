@@ -23,9 +23,9 @@ use crate::filter::FilterSpec;
 use crate::help::HelpLine;
 use crate::keymap::{KeyCombo, Keymap};
 use crate::mode::{
-    COLLISION_CHOICES, CollisionInfo, CollisionState, LineEditor, Mode, PasswordPending, PendingOp,
-    PromptKind, SearchDirection, SelectKind, SettingsEditor, SettingsScreen, TextField,
-    TransferKind, ViewMode, ViewerSearch,
+    COLLISION_CHOICES, ChmodState, CollisionInfo, CollisionState, LineEditor, Mode,
+    PasswordPending, PendingOp, PromptKind, SearchDirection, SelectKind, SettingsEditor,
+    SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch,
 };
 use crate::ops;
 use crate::pane::{CursorAnchor, PAGE_SIZE, Pane, SortKey};
@@ -690,6 +690,8 @@ impl App {
                 Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
                 Mode::FileSearch { .. } => self.handle_file_search_key(code, modifiers),
                 Mode::SortSelect { .. } => self.handle_sort_select_key(code),
+                Mode::Chmod { .. } => self.handle_chmod_key(code),
+                Mode::FileInfo { .. } => self.handle_file_info_key(code),
                 Mode::Settings { .. } => self.handle_settings_key(code, modifiers),
             },
             AppEvent::Mouse(mouse_event) => self.handle_mouse(mouse_event),
@@ -912,6 +914,22 @@ impl App {
             }
             Action::CancelTasks => {
                 self.cancel_running_tasks();
+                Ok(())
+            }
+            Action::Symlink => {
+                self.begin_symlink();
+                Ok(())
+            }
+            Action::Chmod => {
+                self.begin_chmod();
+                Ok(())
+            }
+            Action::Touch => {
+                self.begin_touch();
+                Ok(())
+            }
+            Action::FileInfo => {
+                self.begin_file_info();
                 Ok(())
             }
         };
@@ -2096,6 +2114,7 @@ impl App {
             } => self.commit_rename_many(dir, current, queue, done, total, value),
             PromptKind::CollisionRename { state } => self.commit_collision_rename(*state, value),
             PromptKind::ArchivePassword { pending } => self.commit_archive_password(pending, value),
+            PromptKind::TouchTime { targets } => self.commit_touch(targets, value),
         }
     }
 

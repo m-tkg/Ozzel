@@ -1,3 +1,4 @@
+mod attr_ops;
 mod dispatch;
 mod external;
 mod file_ops;

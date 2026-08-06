@@ -335,7 +335,9 @@ fn format_permissions(kind: EntryKind, unix_mode: Option<u32>, readonly: bool) -
     }
 }
 
-fn unix_permission_string(kind: EntryKind, mode: u32) -> String {
+// `pub(crate)`: also renders the mode line in the file-info modal and the
+// chmod dialog's live readout (`App::begin_file_info` and friends).
+pub(crate) fn unix_permission_string(kind: EntryKind, mode: u32) -> String {
     let type_ch = match kind {
         EntryKind::Dir => 'd',
         EntryKind::Symlink => 'l',
@@ -486,7 +488,8 @@ fn format_size(bytes: u64, fmt: SizeFormat) -> String {
 }
 
 /// `1234567` -> `"1,234,567"`.
-fn group_thousands(bytes: u64) -> String {
+// `pub(crate)`: also formats the exact byte count in the file-info modal.
+pub(crate) fn group_thousands(bytes: u64) -> String {
     let digits = bytes.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     let offset = digits.len() % 3;
@@ -499,7 +502,8 @@ fn group_thousands(bytes: u64) -> String {
     out
 }
 
-fn human_size(bytes: u64) -> String {
+// `pub(crate)`: also formats the human-readable size in the file-info modal.
+pub(crate) fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     if bytes < 1024 {
         return format!("{bytes}B");
