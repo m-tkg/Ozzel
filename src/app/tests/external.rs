@@ -28,6 +28,55 @@ fn command_line_prompt_commit_sets_pending_external() {
     assert_eq!(req.cmdline, "ls -la");
     assert_eq!(req.cwd, dir.path());
     assert!(req.pause_after);
+    assert!(!req.interactive, "non-interactive by default");
+}
+
+#[test]
+fn command_line_runs_interactive_when_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        command_line_interactive: true,
+        ..Config::default()
+    };
+    let mut app = App::new(dir.path().to_path_buf(), dir.path().to_path_buf(), config).unwrap();
+
+    app.dispatch(Action::CommandLine);
+    for c in "myalias".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    let req = app
+        .outbox
+        .external
+        .take()
+        .expect("expected a pending external request");
+    assert!(req.interactive);
+}
+
+#[test]
+fn editor_stays_non_interactive_even_when_command_line_interactive_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("file.txt"), b"hi").unwrap();
+    let config = Config {
+        command_line_interactive: true,
+        editor: Some("vim".to_string()),
+        ..Config::default()
+    };
+    let mut app = App::new(dir.path().to_path_buf(), dir.path().to_path_buf(), config).unwrap();
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "file.txt");
+
+    app.dispatch(Action::OpenEditor);
+    let req = app
+        .outbox
+        .external
+        .take()
+        .expect("expected a pending external request");
+    assert!(
+        !req.interactive,
+        "the toggle is `:`-only; configured commands never go interactive"
+    );
 }
 
 #[test]

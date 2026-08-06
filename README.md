@@ -287,7 +287,7 @@ Virtual Directory（アーカイブ内の閲覧）中のファイルには外部
 
 | カテゴリ | 内容 |
 | --- | --- |
-| 動作 | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `dim_inactive` / `file_search_incremental` |
+| 動作 | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
 | 色 | `[colors]` の各項目（`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`） |
 | 起動/連携 | `home` / `editor` |
 | 拡張子ビューア | `[viewers]`（拡張子 → 起動コマンドの一覧。追加・編集・削除） |
@@ -364,6 +364,8 @@ OS 既定のアプリでファイル・ディレクトリを開く動作（`open
 | `,` | `ozzel` 自身の設定ファイルをエディタで開く（`e` と同じく即座に復帰）。ファイルがまだ存在しない場合は、必要なディレクトリごと `examples/config.toml` と同内容のテンプレートから新規作成してから開く |
 
 `:` で起動したコマンド実行中に子プロセス内で Ctrl+C を押した場合、子プロセスだけが中断され `ozzel` 自体は生存します（子プロセスには専用のプロセスグループを与え、ターミナルのフォアグラウンドグループとして扱っています）。
+
+**`:` のシェルは非対話モードで起動されます**（unix: `$SHELL -c <コマンド>`、Windows: `%COMSPEC% /C`）。非対話シェルは `.zshrc`/`.bashrc` を読み込まないため、対話シェル用に定義した alias やシェル関数はデフォルトでは使えません。設定の `command_line_interactive = true`（または設定画面の「動作」カテゴリ）にすると `-i` 付き（`$SHELL -i -c ...`）で起動し、rc ファイルが読み込まれて alias・関数が使えるようになります。代償として、`:` のコマンド実行ごとに rc の読み込みコストと副作用（プロンプト初期化の出力、`rm -i` のような対話用 alias の有効化、rc の設定次第では履歴ファイルへの記録など）が発生します。rc に `exec tmux` のような起動系の処理がある場合は有効化しないでください。Windows では対応する概念がないため、この設定は無視されます。`e`/`,` のエディタ起動と `[viewers]` のコマンドは、この設定に関わらず常に非対話で実行されます。
 
 **`,` は設定ファイルを開くエディタの決め方が `e` と少し異なります。** `config.editor` → `$EDITOR` →（どちらも未設定なら）`vim` の順に決まり、`e` と違って「エディタ未設定」がエラーになりません（設定ファイルを編集するためのキーが、設定なしでは使えないのでは本末転倒なため）。エディタを終了すると設定ファイルを再読み込みし、パースに成功すればキーバインド・配色・削除挙動などをその場で反映してログに「config reloaded」と表示します（アプリの再起動は不要です）。再読み込み時に TOML が不正だった場合は、他の設定エラーと違ってアプリを終了させず、エラーをログに表示したうえで**それまでの設定・キーバインドを保持したまま**動作を続けます（起動時の不正な設定はハードエラーですが、実行中の再読み込みでアプリを落とすわけにはいかないためです）。
 
@@ -478,6 +480,12 @@ quit_cd = true
 # ファイル名検索（g）を入力の度に実行するかどうか。デフォルトは true
 # （インクリメンタル）。false にすると Enter を押したときだけ検索します。
 file_search_incremental = true
+
+# : のコマンドを対話シェル（$SHELL -i -c）で実行するかどうか。デフォルトは
+# false（$SHELL -c）。true にすると .zshrc/.bashrc が読み込まれ、対話シェル用の
+# alias・シェル関数が : から使えます（rc の読み込みコストと副作用に注意）。
+# unix のみ有効。Windows では無視されます。
+command_line_interactive = false
 
 # マウスキャプチャを有効にするかどうか。デフォルトは true（クリックでの
 # フォーカス/カーソル移動、ホイールスクロール、ドラッグでの範囲トグルマーク、

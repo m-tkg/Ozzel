@@ -1105,6 +1105,7 @@ impl App {
                         cmdline,
                         cwd,
                         pause_after: false,
+                        interactive: false,
                     });
                 }
                 None => self.open_viewer(&path),
@@ -1283,6 +1284,7 @@ impl App {
             cmdline,
             cwd,
             pause_after: false,
+            interactive: false,
         });
     }
 
@@ -1328,6 +1330,7 @@ impl App {
             cmdline,
             cwd,
             pause_after: false,
+            interactive: false,
         });
         self.outbox.config_reload = true;
     }
@@ -1896,6 +1899,7 @@ impl App {
             cmdline,
             cwd,
             pause_after: true,
+            interactive: self.config.command_line_interactive,
         });
     }
 }
