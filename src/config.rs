@@ -102,6 +102,16 @@ fn default_confirm_quit() -> bool {
     true
 }
 
+/// The file-name search popup (`g` — see `App::begin_file_search`) re-runs
+/// its search on every keystroke by default. A top-level
+/// `file_search_incremental = false` switches to explicit runs instead:
+/// edits leave the previous results on screen and `Enter` (re-)runs the
+/// search — for users on trees big enough that per-keystroke re-matching
+/// feels laggy.
+fn default_file_search_incremental() -> bool {
+    true
+}
+
 /// `--cwd-file` is written on quit by default (when the flag was given at
 /// all — see `main.rs`). A top-level `quit_cd = false` opts out entirely,
 /// for a user who passes `--cwd-file` for some other integration and never
@@ -207,6 +217,12 @@ pub struct Config {
     /// See `main.rs`'s `write_cwd_file` and the README's shell wrapper.
     #[serde(default = "default_quit_cd")]
     pub quit_cd: bool,
+    /// Whether the file-name search popup (`g`) re-runs its search on
+    /// every keystroke (`true`, the default) or only on `Enter` — see
+    /// `default_file_search_incremental`. Kept top-level for the same
+    /// "don't break existing configs" reason as its neighbors.
+    #[serde(default = "default_file_search_incremental")]
+    pub file_search_incremental: bool,
     /// Whether the permissions column (`drwxr-xr-x` / Windows fallback)
     /// renders at all — see `ui::pane_view`. Dropped automatically under a
     /// narrow pane width regardless of this setting; this is the "never
@@ -245,6 +261,7 @@ impl Default for Config {
             confirm_operations: default_confirm_operations(),
             confirm_quit: default_confirm_quit(),
             quit_cd: default_quit_cd(),
+            file_search_incremental: default_file_search_incremental(),
             show_permissions: default_show_permissions(),
             mouse: default_mouse(),
             keys: HashMap::new(),

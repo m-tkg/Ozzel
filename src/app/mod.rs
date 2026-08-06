@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use crate::config::{self, Config, DeleteBehavior};
 use crate::entry::EntryKind;
 use crate::event::{AppEvent, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::external::{self, ExternalRequest};
+use crate::file_search::{self, MAX_TREE_ENTRIES};
 use crate::filter::FilterSpec;
 use crate::help::HelpLine;
 use crate::keymap::{KeyCombo, Keymap};
@@ -656,6 +658,7 @@ impl App {
                 Mode::Help { .. } => self.handle_help_key(code, modifiers),
                 Mode::Log { .. } => self.handle_log_view_key(code, modifiers),
                 Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
+                Mode::FileSearch { .. } => self.handle_file_search_key(code, modifiers),
                 Mode::Settings { .. } => self.handle_settings_key(code, modifiers),
             },
             AppEvent::Mouse(mouse_event) => self.handle_mouse(mouse_event),
@@ -774,6 +777,10 @@ impl App {
             }
             Action::JumpSearch => {
                 self.begin_jump_search();
+                Ok(())
+            }
+            Action::FileSearch => {
+                self.begin_file_search();
                 Ok(())
             }
             Action::ZipMarked => {
@@ -1505,6 +1512,155 @@ impl App {
         // bounds by just resetting to the top rather than trying to track
         // "the same action" across a re-filter.
         *cursor = 0;
+    }
+
+    /// `g`: opens the file-name search popup over a snapshot of the active
+    /// pane's whole subtree, walked exactly once here (see
+    /// `crate::file_search`'s module doc comment for why per-keystroke
+    /// searches then never touch the disk). Starts with the empty query's
+    /// results — every entry — rather than an empty list, so the popup is
+    /// browsable before anything is typed.
+    fn begin_file_search(&mut self) {
+        if self.reject_if_virtual("file_search") {
+            return;
+        }
+        let pane = self.active_pane();
+        let tree = file_search::collect_tree(&pane.cwd, pane.show_hidden, MAX_TREE_ENTRIES);
+        let results = file_search::search(&tree, None);
+        self.mode = Mode::FileSearch {
+            input: LineEditor::new(),
+            cursor: 0,
+            tree: Rc::new(tree),
+            results,
+            last_run_query: String::new(),
+            error: None,
+        };
+    }
+
+    /// Re-runs `Mode::FileSearch`'s query against its snapshot, updating
+    /// `results`/`last_run_query`/`error` and resetting the highlight to
+    /// the top. Skips entirely when the query hasn't changed since the
+    /// last run — same "don't recompile the regex for a cursor-only
+    /// keystroke" reasoning as `handle_filter_key`'s `unchanged` check.
+    fn run_file_search(&mut self) {
+        let Mode::FileSearch {
+            input,
+            cursor,
+            tree,
+            results,
+            last_run_query,
+            error,
+        } = &mut self.mode
+        else {
+            return;
+        };
+        let query = input.value();
+        if *last_run_query == query {
+            return;
+        }
+        let spec = FilterSpec::parse(&query);
+        *results = file_search::search(tree, spec.as_ref());
+        *error = spec.as_ref().and_then(|s| s.error()).map(str::to_string);
+        *last_run_query = query;
+        *cursor = 0;
+    }
+
+    /// Fixed keys for `Mode::FileSearch`; never consults the keymap.
+    /// `Esc` cancels; `Enter` either re-runs a stale query (only possible
+    /// with `file_search_incremental = false`, where edits don't re-search)
+    /// or, when the results already match the input, closes the popup and
+    /// jumps the pane to the selected hit's parent directory with the
+    /// cursor on it. Edit keys go to the `LineEditor`, then re-search
+    /// immediately in incremental mode.
+    fn handle_file_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Enter => {
+                let stale = match &self.mode {
+                    Mode::FileSearch {
+                        input,
+                        last_run_query,
+                        ..
+                    } => input.value() != *last_run_query,
+                    _ => return,
+                };
+                if stale {
+                    self.run_file_search();
+                    return;
+                }
+                let Mode::FileSearch {
+                    tree,
+                    results,
+                    cursor,
+                    ..
+                } = &self.mode
+                else {
+                    return;
+                };
+                let Some(&idx) = results.get(*cursor) else {
+                    return;
+                };
+                let entry = &tree.entries[idx];
+                // Directories jump the same way files do — to the *parent*,
+                // cursor on the hit — so one Enter more (`open`) descends
+                // into a matched directory instead of teleporting past it.
+                let parent = entry
+                    .path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| tree.root.clone());
+                let name = entry.name.clone();
+                self.mode = Mode::Normal;
+                // `navigate` (inside) already logs a failed jump and leaves
+                // the pane where it was; `restore_cursor_onto` then simply
+                // finds no such name and parks at 0 — safe either way.
+                self.jump_active_pane_to(parent);
+                self.active_pane_mut().restore_cursor_onto(&name);
+                return;
+            }
+            KeyCode::Up => {
+                if let Mode::FileSearch { cursor, .. } = &mut self.mode {
+                    *cursor = cursor.saturating_sub(1);
+                }
+                return;
+            }
+            KeyCode::Down => {
+                if let Mode::FileSearch {
+                    cursor, results, ..
+                } = &mut self.mode
+                    && *cursor + 1 < results.len()
+                {
+                    *cursor += 1;
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let incremental = self.config.file_search_incremental;
+        {
+            let Mode::FileSearch { input, .. } = &mut self.mode else {
+                return;
+            };
+            match code {
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Delete => input.delete(),
+                KeyCode::Left => input.move_left(),
+                KeyCode::Right => input.move_right(),
+                KeyCode::Home => input.move_home(),
+                KeyCode::End => input.move_end(),
+                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => input.insert(c),
+                _ => {}
+            }
+        }
+        // In Enter-run mode the previous results stay on screen (the view
+        // flags them stale via `last_run_query`) until the user asks.
+        if incremental {
+            self.run_file_search();
+        }
     }
 
     /// Fixed editing keys for `Mode::Filter`; never consults the keymap.

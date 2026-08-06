@@ -7,6 +7,7 @@
 //! live-narrowing interaction the way Filter/JumpSearch are, so obscuring
 //! the panes behind it costs nothing).
 
+mod file_search_view;
 mod function_list_view;
 mod help_view;
 pub mod layout;
@@ -165,6 +166,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
         Mode::FunctionList { .. } => {
             render_status_bar(frame, rows[2], app);
             function_list_view::render(frame, area, app);
+        }
+        Mode::FileSearch { .. } => {
+            render_status_bar(frame, rows[2], app);
+            file_search_view::render(frame, area, app);
         }
         Mode::Normal => render_status_bar(frame, rows[2], app),
         Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } | Mode::Settings { .. } => {

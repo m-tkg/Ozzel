@@ -156,6 +156,22 @@ ozzel update --force  # バージョンが同じでも強制的に再インス�
 
 `f` / `/` の絞込とは異なり、一覧のエントリを非表示にすることは一切ありません。あくまでカーソルを移動させるだけの機能です。一致するエントリが無い間はカーソルは動かず、入力欄に警告表示（`(no match)`）が出ます。`..`（親ディレクトリへ戻る行）は一致対象になりません。Virtual Directory（`.zip` 内の閲覧）でも同様に機能します。
 
+### ファイル名検索（再帰）
+
+| キー | 動作 |
+| --- | --- |
+| `g` | ファイル名検索ポップアップを開く（アクティブペインのディレクトリ配下を再帰検索） |
+| （入力中）文字入力 | 検索パターンを編集（デフォルトでは入力の度に結果を更新） |
+| （入力中）`Up` / `Down` | 結果一覧のカーソルを移動 |
+| （入力中）`Enter` | 選択したエントリの親ディレクトリへ移動し、カーソルをそのエントリに合わせる |
+| （入力中）`Esc` | 検索を取り消して閉じる（ペインは動かない） |
+
+パターンの書式は `f` / `/` の絞込と同一です: そのまま入力すると大文字小文字を区別しない部分一致、`re:` から始めると以降を大文字小文字を区別する正規表現として扱います（例: `re:^main\.(rs|go)$`）。不正な正規表現は入力欄の下にエラーメッセージが表示され、単に何も一致しない扱いになります。マッチ対象はファイル名（パスの末尾要素）のみで、途中のディレクトリ名にはマッチしません。ディレクトリ自体も検索結果に含まれます（末尾に `/` 付きで表示）。
+
+検索対象のツリーはポップアップを開いた瞬間に一度だけ走査され、以降の入力はメモリ上のスナップショットに対する再マッチだけで完結します（入力の度にディスクを再走査することはありません）。隠しファイルの扱いはペインの表示設定（`.` キー）に従い、非表示なら隠しディレクトリの中も走査しません。走査は 100,000 エントリで打ち切られ、その場合はタイトルに `[truncated]` と表示されます。Virtual Directory（アーカイブ内の閲覧中）では使えません。
+
+設定 `file_search_incremental = false`（または設定画面の「動作」カテゴリ）でインクリメンタル更新を止められます。この場合、入力中は前回の結果が表示されたまま（タイトルに `[Enter to search]` と表示）になり、`Enter` の1回目で検索を実行、結果が最新の状態でもう一度 `Enter` を押すと選択エントリへ移動します。
+
 ### zip 圧縮・展開
 
 | キー | 動作 |
@@ -271,7 +287,7 @@ Virtual Directory（アーカイブ内の閲覧）中のファイルには外部
 
 | カテゴリ | 内容 |
 | --- | --- |
-| 動作 | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `dim_inactive` |
+| 動作 | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `dim_inactive` / `file_search_incremental` |
 | 色 | `[colors]` の各項目（`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`） |
 | 起動/連携 | `home` / `editor` |
 | 拡張子ビューア | `[viewers]`（拡張子 → 起動コマンドの一覧。追加・編集・削除） |
@@ -459,6 +475,10 @@ confirm_quit = true
 # 指定していても一切書き出しません。
 quit_cd = true
 
+# ファイル名検索（g）を入力の度に実行するかどうか。デフォルトは true
+# （インクリメンタル）。false にすると Enter を押したときだけ検索します。
+file_search_incremental = true
+
 # マウスキャプチャを有効にするかどうか。デフォルトは true（クリックでの
 # フォーカス/カーソル移動、ホイールスクロール、ドラッグでの範囲トグルマーク、
 # ダブルクリックでの open）。false にすると一切有効化せず、ターミナル
@@ -540,7 +560,7 @@ delete = ["d", "S-d"]
 
 ### アクション名一覧（`[keys]` の右辺 / `[bindings]` の左辺に指定できる値）
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `jump_search`, `zip_marked`, `unzip`, `cancel_tasks`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `jump_search`, `file_search`, `zip_marked`, `unzip`, `cancel_tasks`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
 
 この一覧に対応する現在の実効キーバインドは、アプリ内のヘルプ画面（`h`/`?`）でいつでも確認できます。
 

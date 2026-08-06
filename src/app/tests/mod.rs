@@ -1,6 +1,7 @@
 mod dispatch;
 mod external;
 mod file_ops;
+mod file_search;
 mod mouse;
 mod navigation;
 mod pager;

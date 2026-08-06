@@ -497,7 +497,7 @@ impl Pane {
         Ok(())
     }
 
-    fn restore_cursor_onto(&mut self, name: &str) {
+    pub(crate) fn restore_cursor_onto(&mut self, name: &str) {
         let idx = self.visible_entries().iter().position(|item| match item {
             VisibleItem::Entry(e) => e.name == name,
             VisibleItem::Parent => false,

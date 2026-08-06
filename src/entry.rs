@@ -155,7 +155,7 @@ pub fn lower_keys(name: &str) -> (String, String) {
 /// Dotfile convention for "hidden". On Windows this deliberately ignores the
 /// filesystem's hidden attribute for now (per plan: "on Windows just dotfile
 /// for now") to keep the rule identical across platforms.
-fn is_hidden_name(name: &str) -> bool {
+pub(crate) fn is_hidden_name(name: &str) -> bool {
     name.starts_with('.')
 }
 

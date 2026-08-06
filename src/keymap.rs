@@ -170,8 +170,9 @@ impl Keymap {
     /// `S-f` (capital `F`) opens the function-list command palette,
     /// `\` opens prefix-jump search (pure cursor movement to the first
     /// visible entry starting with what's typed — distinct from `f`/`/`'s
-    /// filter, which hides non-matching entries), and `S-s` (capital `S`)
-    /// opens the settings screen (`crate::settings`).
+    /// filter, which hides non-matching entries), `g` opens the recursive
+    /// file-name search popup (`crate::file_search`), and `S-s` (capital
+    /// `S`) opens the settings screen (`crate::settings`).
     pub fn defaults() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -214,6 +215,7 @@ impl Keymap {
             ("/", Filter),
             ("esc", ClearFilter),
             ("\\", JumpSearch),
+            ("g", FileSearch),
             ("p", ZipMarked),
             ("u", Unzip),
             ("C-k", CancelTasks),
