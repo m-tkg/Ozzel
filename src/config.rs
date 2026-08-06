@@ -119,6 +119,14 @@ fn default_mouse() -> bool {
     true
 }
 
+/// The git status column (per-row markers + a branch tag in the pane
+/// header, inside a git work tree only) is shown by default; set
+/// `show_git_status = false` to disable the background `git status`
+/// probes entirely.
+fn default_show_git_status() -> bool {
+    true
+}
+
 /// Copy/Move confirm before spawning by default — same "ask before doing
 /// something that touches the filesystem" posture as Delete. A top-level
 /// `confirm_operations = false` skips that confirm when there's no
@@ -310,6 +318,13 @@ pub struct Config {
     /// show it even when there's room" opt-out.
     #[serde(default = "default_show_permissions")]
     pub show_permissions: bool,
+    /// Whether panes probe `git status` in the background and render the
+    /// per-row marker column + header branch tag inside a git work tree —
+    /// see `App::maybe_refresh_git` / `ui::pane_view`. Outside a work
+    /// tree nothing renders either way; this is the "never probe at all"
+    /// opt-out.
+    #[serde(default = "default_show_git_status")]
+    pub show_git_status: bool,
     /// Whether mouse capture is enabled at startup (`EnableMouseCapture`) —
     /// see `main.rs`'s `TerminalGuard` and `App::handle_mouse`. `false`
     /// leaves the terminal's native text selection usable instead.
@@ -348,6 +363,7 @@ impl Default for Config {
             cursor_wrap: default_cursor_wrap(),
             size_format: SizeFormat::default(),
             show_permissions: default_show_permissions(),
+            show_git_status: default_show_git_status(),
             mouse: default_mouse(),
             keys: HashMap::new(),
             bindings: HashMap::new(),
