@@ -64,6 +64,30 @@ fn min_width_for_perms_col(fmt: SizeFormat) -> usize {
     MARK_COL_WIDTH + size_col_width(fmt) + MTIME_COL_WIDTH + PERMS_COL_WIDTH + 3 + 4
 }
 
+/// The git status column: one marker char + one space, drawn to the left
+/// of the mark column as its own `Span` (the marker is the only colored
+/// fragment in a row, so the rest of the row can stay one styled string).
+const GIT_COL_WIDTH: usize = 2;
+
+/// Same narrow-pane policy as the permissions column: below this width
+/// the git column is dropped before the name column gets squeezed.
+fn min_width_for_git_col(fmt: SizeFormat) -> usize {
+    MARK_COL_WIDTH + size_col_width(fmt) + MTIME_COL_WIDTH + GIT_COL_WIDTH + 2 + 4
+}
+
+/// The fixed marker color per status — deliberately not configurable in
+/// the first cut (the standard traffic-light mapping reads instantly).
+fn git_marker_color(marker: crate::git::GitMarker) -> Color {
+    use crate::git::GitMarker::*;
+    match marker {
+        Conflict | Deleted => Color::Red,
+        Modified => Color::Yellow,
+        Added => Color::Green,
+        Renamed => Color::Magenta,
+        Untracked => Color::Cyan,
+    }
+}
+
 /// Color/dim settings for rendering a pane, derived from `config::ColorsConfig`
 /// by `ui/mod.rs`. Kept as its own small `Copy` struct (rather than passing
 /// `&ColorsConfig` straight through) so this module stays independent of
@@ -133,6 +157,9 @@ pub fn render(
         Some(vd) => virtual_dir::header_label(vd),
         None => pane.cwd.display().to_string(),
     };
+    if let Some(git) = &pane.git {
+        title_source.push_str(&format!(" [⎇ {}]", git.branch));
+    }
     if let Some(filter) = &pane.filter {
         title_source.push_str(&format!(" [flt: {}]", filter.raw));
     }
@@ -185,6 +212,19 @@ pub fn render(
 
     let show_perms_col =
         show_permissions && inner.width as usize >= min_width_for_perms_col(size_format);
+    // The git column only exists while this directory actually has a git
+    // status (`pane.git` — `None` outside a work tree, in an archive, or
+    // with `show_git_status` off), so non-repository browsing renders
+    // exactly as before.
+    let show_git_col =
+        pane.git.is_some() && inner.width as usize >= min_width_for_git_col(size_format);
+    // The git column is prepended as its own Span, so the row string
+    // itself is formatted into a correspondingly narrower budget.
+    let row_width = if show_git_col {
+        inner.width as usize - GIT_COL_WIDTH
+    } else {
+        inner.width as usize
+    };
     let viewport_height = inner.height as usize;
     let cursor = pane.cursor.min(items.len().saturating_sub(1));
     let start = scroll_offset(cursor, items.len(), viewport_height);
@@ -204,7 +244,7 @@ pub fn render(
             };
             let text = format_row(
                 item,
-                inner.width as usize,
+                row_width,
                 marked,
                 show_perms_col,
                 size_format,
@@ -217,7 +257,29 @@ pub fn render(
                 }
             };
             let style = row_style(idx == cursor, marked, dim, cursor_color, type_color);
-            ListItem::new(Line::styled(text, style))
+            if !show_git_col {
+                return ListItem::new(Line::styled(text, style));
+            }
+            let marker = match item {
+                VisibleItem::Entry(e) => pane
+                    .git
+                    .as_ref()
+                    .and_then(|g| g.statuses.get(&e.path))
+                    .copied(),
+                VisibleItem::Parent => None,
+            };
+            // The marker span keeps the row's own style (bg on the cursor
+            // row, DIM when the pane is dimmed) and only overrides the fg
+            // with the status color, so the two spans always read as one
+            // row.
+            let (marker_text, marker_style) = match marker {
+                Some(m) => (format!("{} ", m.ch()), style.fg(git_marker_color(m))),
+                None => ("  ".to_string(), style),
+            };
+            ListItem::new(Line::from(vec![
+                ratatui::text::Span::styled(marker_text, marker_style),
+                ratatui::text::Span::styled(text, style),
+            ]))
         })
         .collect();
 

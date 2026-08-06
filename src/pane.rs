@@ -134,6 +134,16 @@ pub struct Pane {
     /// re-applies the map onto the fresh entries so a background task's
     /// completion reload doesn't wipe the numbers off screen.
     pub dir_size_overrides: HashMap<PathBuf, u64>,
+    /// This directory's git status (branch + per-child markers), stamped
+    /// here by `App::handle_task_event` when a background `git status`
+    /// run for the *current* `cwd` finishes; `None` outside a git work
+    /// tree, while a refresh is still in flight for a brand-new cwd, or
+    /// with `show_git_status` off. Cleared on every cwd change (same
+    /// sites as `dir_size_overrides`) but deliberately *not* by
+    /// `reload()` — the stale-but-close status stays on screen until the
+    /// refresh `App::maybe_refresh_git` kicks off replaces it, instead of
+    /// the column flickering off and back on.
+    pub git: Option<crate::git::GitDirStatus>,
     /// `Some` when this pane is browsing inside a `.zip` archive as a
     /// Virtual Directory instead of a real directory — see
     /// `virtual_dir`'s module doc comment for
@@ -194,9 +204,17 @@ impl Pane {
             back: Vec::new(),
             forward: Vec::new(),
             dir_size_overrides: HashMap::new(),
+            git: None,
             virtual_dir: None,
             visible_cache: RefCell::new(None),
         }
+    }
+
+    /// Stamps (or clears) this pane's git status — no cwd validation here;
+    /// the caller (`App::handle_task_event`) is the one holding the task-
+    /// to-pane bookkeeping that knows whether this result is still current.
+    pub fn set_git_status(&mut self, status: Option<crate::git::GitDirStatus>) {
+        self.git = status;
     }
 
     /// Marks the `visible_entries()` cache stale — see `visible_cache`'s
@@ -471,6 +489,7 @@ impl Pane {
         self.marks.clear();
         self.filter = None;
         self.dir_size_overrides.clear();
+        self.git = None;
         self.invalidate_visible_cache();
         Ok(())
     }
@@ -550,8 +569,10 @@ impl Pane {
         // Cleared *before* the reload so `apply_dir_size_overrides` never
         // stamps a previous directory's sizes onto same-pathed entries; on
         // failure the old cwd's overrides are simply lost (accepted — the
-        // revert already re-reads the listing from disk anyway).
+        // revert already re-reads the listing from disk anyway). Git
+        // status follows the same rule (a failed jump just re-fetches).
         self.dir_size_overrides.clear();
+        self.git = None;
         match self.reload() {
             Ok(()) => {
                 self.cursor = 0;
@@ -587,6 +608,7 @@ impl Pane {
         self.marks.clear();
         self.filter = None;
         self.dir_size_overrides.clear();
+        self.git = None;
         self.reload()?;
 
         match leaving_name {

@@ -7,6 +7,7 @@ pub mod archive;
 pub mod copy_move;
 pub mod delete;
 pub mod dir_size;
+pub mod git_status;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,6 +45,16 @@ pub enum TaskEvent {
         id: TaskId,
         path: std::path::PathBuf,
         bytes: u64,
+    },
+    /// One directory's git status, from a `git_status` worker — `None`
+    /// when `dir` isn't inside a git work tree (or `git` isn't
+    /// installed), which clears any stale status off the pane. Routed by
+    /// `App::handle_task_event` onto the pane whose refresh spawned it,
+    /// same shape as `DirSize`.
+    GitStatus {
+        id: TaskId,
+        dir: std::path::PathBuf,
+        status: Option<crate::git::GitDirStatus>,
     },
     Finished {
         id: TaskId,
@@ -128,6 +139,24 @@ impl TaskManager {
         id
     }
 
+    /// Like `spawn`, but the task is *not* tracked in `running`: no
+    /// progress gauge, no "N running" in the status bar, no
+    /// quit-while-busy confirmation, and `cancel_tasks` (C-k) never
+    /// touches it. For passive background probes (git status) whose
+    /// lifecycle the user never manages — the caller keeps the returned
+    /// cancel flag itself if it ever wants to abort one.
+    pub fn spawn_detached<F>(&self, work: F) -> (TaskId, Arc<AtomicBool>)
+    where
+        F: FnOnce(TaskId, Sender<TaskEvent>, Arc<AtomicBool>) + Send + 'static,
+    {
+        let id = TaskId::next();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tx = self.tx.clone();
+        let worker_cancel = cancel.clone();
+        thread::spawn(move || work(id, tx, worker_cancel));
+        (id, cancel)
+    }
+
     /// Applies a `Progress`/`Finished` event to `running` (a `Finished`
     /// removes the task). Returns a one-line summary and whether it's an
     /// error, for the caller to log — `None` for anything that doesn't
@@ -151,6 +180,7 @@ impl TaskManager {
             // Routed by `App::handle_task_event` onto the pane it belongs
             // to; nothing to update in `running` and nothing to log here.
             TaskEvent::DirSize { .. } => None,
+            TaskEvent::GitStatus { .. } => None,
             TaskEvent::Finished { id, result } => {
                 let desc = self
                     .running

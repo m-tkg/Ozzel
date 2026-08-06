@@ -22,6 +22,7 @@ pub mod external;
 pub mod file_search;
 pub mod filter;
 pub mod function_list;
+pub mod git;
 pub mod help;
 pub mod keymap;
 pub mod logwrap;

@@ -235,6 +235,27 @@ pub struct App {
     /// misapply it" pattern as `pending_delete_anchor`. Consumed (removed)
     /// when that task's `Finished` arrives.
     pending_dir_size: HashMap<TaskId, ActivePane>,
+    /// Which pane a background `git status` task's `TaskEvent::GitStatus`
+    /// result should be applied to — same TaskId-keyed pattern as
+    /// `pending_dir_size`. Also the discriminator `handle_task_event`
+    /// uses to swallow these tasks' `Finished` events (no log line, no
+    /// pane reload, no mark clearing — a passive status probe must never
+    /// have the side effects a real file operation's completion has).
+    pending_git_status: HashMap<TaskId, ActivePane>,
+    /// The most recently spawned git-status task per pane — only *its*
+    /// result is ever applied; a slower, older probe's result arriving
+    /// after a newer one was spawned is dropped (same "stale results are
+    /// discarded" defense `Pane::set_dir_size` has, keyed by task
+    /// recency instead of path). The cancel flag rides along so spawning
+    /// a replacement probe can abort the superseded one — probes are
+    /// detached (`TaskManager::spawn_detached`), so there's no `running`
+    /// entry to reach a cancel flag through.
+    latest_git_task: [Option<(TaskId, std::sync::Arc<std::sync::atomic::AtomicBool>)>; 2],
+    /// The cwd each pane's git status was last probed for —
+    /// `maybe_refresh_git`'s cheap change detector (one `PathBuf`
+    /// comparison per pane per event). Reset to `None` to force a
+    /// re-probe (config reload, task completion, ...).
+    git_checked_dir: [Option<PathBuf>; 2],
     /// Overrides `config::config_path()` for the settings screen's own
     /// `toml_edit` writes and its post-write `reload_config_from` call —
     /// `None` (the real-app default) means "use the real, XDG-resolved
@@ -449,6 +470,9 @@ impl App {
             last_click: None,
             pending_delete_anchor: HashMap::new(),
             pending_dir_size: HashMap::new(),
+            pending_git_status: HashMap::new(),
+            latest_git_task: [None, None],
+            git_checked_dir: [None, None],
             settings_config_path: None,
             log_view_width: DEFAULT_LOG_VIEW_WIDTH,
             log_generation: 0,
@@ -602,6 +626,10 @@ impl App {
                 );
             }
         }
+        // Whatever prompted this reload (a finished task, a synchronous
+        // file operation, C-r) likely changed git state too — force the
+        // next `maybe_refresh_git` sweep to re-probe both panes.
+        self.git_checked_dir = [None, None];
     }
 
     /// Drains every `TaskEvent` currently waiting on the channel. Called
@@ -624,6 +652,48 @@ impl App {
         if let TaskEvent::DirSize { id, path, bytes } = &event {
             if let Some(&target) = self.pending_dir_size.get(id) {
                 self.panes[target.index()].set_dir_size(path.clone(), *bytes);
+            }
+            return;
+        }
+        // A git-status result lands on its pane only if it's still
+        // current on *both* axes: the newest probe spawned for that pane
+        // (an older, slower run's result must never overwrite a newer
+        // one's) and still the directory the pane is showing.
+        if matches!(event, TaskEvent::GitStatus { .. }) {
+            let TaskEvent::GitStatus { id, dir, status } = event else {
+                return;
+            };
+            if let Some(&target) = self.pending_git_status.get(&id) {
+                let idx = target.index();
+                let is_latest = self.latest_git_task[idx]
+                    .as_ref()
+                    .is_some_and(|(latest, _)| *latest == id);
+                let pane = &mut self.panes[idx];
+                if is_latest && pane.cwd == dir && !pane.is_virtual() {
+                    pane.set_git_status(status);
+                }
+            }
+            return;
+        }
+        // A git-status probe's `Finished` is bookkeeping only — unlike
+        // every real file operation's completion, it must never log a
+        // summary line, reload the panes, or clear marks (probes are
+        // passive; the regression test for the no-side-effects rule lives
+        // in `app/tests/git_status.rs`). Probes are detached, so there's
+        // no `running` entry to clean up either. Failures other than a
+        // routine cancellation do get logged.
+        if let TaskEvent::Finished { id, result } = &event
+            && self.pending_git_status.remove(id).is_some()
+        {
+            for latest in &mut self.latest_git_task {
+                if latest.as_ref().is_some_and(|(t, _)| t == id) {
+                    *latest = None;
+                }
+            }
+            if let Err(err) = result
+                && err != "cancelled"
+            {
+                self.log_error(format!("git status: {err}"));
             }
             return;
         }
@@ -703,6 +773,60 @@ impl App {
             AppEvent::Resize => {}
             AppEvent::Tick => {}
         }
+        // After every event (Ticks included — that's what makes the very
+        // first probe fire right after startup, before any keypress):
+        // spawn a git-status probe for any pane whose cwd changed since
+        // its last probe. One PathBuf comparison per pane when nothing
+        // changed, so running this unconditionally is cheap.
+        self.maybe_refresh_git();
+    }
+
+    /// The single chokepoint deciding when a pane's git status gets
+    /// (re-)probed: whenever `git_checked_dir` disagrees with the pane's
+    /// current cwd — which covers every navigation route (enter, parent,
+    /// history, bookmarks, jumps, swap, startup) without instrumenting
+    /// any of them — plus whenever something reset `git_checked_dir` to
+    /// `None` to force it (task completions and synchronous file
+    /// operations do, via `reload_both`). Virtual (archive) panes and
+    /// `show_git_status = false` clear the status instead of probing.
+    fn maybe_refresh_git(&mut self) {
+        for idx in 0..2 {
+            if !self.config.show_git_status || self.panes[idx].is_virtual() {
+                if self.git_checked_dir[idx].is_some() {
+                    self.git_checked_dir[idx] = None;
+                    self.panes[idx].set_git_status(None);
+                }
+                continue;
+            }
+            if self.git_checked_dir[idx].as_deref() == Some(self.panes[idx].cwd.as_path()) {
+                continue;
+            }
+            self.refresh_git_status(idx);
+        }
+    }
+
+    /// Spawns one background `git status` probe for pane `idx`'s cwd,
+    /// canceling whatever previous probe was still in flight for it (its
+    /// result would be dropped anyway — see `latest_git_task`). Detached
+    /// (`spawn_detached`): a passive probe must never show up as a
+    /// running task, gate quitting, or be swept up by `cancel_tasks`.
+    fn refresh_git_status(&mut self, idx: usize) {
+        if let Some((_, prev_cancel)) = self.latest_git_task[idx].take() {
+            prev_cancel.store(true, Ordering::Relaxed);
+        }
+        let dir = self.panes[idx].cwd.clone();
+        let worker_dir = dir.clone();
+        let (id, cancel) = self.tasks.spawn_detached(move |id, tx, cancel| {
+            crate::tasks::git_status::run_git_status(id, tx, cancel, worker_dir);
+        });
+        let side = if idx == 0 {
+            ActivePane::Left
+        } else {
+            ActivePane::Right
+        };
+        self.pending_git_status.insert(id, side);
+        self.latest_git_task[idx] = Some((id, cancel));
+        self.git_checked_dir[idx] = Some(dir);
     }
 
     /// The single match hub every action flows through. Kept infallible on

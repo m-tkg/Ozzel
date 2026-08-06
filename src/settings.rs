@@ -111,7 +111,7 @@ pub enum ItemKind {
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 12] = [
+pub const BEHAVIOR_ITEMS: [Item; 13] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations (confirm before copy/move)",
@@ -174,6 +174,11 @@ pub const BEHAVIOR_ITEMS: [Item; 12] = [
         key: "size_format",
         label: "size_format (size column display)",
         kind: ItemKind::SizeFormatEnum,
+    },
+    Item {
+        key: "show_git_status",
+        label: "show_git_status (git status column + branch tag)",
+        kind: ItemKind::Bool,
     },
 ];
 
@@ -308,6 +313,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "natural_sort" => config.natural_sort,
                 "cursor_wrap" => config.cursor_wrap,
                 "show_permissions" => config.show_permissions,
+                "show_git_status" => config.show_git_status,
                 "dim_inactive" => config.colors.dim_inactive,
                 _ => unreachable!("bool item key {:?}", item.key),
             };

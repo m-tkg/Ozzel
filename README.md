@@ -158,6 +158,15 @@ Copy, move, and delete run as async tasks, with a progress gauge shown in the lo
 
 **How `y` (copy path) works:** Without pulling in any extra dependency crates, it writes to the clipboard using a terminal escape sequence called [OSC 52](https://sw.kovidgoyal.net/kitty/clipboard/#clipboard-escape-code). Its advantage is that it works even over SSH or from inside tmux (if tmux is configured with the equivalent of `set-clipboard on`). On unsupported terminals, the escape sequence is simply ignored — no error, no crash (since there's no reliable way to detect support in advance, pressing `y` always logs `copied: /path/to/file`).
 
+### Git Status
+
+Inside a git work tree, each pane shows the current directory's git state, refreshed by a background `git status` run (via the `git` CLI on `PATH` — never a bundled library) on every directory change, `Ctrl+R`, and after every file operation:
+
+- **A per-row marker column** (to the left of the mark column): `U` conflict, `M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked. A directory row aggregates everything under it, showing the highest-priority state (`U` > `M` > `A` > `D` > `R` > `?`). In a huge repository only the pane's own subtree is scanned.
+- **A `[⎇ branch]` tag in the pane header** (the short commit hash when HEAD is detached).
+
+Outside a work tree — or on a machine with no `git` at all — nothing is shown and nothing changes. The probes run detached from the task system: they never appear as running tasks, never gate quitting, and are not touched by `Ctrl+K`. When the pane is too narrow, the marker column is dropped before the name column gets squeezed (same policy as the permissions column). Set `show_git_status = false` in the config (also on the settings screen) to disable the probes entirely.
+
 ### Filtering & Search
 
 | Key | Action |
@@ -319,7 +328,7 @@ A full-screen settings UI structured like `raspi-config`, with three levels: cat
 
 | Category | Contents |
 | --- | --- |
-| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
+| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
 | Colors | Each item under `[colors]` (`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`) |
 | Startup/Integration | `home` / `editor` |
 | Extension Viewers | `[viewers]` (list of extension → launch command; add/edit/delete) |
@@ -542,6 +551,11 @@ mouse = true
 # display) on each row. Default is true. If the pane is too narrow, it is automatically
 # hidden before the name column gets squeezed.
 show_permissions = true
+
+# Whether to show the git status marker column and the [⎇ branch] header tag inside
+# a git work tree, refreshed by a background `git status` run. Default is true.
+# Outside a work tree nothing is shown either way; false disables the probes entirely.
+show_git_status = true
 
 # External viewer per extension. When opening with open (Enter/o), an external command
 # can be specified per extension to use instead of the built-in viewer. The key is the
