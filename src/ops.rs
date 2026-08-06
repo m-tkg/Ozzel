@@ -82,14 +82,18 @@ pub fn chmod(path: &Path, bits: u32) -> Result<()> {
         .with_context(|| format!("failed to chmod: {}", path.display()))
 }
 
-/// Sets `path`'s modified and accessed times to `t` (touch). Opens the
-/// file read-only first (enough for `futimens` on unix — and the only way
-/// a directory can be opened at all), falling back to a write open for
-/// platforms that require write access to set times (Windows).
+/// Sets `path`'s modified and accessed times to `t` (touch). Tries a
+/// write open first — Windows requires write access on the handle to set
+/// times (a read handle opens fine but `set_times` then fails with
+/// "Access is denied") — falling back to a read-only open, which is both
+/// sufficient for `futimens` on unix and the only way a unix directory
+/// can be opened at all.
 pub fn set_times(path: &Path, t: SystemTime) -> Result<()> {
     let times = fs::FileTimes::new().set_modified(t).set_accessed(t);
-    let file = fs::File::open(path)
-        .or_else(|_| fs::File::options().write(true).open(path))
+    let file = fs::File::options()
+        .write(true)
+        .open(path)
+        .or_else(|_| fs::File::open(path))
         .with_context(|| format!("failed to open: {}", path.display()))?;
     file.set_times(times)
         .with_context(|| format!("failed to set times: {}", path.display()))
