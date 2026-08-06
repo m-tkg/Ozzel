@@ -435,7 +435,169 @@ fn copy_logs_every_source_and_destination_path_up_front() {
 }
 
 #[test]
-fn copy_collision_still_confirms_when_confirm_operations_false_with_a_combined_message() {
+fn rename_marks_walks_marked_entries_in_display_order_with_progress_titles() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    let mut app = test_app(dir.path(), dir.path());
+    for name in ["a.txt", "c.txt"] {
+        select_entry_named(&mut app, name);
+        app.dispatch(Action::Mark);
+    }
+
+    app.dispatch(Action::RenameMarks);
+    match &app.mode {
+        Mode::Prompt {
+            kind:
+                PromptKind::RenameMany {
+                    current,
+                    done,
+                    total,
+                    ..
+                },
+            input,
+        } => {
+            assert_eq!(current, "a.txt", "display order, not mark order");
+            assert_eq!((*done, *total), (0, 2));
+            assert_eq!(input.value(), "a.txt", "prefilled with the current name");
+        }
+        other => panic!("expected RenameMany prompt, got {other:?}"),
+    }
+
+    // Rename a.txt -> z.txt.
+    for _ in 0..5 {
+        app.handle_event(AppEvent::Input(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    for c in "z.txt".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    // The second prompt is for c.txt, titled (2/2) via done=1.
+    match &app.mode {
+        Mode::Prompt {
+            kind: PromptKind::RenameMany { current, done, .. },
+            ..
+        } => {
+            assert_eq!(current, "c.txt");
+            assert_eq!(*done, 1);
+        }
+        other => panic!("expected the second RenameMany prompt, got {other:?}"),
+    }
+    // Confirm unchanged -> counts as a skip, sequence ends.
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+
+    assert!(dir.path().join("z.txt").exists());
+    assert!(!dir.path().join("a.txt").exists());
+    assert!(dir.path().join("c.txt").exists(), "skipped entry untouched");
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.message.contains("rename marks finished (1/2 renamed)")),
+        "log: {:?}",
+        app.log.iter().map(|l| &l.message).collect::<Vec<_>>()
+    );
+    assert!(
+        app.active_pane().marks.is_empty(),
+        "marks are consumed by the sequence"
+    );
+}
+
+#[test]
+fn rename_marks_esc_cancels_the_remainder_keeping_finished_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    let mut app = test_app(dir.path(), dir.path());
+    for name in ["a.txt", "b.txt"] {
+        select_entry_named(&mut app, name);
+        app.dispatch(Action::Mark);
+    }
+
+    app.dispatch(Action::RenameMarks);
+    // First rename goes through.
+    for _ in 0..5 {
+        app.handle_event(AppEvent::Input(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    for c in "renamed.txt".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    // Esc on the second prompt.
+    app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(
+        dir.path().join("renamed.txt").exists(),
+        "the finished rename stands"
+    );
+    assert!(
+        dir.path().join("b.txt").exists(),
+        "the cancelled one is untouched"
+    );
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.message.contains("rename marks cancelled (1/2 renamed)"))
+    );
+}
+
+#[test]
+fn rename_marks_without_marks_logs_an_error_not_a_cursor_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    select_entry_named(&mut app, "a.txt");
+
+    app.dispatch(Action::RenameMarks);
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "no prompt without marks — rename_marks never falls back to the cursor"
+    );
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.is_error && l.message.contains("no marked entries to rename"))
+    );
+}
+
+#[test]
+fn rename_marks_excludes_marks_hidden_by_the_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["match_1.txt", "other.txt"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    let mut app = test_app(dir.path(), dir.path());
+    for name in ["match_1.txt", "other.txt"] {
+        select_entry_named(&mut app, name);
+        app.dispatch(Action::Mark);
+    }
+    // Filter so only match_1.txt stays visible; other.txt's mark is now
+    // hidden.
+    app.active_pane_mut()
+        .set_filter(crate::filter::FilterSpec::parse("match"));
+
+    app.dispatch(Action::RenameMarks);
+    match &app.mode {
+        Mode::Prompt {
+            kind: PromptKind::RenameMany { total, .. },
+            ..
+        } => assert_eq!(*total, 1, "only the visible mark is included"),
+        other => panic!("expected RenameMany prompt, got {other:?}"),
+    }
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.message.contains("hidden by the filter")),
+        "the exclusion must be announced"
+    );
+}
+
+#[test]
+fn copy_collision_opens_the_dialog_even_with_confirm_operations_false() {
     let left = tempfile::tempdir().unwrap();
     let right = tempfile::tempdir().unwrap();
     std::fs::write(left.path().join("a.txt"), b"new").unwrap();
@@ -454,23 +616,20 @@ fn copy_collision_still_confirms_when_confirm_operations_false_with_a_combined_m
     select_entry_named(&mut app, "a.txt");
 
     app.dispatch(Action::Copy);
-    match &app.mode {
-        Mode::Confirm { message, .. } => {
-            assert!(
-                message.contains("1 will be overwritten"),
-                "collision must always confirm even with confirm_operations=false; message: {message}"
-            );
-        }
-        other => panic!("expected Mode::Confirm, got {other:?}"),
-    }
+    assert!(
+        matches!(app.mode, Mode::TransferCollision { .. }),
+        "a collision is never silently overwritten, even with confirm_operations=false; got {:?}",
+        app.mode
+    );
 
-    app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+    // Enter on the default highlight (Overwrite) resolves and spawns.
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
     wait_for_tasks_done(&mut app);
     assert_eq!(std::fs::read(right.path().join("a.txt")).unwrap(), b"new");
 }
 
 #[test]
-fn copy_collision_requires_confirmation_before_spawning() {
+fn copy_collision_opens_the_per_file_dialog_before_spawning() {
     let left = tempfile::tempdir().unwrap();
     let right = tempfile::tempdir().unwrap();
     std::fs::write(left.path().join("a.txt"), b"new").unwrap();
@@ -481,19 +640,277 @@ fn copy_collision_requires_confirmation_before_spawning() {
     select_entry_named(&mut app, "a.txt");
 
     app.dispatch(Action::Copy);
-    assert!(matches!(app.mode, Mode::Confirm { .. }));
+    match &app.mode {
+        Mode::TransferCollision { state } => {
+            assert_eq!(state.index, 1);
+            assert_eq!(state.total, 1);
+            assert_eq!(state.current.name, "a.txt");
+            assert_eq!(state.cursor, 0, "highlight starts on Overwrite");
+        }
+        other => panic!("expected Mode::TransferCollision, got {other:?}"),
+    }
     assert!(
         app.tasks.running.is_empty(),
-        "must not spawn before confirmation"
+        "must not spawn before the dialog is answered"
     );
     assert_eq!(
         std::fs::read(right.path().join("a.txt")).unwrap(),
         b"existing"
     );
 
-    app.handle_event(AppEvent::Input(KeyCode::Char('y'), KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
     wait_for_tasks_done(&mut app);
     assert_eq!(std::fs::read(right.path().join("a.txt")).unwrap(), b"new");
+}
+
+#[test]
+fn collision_dialog_skip_leaves_the_destination_untouched() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    std::fs::write(left.path().join("a.txt"), b"new").unwrap();
+    std::fs::write(left.path().join("b.txt"), b"fresh").unwrap();
+    std::fs::write(right.path().join("a.txt"), b"existing").unwrap();
+
+    let mut app = App::new(
+        left.path().to_path_buf(),
+        right.path().to_path_buf(),
+        Config {
+            confirm_operations: false,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    app.active_pane_mut().reload().unwrap();
+    // Mark both: b.txt has no collision (goes straight to resolved),
+    // a.txt collides (asked about).
+    for name in ["a.txt", "b.txt"] {
+        select_entry_named(&mut app, name);
+        app.dispatch(Action::Mark);
+    }
+
+    app.dispatch(Action::Copy);
+    assert!(matches!(app.mode, Mode::TransferCollision { .. }));
+    // Down x2 -> Skip, Enter.
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for_tasks_done(&mut app);
+
+    assert_eq!(
+        std::fs::read(right.path().join("a.txt")).unwrap(),
+        b"existing",
+        "Skip must leave the colliding destination untouched"
+    );
+    assert_eq!(
+        std::fs::read(right.path().join("b.txt")).unwrap(),
+        b"fresh",
+        "the non-colliding source still transfers"
+    );
+}
+
+#[test]
+fn collision_dialog_rename_transfers_under_the_new_name() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    std::fs::write(left.path().join("a.txt"), b"new").unwrap();
+    std::fs::write(right.path().join("a.txt"), b"existing").unwrap();
+
+    let mut app = test_app(left.path(), right.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "a.txt");
+
+    app.dispatch(Action::Copy);
+    // Down -> Rename, Enter opens the prompt prefilled with "a.txt".
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    match &app.mode {
+        Mode::Prompt {
+            kind: PromptKind::CollisionRename { .. },
+            input,
+        } => assert_eq!(input.value(), "a.txt"),
+        other => panic!("expected the collision-rename prompt, got {other:?}"),
+    }
+    // Type a distinct name: clear then enter "kept.txt".
+    for _ in 0..5 {
+        app.handle_event(AppEvent::Input(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    for c in "kept.txt".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for_tasks_done(&mut app);
+
+    assert_eq!(
+        std::fs::read(right.path().join("a.txt")).unwrap(),
+        b"existing",
+        "the original destination stays"
+    );
+    assert_eq!(
+        std::fs::read(right.path().join("kept.txt")).unwrap(),
+        b"new"
+    );
+}
+
+#[test]
+fn collision_dialog_rename_to_another_existing_name_reasks() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    std::fs::write(left.path().join("a.txt"), b"new").unwrap();
+    std::fs::write(right.path().join("a.txt"), b"existing").unwrap();
+    std::fs::write(right.path().join("b.txt"), b"also existing").unwrap();
+
+    let mut app = test_app(left.path(), right.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "a.txt");
+
+    app.dispatch(Action::Copy);
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE)); // Rename
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    // Retype "b.txt" — which also exists.
+    for _ in 0..5 {
+        app.handle_event(AppEvent::Input(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    for c in "b.txt".chars() {
+        app.handle_event(AppEvent::Input(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(
+        matches!(app.mode, Mode::TransferCollision { .. }),
+        "a rename target that also exists must re-ask, never overwrite; got {:?}",
+        app.mode
+    );
+    assert!(app.tasks.running.is_empty());
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.is_error && l.message.contains("already exists"))
+    );
+}
+
+#[test]
+fn collision_dialog_overwrite_all_and_skip_all_batch_the_rest() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(left.path().join(name), b"new").unwrap();
+        std::fs::write(right.path().join(name), b"existing").unwrap();
+    }
+
+    // Overwrite All from the first conflict.
+    let mut app = test_app(left.path(), right.path());
+    app.active_pane_mut().reload().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        select_entry_named(&mut app, name);
+        app.dispatch(Action::Mark);
+    }
+    app.dispatch(Action::Copy);
+    match &app.mode {
+        Mode::TransferCollision { state } => assert_eq!(state.total, 3),
+        other => panic!("expected TransferCollision, got {other:?}"),
+    }
+    for _ in 0..3 {
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE)); // -> Overwrite All
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for_tasks_done(&mut app);
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        assert_eq!(std::fs::read(right.path().join(name)).unwrap(), b"new");
+    }
+
+    // Skip All from the first conflict: nothing is transferred.
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(right.path().join(name), b"existing").unwrap();
+    }
+    let mut app = test_app(left.path(), right.path());
+    app.active_pane_mut().reload().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        select_entry_named(&mut app, name);
+        app.dispatch(Action::Mark);
+    }
+    app.dispatch(Action::Copy);
+    for _ in 0..4 {
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE)); // -> Skip All
+    }
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.tasks.running.is_empty(), "nothing to spawn");
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.message.contains("nothing to transfer"))
+    );
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        assert_eq!(std::fs::read(right.path().join(name)).unwrap(), b"existing");
+    }
+}
+
+#[test]
+fn collision_dialog_esc_cancels_the_whole_transfer() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    std::fs::write(left.path().join("a.txt"), b"new").unwrap();
+    std::fs::write(left.path().join("b.txt"), b"fresh").unwrap();
+    std::fs::write(right.path().join("a.txt"), b"existing").unwrap();
+
+    let mut app = test_app(left.path(), right.path());
+    app.active_pane_mut().reload().unwrap();
+    for name in ["a.txt", "b.txt"] {
+        select_entry_named(&mut app, name);
+        app.dispatch(Action::Mark);
+    }
+    app.dispatch(Action::Copy);
+    app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(
+        app.tasks.running.is_empty(),
+        "Esc cancels everything — even the non-colliding b.txt must not transfer"
+    );
+    assert!(!right.path().join("b.txt").exists());
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.message.contains("transfer cancelled"))
+    );
+}
+
+#[test]
+fn collision_info_marks_the_newer_side() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    std::fs::write(left.path().join("a.txt"), b"new").unwrap();
+    std::fs::write(right.path().join("a.txt"), b"existing").unwrap();
+    // Make the destination decisively older (`File::set_modified`,
+    // stable std — no extra dev-dependency needed).
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(right.path().join("a.txt"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+
+    let mut app = test_app(left.path(), right.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "a.txt");
+    app.dispatch(Action::Copy);
+
+    match &app.mode {
+        Mode::TransferCollision { state } => {
+            assert!(
+                state.current.src_line.contains("[New]"),
+                "src is newer: {:?}",
+                state.current.src_line
+            );
+            assert!(
+                !state.current.dest_line.contains("[New]"),
+                "dest is older: {:?}",
+                state.current.dest_line
+            );
+            assert!(state.current.src_line.contains("bytes"));
+        }
+        other => panic!("expected TransferCollision, got {other:?}"),
+    }
 }
 
 #[cfg(unix)]

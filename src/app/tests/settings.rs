@@ -270,7 +270,7 @@ fn settings_keybinding_add_writes_bindings_and_applies_live() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, config_path) = settings_test_app(dir.path());
     assert_eq!(
-        app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+        app.keymap.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
         None
     );
 
@@ -294,7 +294,7 @@ fn settings_keybinding_add_writes_bindings_and_applies_live() {
             }
         }
     ));
-    app.handle_event(AppEvent::Input(KeyCode::Char('z'), KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Char('x'), KeyModifiers::NONE));
     assert!(matches!(
         app.mode,
         Mode::Settings {
@@ -307,7 +307,7 @@ fn settings_keybinding_add_writes_bindings_and_applies_live() {
     app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_eq!(
-        app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+        app.keymap.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
         Some(Action::Mkdir)
     );
     let text = std::fs::read_to_string(&config_path).unwrap();

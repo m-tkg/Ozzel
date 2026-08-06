@@ -119,27 +119,71 @@ impl App {
     /// surfaces as a plain load error here, same treatment as any other
     /// unreadable entry.
     pub(super) fn open_viewer_virtual(&mut self, archive_path: &Path, inner_path: &Path) {
-        match virtual_dir::extract_single_to_memory(archive_path, inner_path, viewer::SIZE_CAP) {
+        let password = self
+            .active_pane()
+            .virtual_dir
+            .as_ref()
+            .and_then(|vd| vd.cached_password());
+        match virtual_dir::extract_single_to_memory(
+            archive_path,
+            inner_path,
+            viewer::SIZE_CAP,
+            password.as_deref(),
+        ) {
             Ok((bytes, truncated)) => {
-                let loaded = viewer::load_bytes(bytes, truncated);
-                let archive_name = archive_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| archive_path.display().to_string());
-                let label = format!("{archive_name}:{}", virtual_dir::inner_display(inner_path));
-                self.mode = Mode::Viewer {
-                    path: PathBuf::from(label),
-                    lines: loaded.lines,
-                    bytes: loaded.bytes,
-                    view_mode: loaded.initial_mode,
-                    scroll: 0,
-                    h_scroll: 0,
-                    truncated: loaded.truncated,
-                    search: ViewerSearch::Idle,
+                self.show_virtual_bytes(archive_path, inner_path, bytes, truncated)
+            }
+            // An encrypted entry (or a stale cached password after the
+            // archive changed underneath) prompts instead of just logging
+            // — see `commit_archive_password` for the retry.
+            Err(err)
+                if err
+                    .downcast_ref::<virtual_dir::ZipPasswordError>()
+                    .is_some() =>
+            {
+                if let Some(vd) = &self.active_pane().virtual_dir {
+                    vd.clear_password();
+                }
+                self.mode = Mode::Prompt {
+                    kind: PromptKind::ArchivePassword {
+                        pending: PasswordPending::View {
+                            archive_path: archive_path.to_path_buf(),
+                            inner_path: inner_path.to_path_buf(),
+                        },
+                    },
+                    input: LineEditor::new(),
                 };
             }
             Err(err) => self.log_error(format!("{}: {err}", inner_path.display())),
         }
+    }
+
+    /// The shared "bytes are in hand, open the viewer" tail of
+    /// `open_viewer_virtual` — also entered from a successful password
+    /// prompt (`commit_archive_password`'s View branch).
+    pub(super) fn show_virtual_bytes(
+        &mut self,
+        archive_path: &Path,
+        inner_path: &Path,
+        bytes: Vec<u8>,
+        truncated: bool,
+    ) {
+        let loaded = viewer::load_bytes(bytes, truncated);
+        let archive_name = archive_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| archive_path.display().to_string());
+        let label = format!("{archive_name}:{}", virtual_dir::inner_display(inner_path));
+        self.mode = Mode::Viewer {
+            path: PathBuf::from(label),
+            lines: loaded.lines,
+            bytes: loaded.bytes,
+            view_mode: loaded.initial_mode,
+            scroll: 0,
+            h_scroll: 0,
+            truncated: loaded.truncated,
+            search: ViewerSearch::Idle,
+        };
     }
 
     /// Shared prologue for the Viewer/Help/Log screens' fixed keys: the

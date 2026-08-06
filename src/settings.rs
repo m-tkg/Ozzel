@@ -50,7 +50,7 @@ use anyhow::{Context, Result};
 use ratatui::style::Color;
 
 use crate::action::Action;
-use crate::config::{self, Config, DeleteBehavior};
+use crate::config::{self, Config, DeleteBehavior, SizeFormat};
 use crate::keymap::{self, KeyCombo, Keymap};
 
 /// Top-level settings categories, in menu order.
@@ -100,14 +100,18 @@ pub struct Item {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     Bool,
-    /// `delete_behavior`'s two variants — the only enum-typed setting.
+    /// `delete_behavior`'s two variants.
     DeleteBehaviorEnum,
+    /// `size_format`'s three variants — like `DeleteBehaviorEnum`, an
+    /// explicit per-setting variant rather than a generic "choice" kind
+    /// (there are only two enum settings; explicit stays auditable).
+    SizeFormatEnum,
     Color,
     /// `home`/`editor` — free text, empty means "unset" (`None`).
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 9] = [
+pub const BEHAVIOR_ITEMS: [Item; 12] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations (confirm before copy/move)",
@@ -155,6 +159,21 @@ pub const BEHAVIOR_ITEMS: [Item; 9] = [
         key: "command_line_interactive",
         label: "command_line_interactive (run : commands in an interactive shell, $SHELL -i)",
         kind: ItemKind::Bool,
+    },
+    Item {
+        key: "natural_sort",
+        label: "natural_sort (sort digit runs as numbers: file2 < file10)",
+        kind: ItemKind::Bool,
+    },
+    Item {
+        key: "cursor_wrap",
+        label: "cursor_wrap (Up/Down wrap around at the list edges)",
+        kind: ItemKind::Bool,
+    },
+    Item {
+        key: "size_format",
+        label: "size_format (size column display)",
+        kind: ItemKind::SizeFormatEnum,
     },
 ];
 
@@ -248,6 +267,10 @@ pub fn display_delete_behavior(value: DeleteBehavior) -> &'static str {
     }
 }
 
+pub fn display_size_format(value: SizeFormat) -> &'static str {
+    value.as_str()
+}
+
 /// Private — only `item_value_display` (this module) calls it.
 fn display_optional_text(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| "(unset)".to_string())
@@ -282,6 +305,8 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "mouse" => config.mouse,
                 "file_search_incremental" => config.file_search_incremental,
                 "command_line_interactive" => config.command_line_interactive,
+                "natural_sort" => config.natural_sort,
+                "cursor_wrap" => config.cursor_wrap,
                 "show_permissions" => config.show_permissions,
                 "dim_inactive" => config.colors.dim_inactive,
                 _ => unreachable!("bool item key {:?}", item.key),
@@ -289,6 +314,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
             display_bool(value).to_string()
         }
         ItemKind::DeleteBehaviorEnum => display_delete_behavior(config.delete_behavior).to_string(),
+        ItemKind::SizeFormatEnum => display_size_format(config.size_format).to_string(),
         ItemKind::OptionalText => {
             let value = match item.key {
                 "home" => config.home.as_ref().map(|p| p.display().to_string()),
@@ -360,6 +386,15 @@ pub fn save_bool(path: &Path, category: Category, key: &str, value: bool) -> Res
 pub fn save_delete_behavior(path: &Path, value: DeleteBehavior) -> Result<()> {
     let mut doc = load_document(path)?;
     doc["delete_behavior"] = toml_edit::value(display_delete_behavior(value));
+    write_document(path, &doc)
+}
+
+/// Writes `size_format` as its `snake_case` string (matching
+/// `SizeFormat`'s `#[serde(rename_all = "snake_case")]`). Used both by
+/// the settings screen's editor and the `v` (toggle_size_format) action.
+pub fn save_size_format(path: &Path, value: SizeFormat) -> Result<()> {
+    let mut doc = load_document(path)?;
+    doc["size_format"] = toml_edit::value(value.as_str());
     write_document(path, &doc)
 }
 

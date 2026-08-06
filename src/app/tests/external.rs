@@ -242,16 +242,16 @@ fn reload_config_success_swaps_the_keymap_and_logs() {
     // Not bound by default; proves the *new* config's keymap is the one
     // actually in effect afterward, not just re-parsed and discarded.
     assert_eq!(
-        app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+        app.keymap.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
         None
     );
 
     let config_path = dir.path().join("config.toml");
-    std::fs::write(&config_path, "[keys]\n\"z\" = \"quit\"\n").unwrap();
+    std::fs::write(&config_path, "[keys]\n\"x\" = \"quit\"\n").unwrap();
     app.reload_config_from(&config_path);
 
     assert_eq!(
-        app.keymap.resolve(KeyCode::Char('z'), KeyModifiers::NONE),
+        app.keymap.resolve(KeyCode::Char('x'), KeyModifiers::NONE),
         Some(Action::Quit),
         "the reloaded config's [keys] override must take effect immediately"
     );

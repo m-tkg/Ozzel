@@ -37,6 +37,34 @@ impl SortKey {
             SortKey::Ext => SortKey::Name,
         }
     }
+
+    /// Stable string form — the value persisted in `sort_prefs.json` and
+    /// shown in the pane header's sort tag. `from_str` is its inverse;
+    /// unknown strings (a hand-edited or future-version prefs file) map to
+    /// `None` so a stale pref is ignored rather than crashing.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Size => "size",
+            SortKey::MTime => "mtime",
+            SortKey::Ext => "ext",
+        }
+    }
+
+    // Named to mirror `as_str` above; not an actual `FromStr` impl (that
+    // trait's `Err` type would add ceremony for a lookup whose only
+    // failure mode is "unknown, ignore it") — same call `mode.rs`'s
+    // `LineEditor::from_str` already makes.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "name" => Some(SortKey::Name),
+            "size" => Some(SortKey::Size),
+            "mtime" => Some(SortKey::MTime),
+            "ext" => Some(SortKey::Ext),
+            _ => None,
+        }
+    }
 }
 
 /// One renderable row of a pane's listing: either the synthetic parent
@@ -65,6 +93,11 @@ pub struct Pane {
     pub cursor: usize,
     pub sort: SortKey,
     pub ascending: bool,
+    /// Whether name comparisons treat digit runs as numbers (`file2` <
+    /// `file10`). Mirrors `Config::natural_sort`; pushed onto both panes by
+    /// `App::apply_natural_sort` on startup, config reload, and settings
+    /// edits (the pane itself never reads config).
+    pub natural_sort: bool,
     pub show_hidden: bool,
     /// Directory path -> name of the child entry that should be focused
     /// when that directory is (re-)entered. Populated whenever `go_parent`
@@ -92,6 +125,15 @@ pub struct Pane {
     /// every *new* cwd change (going somewhere new invalidates "forward",
     /// same as a real browser).
     pub forward: Vec<PathBuf>,
+    /// Computed sizes from the `z` (calc_dir_size) task, keyed by the
+    /// directory's full path. Only entries whose parent is the *current*
+    /// `cwd` are ever stored (a result arriving after the pane moved away
+    /// is dropped), and the map is cleared on every cwd change
+    /// (`jump_to`/`go_parent`/`enter_virtual`) — "computed size" is a
+    /// property of this visit, not of the directory forever. `reload()`
+    /// re-applies the map onto the fresh entries so a background task's
+    /// completion reload doesn't wipe the numbers off screen.
+    pub dir_size_overrides: HashMap<PathBuf, u64>,
     /// `Some` when this pane is browsing inside a `.zip` archive as a
     /// Virtual Directory instead of a real directory — see
     /// `virtual_dir`'s module doc comment for
@@ -144,12 +186,14 @@ impl Pane {
             cursor: 0,
             sort: SortKey::Name,
             ascending: true,
+            natural_sort: true,
             show_hidden: false,
             cursor_memory: HashMap::new(),
             marks: HashSet::new(),
             filter: None,
             back: Vec::new(),
             forward: Vec::new(),
+            dir_size_overrides: HashMap::new(),
             virtual_dir: None,
             visible_cache: RefCell::new(None),
         }
@@ -179,9 +223,38 @@ impl Pane {
             Some(vd) => vd.list(&vd.inner)?,
             None => read_dir_entries(&self.cwd)?,
         };
+        self.apply_dir_size_overrides();
         self.invalidate_visible_cache();
         self.clamp_cursor();
         Ok(())
+    }
+
+    /// Re-stamps computed directory sizes (`dir_size_overrides`) onto the
+    /// freshly (re-)read `entries` — see the field's doc comment.
+    fn apply_dir_size_overrides(&mut self) {
+        if self.dir_size_overrides.is_empty() {
+            return;
+        }
+        for e in &mut self.entries {
+            if let Some(&size) = self.dir_size_overrides.get(&e.path) {
+                e.size = size;
+            }
+        }
+    }
+
+    /// Records one finished directory-size computation. Ignored unless the
+    /// path is a direct child of the *current* real directory (the pane may
+    /// have navigated away, or into an archive, while the task ran).
+    pub fn set_dir_size(&mut self, path: PathBuf, bytes: u64) {
+        if self.virtual_dir.is_some() || path.parent() != Some(self.cwd.as_path()) {
+            return;
+        }
+        if let Some(e) = self.entries.iter_mut().find(|e| e.path == path) {
+            e.size = bytes;
+        }
+        self.dir_size_overrides.insert(path, bytes);
+        // Sizes feed the Size sort key, so the order may have changed.
+        self.invalidate_visible_cache();
     }
 
     /// Like `reload`, but tries to keep the cursor on the same-named entry
@@ -298,6 +371,7 @@ impl Pane {
                 &self.entries[b],
                 self.sort,
                 self.ascending,
+                self.natural_sort,
             )
         });
 
@@ -314,6 +388,27 @@ impl Pane {
         }
         let new = (self.cursor as isize + delta).clamp(0, len as isize - 1);
         self.cursor = new as usize;
+    }
+
+    /// `move_cursor` with wrap-around at both ends: one step past the last
+    /// row lands on the first (the synthetic `..` when present) and vice
+    /// versa. Only single-step cursor movement (`CursorUp`/`CursorDown`
+    /// with `cursor_wrap = true`) uses this — PageUp/PageDown, Home/End,
+    /// and the mouse wheel always clamp, so a page jump or a wheel flick
+    /// near an edge never silently teleports to the other end of the list.
+    pub fn move_cursor_wrapping(&mut self, delta: isize) {
+        let len = self.visible_entries().len();
+        if len == 0 {
+            self.cursor = 0;
+            return;
+        }
+        if delta < 0 && self.cursor == 0 {
+            self.cursor = len - 1;
+        } else if delta > 0 && self.cursor == len - 1 {
+            self.cursor = 0;
+        } else {
+            self.move_cursor(delta);
+        }
     }
 
     pub fn cursor_to_top(&mut self) {
@@ -375,6 +470,7 @@ impl Pane {
         self.cursor = 0;
         self.marks.clear();
         self.filter = None;
+        self.dir_size_overrides.clear();
         self.invalidate_visible_cache();
         Ok(())
     }
@@ -451,6 +547,11 @@ impl Pane {
         // silently exiting the archive on a jump that never actually
         // happened.
         let previous_virtual = self.virtual_dir.take();
+        // Cleared *before* the reload so `apply_dir_size_overrides` never
+        // stamps a previous directory's sizes onto same-pathed entries; on
+        // failure the old cwd's overrides are simply lost (accepted — the
+        // revert already re-reads the listing from disk anyway).
+        self.dir_size_overrides.clear();
         match self.reload() {
             Ok(()) => {
                 self.cursor = 0;
@@ -485,6 +586,7 @@ impl Pane {
         self.cwd = parent;
         self.marks.clear();
         self.filter = None;
+        self.dir_size_overrides.clear();
         self.reload()?;
 
         match leaving_name {
@@ -508,6 +610,24 @@ impl Pane {
     pub fn cycle_sort(&mut self) {
         self.sort = self.sort.next();
         self.invalidate_visible_cache();
+    }
+
+    /// Sets both sort fields at once — the sort dialog (`t`) and
+    /// per-directory sort restoration both land here. Like `cycle_sort`,
+    /// deliberately does not try to keep the cursor on the same entry.
+    pub fn set_sort(&mut self, key: SortKey, ascending: bool) {
+        self.sort = key;
+        self.ascending = ascending;
+        self.invalidate_visible_cache();
+    }
+
+    /// Pushes the config's `natural_sort` value onto this pane — see the
+    /// field's doc comment. Invalidates only on an actual change.
+    pub fn set_natural_sort(&mut self, natural: bool) {
+        if self.natural_sort != natural {
+            self.natural_sort = natural;
+            self.invalidate_visible_cache();
+        }
     }
 
     /// The entry under the cursor, or `None` if the cursor is on `..` or
@@ -674,6 +794,27 @@ impl Pane {
         }
     }
 
+    /// The *names* of the currently visible marked entries, in display
+    /// order — `rename_marks`' worklist. Unlike `marked_or_cursor` (a
+    /// `HashSet` iteration with nondeterministic order, and deliberately
+    /// filter-blind), a rename sequence walks entries in the order the
+    /// user sees them, and a mark hidden by the active filter is *not*
+    /// included: renaming things that aren't on screen, one blind prompt
+    /// at a time, is a footgun — the caller logs how many were excluded.
+    /// Returns `(visible_names, hidden_mark_count)`.
+    pub fn marked_names_in_display_order(&self) -> (Vec<String>, usize) {
+        let names: Vec<String> = self
+            .visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                VisibleItem::Entry(e) if self.marks.contains(&e.path) => Some(e.name.clone()),
+                _ => None,
+            })
+            .collect();
+        let hidden = self.marks.len().saturating_sub(names.len());
+        (names, hidden)
+    }
+
     pub fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
         self.invalidate_visible_cache();
@@ -700,7 +841,13 @@ impl Pane {
 /// `FsEntry::is_dir_like` — are always grouped before files/file-symlinks
 /// regardless of `sort`/`ascending`, then the requested key breaks ties,
 /// with name as a final deterministic tiebreaker.
-fn compare_entries(a: &FsEntry, b: &FsEntry, sort: SortKey, ascending: bool) -> Ordering {
+fn compare_entries(
+    a: &FsEntry,
+    b: &FsEntry,
+    sort: SortKey,
+    ascending: bool,
+    natural: bool,
+) -> Ordering {
     let a_is_dir = a.is_dir_like();
     let b_is_dir = b.is_dir_like();
     if a_is_dir != b_is_dir {
@@ -711,7 +858,13 @@ fn compare_entries(a: &FsEntry, b: &FsEntry, sort: SortKey, ascending: bool) -> 
         };
     }
 
-    let name_cmp = || a.name_lower.cmp(&b.name_lower);
+    let name_cmp = || {
+        if natural {
+            natural_cmp(&a.name_lower, &b.name_lower)
+        } else {
+            a.name_lower.cmp(&b.name_lower)
+        }
+    };
     let ord = match sort {
         SortKey::Name => name_cmp(),
         SortKey::Size => a.size.cmp(&b.size).then_with(name_cmp),
@@ -720,6 +873,62 @@ fn compare_entries(a: &FsEntry, b: &FsEntry, sort: SortKey, ascending: bool) -> 
     };
 
     if ascending { ord } else { ord.reverse() }
+}
+
+/// Digit-as-number ("natural") string comparison: maximal ASCII digit runs
+/// compare as numbers (`file2` < `file10`), everything else compares as
+/// plain chars. Equal-valued runs with different leading-zero counts (`01`
+/// vs `1`) — and, failing that, fully equal-looking strings — fall back to
+/// `str::cmp` so the ordering stays total and deterministic. Allocation-free:
+/// digit runs are compared by significant-digit length then lexically,
+/// never parsed into an integer (no overflow on absurdly long runs).
+pub fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let mut ab = a.as_bytes();
+    let mut bb = b.as_bytes();
+
+    fn split_digits(s: &[u8]) -> (&[u8], &[u8]) {
+        let end = s
+            .iter()
+            .position(|c| !c.is_ascii_digit())
+            .unwrap_or(s.len());
+        s.split_at(end)
+    }
+    fn strip_zeros(s: &[u8]) -> &[u8] {
+        let start = s.iter().position(|&c| c != b'0').unwrap_or(s.len());
+        &s[start..]
+    }
+
+    loop {
+        match (ab.first(), bb.first()) {
+            (None, None) => return a.cmp(b),
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(&ca), Some(&cb)) => {
+                if ca.is_ascii_digit() && cb.is_ascii_digit() {
+                    let (da, rest_a) = split_digits(ab);
+                    let (db, rest_b) = split_digits(bb);
+                    let sa = strip_zeros(da);
+                    let sb = strip_zeros(db);
+                    let ord = sa.len().cmp(&sb.len()).then_with(|| sa.cmp(sb));
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                    ab = rest_a;
+                    bb = rest_b;
+                } else {
+                    // Byte-wise UTF-8 comparison orders identically to
+                    // code-point comparison (UTF-8 preserves it), so no
+                    // char decoding is needed here.
+                    let ord = ca.cmp(&cb);
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                    ab = &ab[1..];
+                    bb = &bb[1..];
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -761,13 +970,13 @@ mod tests {
         let dir_z = entry("z_dir", EntryKind::Dir, 0, 1);
 
         for sort in [SortKey::Name, SortKey::Size, SortKey::MTime, SortKey::Ext] {
-            let ord = compare_entries(&dir_z, &file_a, sort, true);
+            let ord = compare_entries(&dir_z, &file_a, sort, true, false);
             assert_eq!(
                 ord,
                 Ordering::Less,
                 "dir should sort before file for {sort:?}"
             );
-            let ord_desc = compare_entries(&dir_z, &file_a, sort, false);
+            let ord_desc = compare_entries(&dir_z, &file_a, sort, false, false);
             assert_eq!(
                 ord_desc,
                 Ordering::Less,
@@ -783,7 +992,7 @@ mod tests {
 
         for sort in [SortKey::Name, SortKey::Size, SortKey::MTime, SortKey::Ext] {
             assert_eq!(
-                compare_entries(&link, &file_a, sort, true),
+                compare_entries(&link, &file_a, sort, true, false),
                 Ordering::Less,
                 "a directory-symlink should sort before a file for {sort:?}, same as a real directory"
             );
@@ -796,7 +1005,7 @@ mod tests {
         let link = symlink_entry("a_link", crate::entry::SymlinkTarget::File);
 
         assert_eq!(
-            compare_entries(&dir_z, &link, SortKey::Name, true),
+            compare_entries(&dir_z, &link, SortKey::Name, true, false),
             Ordering::Less,
             "a real directory should still sort before a file-symlink"
         );
@@ -807,7 +1016,7 @@ mod tests {
         let a = entry("Banana.txt", EntryKind::File, 1, 1);
         let b = entry("apple.txt", EntryKind::File, 1, 1);
         assert_eq!(
-            compare_entries(&a, &b, SortKey::Name, true),
+            compare_entries(&a, &b, SortKey::Name, true, false),
             Ordering::Greater
         );
     }
@@ -817,11 +1026,11 @@ mod tests {
         let small = entry("a.txt", EntryKind::File, 10, 1);
         let big = entry("b.txt", EntryKind::File, 1000, 1);
         assert_eq!(
-            compare_entries(&small, &big, SortKey::Size, true),
+            compare_entries(&small, &big, SortKey::Size, true, false),
             Ordering::Less
         );
         assert_eq!(
-            compare_entries(&small, &big, SortKey::Size, false),
+            compare_entries(&small, &big, SortKey::Size, false, false),
             Ordering::Greater
         );
     }
@@ -831,7 +1040,7 @@ mod tests {
         let old = entry("a.txt", EntryKind::File, 1, 1);
         let new = entry("b.txt", EntryKind::File, 1, 999);
         assert_eq!(
-            compare_entries(&old, &new, SortKey::MTime, true),
+            compare_entries(&old, &new, SortKey::MTime, true, false),
             Ordering::Less
         );
     }
@@ -840,7 +1049,10 @@ mod tests {
     fn sorts_by_extension_then_name() {
         let a = entry("b.rs", EntryKind::File, 1, 1);
         let b = entry("a.txt", EntryKind::File, 1, 1);
-        assert_eq!(compare_entries(&a, &b, SortKey::Ext, true), Ordering::Less);
+        assert_eq!(
+            compare_entries(&a, &b, SortKey::Ext, true, false),
+            Ordering::Less
+        );
     }
 
     #[test]
@@ -1296,5 +1508,137 @@ mod tests {
         pane.cycle_sort(); // Name -> Size
         assert_eq!(pane.sort, SortKey::Size);
         assert_eq!(visible_names(&pane), vec!["z.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn natural_cmp_orders_digit_runs_as_numbers() {
+        assert_eq!(natural_cmp("file2", "file10"), Ordering::Less);
+        assert_eq!(natural_cmp("file10", "file2"), Ordering::Greater);
+        assert_eq!(natural_cmp("file2", "file2"), Ordering::Equal);
+        // Leading zeros: equal value falls back to plain string order for
+        // a deterministic total order.
+        assert_eq!(natural_cmp("file01", "file1"), Ordering::Less);
+        assert_eq!(natural_cmp("a1b2", "a1b10"), Ordering::Less);
+        // No digits at all behaves like plain cmp.
+        assert_eq!(natural_cmp("abc", "abd"), Ordering::Less);
+        // Digit run vs non-digit at the same position: plain byte order.
+        assert_eq!(natural_cmp("a1", "aa"), Ordering::Less);
+        // Prefix relationship.
+        assert_eq!(natural_cmp("file", "file2"), Ordering::Less);
+        // Huge runs that would overflow an integer parse still compare.
+        assert_eq!(
+            natural_cmp("x99999999999999999999998", "x99999999999999999999999"),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn natural_sort_flag_switches_name_ordering() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["file1.txt", "file2.txt", "file10.txt"] {
+            fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        assert!(pane.natural_sort, "natural sort is the default");
+        assert_eq!(
+            visible_names(&pane),
+            vec!["file1.txt", "file2.txt", "file10.txt"]
+        );
+
+        pane.set_natural_sort(false);
+        assert_eq!(
+            visible_names(&pane),
+            vec!["file1.txt", "file10.txt", "file2.txt"],
+            "lexicographic order when disabled"
+        );
+    }
+
+    #[test]
+    fn set_sort_applies_key_and_direction() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), vec![0u8; 1000]).unwrap();
+        fs::write(dir.path().join("z.txt"), b"1").unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+
+        pane.set_sort(SortKey::Size, false);
+        assert_eq!(pane.sort, SortKey::Size);
+        assert!(!pane.ascending);
+        assert_eq!(visible_names(&pane), vec!["a.txt", "z.txt"]);
+
+        pane.set_sort(SortKey::Size, true);
+        assert_eq!(visible_names(&pane), vec!["z.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn move_cursor_wrapping_wraps_at_both_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        fs::write(dir.path().join("b.txt"), b"x").unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        let len = pane.visible_entries().len(); // "..", a, b
+
+        pane.cursor = 0;
+        pane.move_cursor_wrapping(-1);
+        assert_eq!(pane.cursor, len - 1, "up from the top wraps to the bottom");
+        pane.move_cursor_wrapping(1);
+        assert_eq!(pane.cursor, 0, "down from the bottom wraps to the top");
+        // Mid-list movement behaves like plain move_cursor.
+        pane.move_cursor_wrapping(1);
+        assert_eq!(pane.cursor, 1);
+    }
+
+    #[test]
+    fn move_cursor_wrapping_on_empty_listing_is_a_noop() {
+        let mut pane = Pane::new_empty(PathBuf::from("/"));
+        pane.move_cursor_wrapping(-1);
+        assert_eq!(pane.cursor, 0);
+        pane.move_cursor_wrapping(1);
+        assert_eq!(pane.cursor, 0);
+    }
+
+    #[test]
+    fn set_dir_size_stamps_entry_survives_reload_and_clears_on_navigation() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("f.txt"), vec![0u8; 123]).unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+
+        pane.set_dir_size(sub.clone(), 123);
+        let entry = pane.entries.iter().find(|e| e.path == sub).unwrap();
+        assert_eq!(entry.size, 123);
+        assert_eq!(pane.dir_size_overrides.get(&sub), Some(&123));
+
+        // Survives a reload of the same directory (a finished task's
+        // reload_both must not wipe the number).
+        pane.reload().unwrap();
+        let entry = pane.entries.iter().find(|e| e.path == sub).unwrap();
+        assert_eq!(entry.size, 123);
+
+        // Feeds the size sort.
+        pane.set_sort(SortKey::Size, true);
+        assert!(pane.visible_entries().len() > 1);
+
+        // Cleared once the pane navigates away.
+        pane.jump_to(sub.clone()).unwrap();
+        assert!(pane.dir_size_overrides.is_empty());
+    }
+
+    #[test]
+    fn set_dir_size_ignores_results_for_a_different_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        // A result whose parent isn't the pane's cwd (the pane moved on
+        // while the task ran) must be dropped, not stored.
+        pane.set_dir_size(PathBuf::from("/somewhere/else"), 42);
+        assert!(pane.dir_size_overrides.is_empty());
+    }
+
+    #[test]
+    fn sort_key_as_str_round_trips_through_from_str() {
+        for key in [SortKey::Name, SortKey::Size, SortKey::MTime, SortKey::Ext] {
+            assert_eq!(SortKey::from_str(key.as_str()), Some(key));
+        }
+        assert_eq!(SortKey::from_str("bogus"), None);
     }
 }

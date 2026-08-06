@@ -16,7 +16,7 @@
 - Copy, move, delete, zip compression/extraction, and extraction from a Virtual Directory all run asynchronously on background threads, showing a progress bar while other operations continue
 - Each line in the log pane shows its recorded timestamp (long messages wrap, and continuation lines are indented by the width of the timestamp so columns line up). Press `L` to open a full-screen log viewer showing the entire log
 - Zip compression/extraction (protected against zip-slip)
-- A Virtual Directory feature that lets you browse, navigate, and partially extract archives (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`) as if they were directories, without extracting them
+- A Virtual Directory feature that lets you browse, navigate, and partially extract archives (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`, plus bare `.gz`/`.bz2` as one-entry archives) as if they were directories, without extracting them. Password-protected zips work too (a masked prompt appears the first time contents are read; remembered for the session)
 - External viewer commands configurable per file extension (`[viewers]`). Extensions with no configured entry fall back to the built-in viewer
 - Persistent directory history and bookmarks, plus a per-pane temporary back/forward history (`Shift+←`/`Shift+→`)
 - A built-in viewer (open files with `Enter`/`o`; supports displaying Japanese text; `Tab` toggles between text display and an `xxd`-style hex dump). Supports `less`-compatible scrolling (`j`/`k`/`d`/`u`/`f`/`b`/`Space`) and search (`/`, `?`, `n`, `N`, with regex preferred and substring-match fallback, plus match highlighting)
@@ -94,6 +94,9 @@ These are the default key bindings. They can be freely redefined in the `[keys]`
 | `Backspace` | Go to the parent directory |
 | `w` | Swap the left and right panes |
 | `s` | Cycle the sort key (name → size → modified time → extension → name…) |
+| `t` | Open the sort dialog: choose the sort key **and** ascending/descending in one modal (`↑`/`↓` to move, `Enter` to apply, `Esc` to cancel). The chosen state is also remembered per directory (see below) |
+| `v` | Cycle the size column format: bytes → bytes with thousands separators → human (`1.5M`). The choice is written back to the config file, so it persists across restarts (also editable from the settings screen) |
+| `z` | Compute the recursive size of the marked directories (or the directory under the cursor) on a background task. Each directory's `<DIR>` cell is replaced with its real size as results arrive (kept only while the pane stays in this directory), size-sorting picks the numbers up, and the log shows a grand total |
 | `.` | Toggle showing hidden (dot) files |
 | `Ctrl+R` | Reload both panes |
 | `Shift+←` | Go back to this pane's previous directory |
@@ -105,6 +108,12 @@ A pane's header (current directory path + filter tag) fits on a single line insi
 
 `Shift+←`/`Shift+→` form a temporary per-pane history (a back/forward stack). Each time you navigate to a different directory, the previous location is pushed onto the "back" stack, and the "forward" stack (for `Shift+→`) is cleared whenever you move to a new location. If there is nowhere to go back/forward to, nothing happens and a note is logged. The `H` (Shift+h) history menu described later is a separate, persistent, cross-pane list of recently visited locations.
 
+**Natural (digit-as-number) sort:** By default, name sorting compares digit runs as numbers, so `file2.txt` sorts before `file10.txt`. Set `natural_sort = false` in the config (or toggle it in the settings screen) for strict lexicographic order.
+
+**Per-directory sort memory:** Every explicit sort change (`s`'s cycle or the `t` dialog) is remembered for the current directory (up to 200 directories, persisted as `sort_prefs.json` alongside the history file). Revisiting a directory — by any route: `Enter`, `Backspace`, bookmarks, the history menu, `Shift+←`/`Shift+→`, or at startup — restores its remembered key and direction. A directory with no remembered choice keeps whatever sort the pane already had (the pre-existing behavior). When a pane's sort deviates from the default (name, ascending), the pane header shows a tag like `[s:size↓]`.
+
+**Cursor wrap-around:** With `cursor_wrap = true` (default `false`), single-step cursor movement wraps: one step past the last row lands on the first and vice versa. Page movement, `Home`/`End`, and the mouse wheel always stop at the edges regardless.
+
 ### Marking & File Operations
 
 | Key | Action |
@@ -115,6 +124,7 @@ A pane's header (current directory path + filter tag) fits on a single line insi
 | `M` (Shift+m) | Move (targets determined the same way as `C`). Confirmed (see below) |
 | `D` / `d` | Delete (confirmed; moves to trash or deletes permanently depending on settings) |
 | `R` / `r` | Rename (prompt pre-filled with the current name) |
+| `m` | Rename marked entries one after another (batch rename): each visible marked entry gets its own prompt in display order, titled `Rename (2/5)`. Confirming an unchanged (or empty) name skips that entry; a failed rename is logged and the sequence continues; `Esc` cancels the rest (already-confirmed renames stand). Marks hidden by an active filter are excluded (announced in the log). No cursor fallback — with nothing marked it just logs an error |
 | `K` (Shift+k) | Create a new directory (mkdir) |
 | `c` | Duplicate the file/directory under the cursor **within the same directory** (prompt pre-filled with the current name; specify the new name. Directories are copied recursively as an async task) |
 | `y` | Copy the absolute path of the entry under the cursor to the system clipboard (described below) |
@@ -128,7 +138,19 @@ Copy, move, and delete run as async tasks, with a progress gauge shown in the lo
 
 **Viewing the full log (`L`):** The log display below the status area shows only the last 4 lines, but pressing `L` (Shift+l) opens a full-screen log viewer where you can scroll through the entire log recorded during the session (up to roughly 500 lines, in memory), with the most recent line at the bottom. Scrolling and search use the exact same `less`-compatible fixed key set as the text viewer: `↑`/`↓` (also `k`/`j`) for one line, `PageUp`/`PageDown` (also `b`/`f`/`Space`) for a page, `d`/`u` for a half page, `Home` or `g` for the top, `End` or `G` for the bottom, `/`/`?` for forward/backward search, and `n`/`N` to move to the next/previous match (see "[Search (`less`-compatible)](#search-less-compatible)" above for search details — here the search target is each log line itself). `q`/`Esc` closes it (pressing `Esc` while a search is active only clears the highlight first, just like in the viewer). Since the log is in-memory only and not persisted, restarting `ozzel` also clears the log viewer's contents.
 
-**Copy/move confirmation dialog:** Like delete, copy and move show a confirmation dialog before executing (enabled by default; can be disabled via `confirm_operations` in settings). It looks like `Copy 3 item(s) -> /path/to/dest? (y/n)`. If the destination already has files with the same name, a single dialog including the overwrite count is shown instead (`Copy 3 item(s) -> /dest? (2 will be overwritten) (y/n)`). Confirmation for overwrites is always shown even with `confirm_operations = false` (it is never skipped unconditionally).
+**Copy/move confirmation dialog:** With no name conflicts, copy and move show a single confirmation dialog before executing (enabled by default; can be disabled via `confirm_operations` in settings), like `Copy 3 item(s) -> /path/to/dest? (y/n)`.
+
+**Same-name collision dialog (per file):** If the destination already has entries with the same names, a per-file dialog opens instead — one conflict at a time, titled `Overwrite? (2/5): name.txt`, showing both sides' size and modified time with `[New]` marking the newer one. The choices are:
+
+| Choice | Effect |
+| --- | --- |
+| `Overwrite` | Transfer this entry over the existing one (directories merge, files are replaced) |
+| `Rename` | Prompt for a different destination name for this entry (a name that also exists re-asks; it never overwrites through the rename path) |
+| `Skip` | Leave this destination untouched; the source is not transferred |
+| `Overwrite All` | Apply `Overwrite` to this and every remaining conflict |
+| `Skip All` | Apply `Skip` to this and every remaining conflict |
+
+`↑`/`↓` move the highlight, `Enter` answers, and `Esc` cancels the **whole** transfer (including the non-conflicting entries — nothing has started yet at that point). Non-conflicting entries transfer normally alongside whatever the dialog resolves. This dialog is itself the confirmation, so it appears even with `confirm_operations = false` — a collision is never silently overwritten.
 
 **How `y` (copy path) works:** Without pulling in any extra dependency crates, it writes to the clipboard using a terminal escape sequence called [OSC 52](https://sw.kovidgoyal.net/kitty/clipboard/#clipboard-escape-code). Its advantage is that it works even over SSH or from inside tmux (if tmux is configured with the equivalent of `set-clipboard on`). On unsupported terminals, the escape sequence is simply ignored — no error, no crash (since there's no reliable way to detect support in advance, pressing `y` always logs `copied: /path/to/file`).
 
@@ -194,8 +216,14 @@ Supported formats:
 | tar+gzip | `.tar.gz` / `.tgz` | `flate2` (pure Rust) |
 | tar+bzip2 | `.tar.bz2` / `.tbz2` | `bzip2` crate (uses the pure-Rust backend `libbz2-rs-sys` by default; no C library linking) |
 | tar+xz | `.tar.xz` / `.txz` | `lzma-rs` (pure Rust, `#![forbid(unsafe_code)]`) |
+| gzip (bare) | `.gz` (not `.tar.gz`) | Shown as a one-entry archive containing the decompressed payload (named after the file minus `.gz`). The size column shows gzip's recorded uncompressed size (inaccurate above 4 GiB) |
+| bzip2 (bare) | `.bz2` (not `.tar.bz2`) | Same one-entry treatment; bzip2 records no uncompressed size, so the size column shows 0 until opened |
 
 None of the above require a C toolchain (`cc`/system `libz`/`libbz2`/`liblzma`, etc.) — everything builds cross-platform with just cargo. 7z and rar are not supported.
+
+**Behavior change note:** bare `.gz`/`.bz2` files used to open in the built-in viewer (as a hex dump of the compressed bytes); they now open as a one-entry Virtual Directory — press `Enter` again on the entry inside to view the decompressed content, or `C` to extract it to the other pane.
+
+**Password-protected zips:** The listing opens without a password (it only reads the central directory's metadata). The first time the *contents* are needed — opening a file in the viewer, extracting with `C`, or unzipping with `u` — a masked password prompt appears; the password is verified on the spot (a wrong one logs `wrong password` and re-prompts) and, while browsing inside the archive, is remembered for the rest of that Virtual Directory session so several files can be opened with a single entry. Both AES-encrypted zips (7-Zip/WinZip's modern default) and legacy ZipCrypto ones are supported, via pure-Rust decryption (no C toolchain, same as everything else). Nothing is ever persisted. (Rare caveat: legacy ZipCrypto's integrity check lets roughly 1 in 256 wrong passwords through the initial verification; those fail during the actual extraction as a logged error.)
 
 | Key | Action |
 | --- | --- |
@@ -481,6 +509,20 @@ quit_cd = true
 # (incremental). Setting it to false only searches when you press Enter.
 file_search_incremental = true
 
+# Whether name sorting compares digit runs as numbers (file2 < file10).
+# Default is true. Setting it to false restores strict lexicographic order.
+natural_sort = true
+
+# Whether single-step cursor movement (Up/Down) wraps around at the list
+# edges. Default is false. PageUp/PageDown, Home/End, and the mouse wheel
+# always stop at the edges regardless of this setting.
+cursor_wrap = false
+
+# How the size column renders sizes: "human" (1.5M, default), "bytes"
+# (1536), or "bytes_grouped" (1,536). The v key cycles these at runtime
+# and writes the choice back here.
+size_format = "human"
+
 # Whether to run the : command in an interactive shell ($SHELL -i -c). Default is
 # false ($SHELL -c). Setting it to true loads .zshrc/.bashrc, making interactive-shell
 # aliases and functions available from :  (be aware of the rc-loading cost and side effects).
@@ -566,7 +608,7 @@ The [`examples/config.toml`](examples/config.toml) that actually gets generated 
 
 ### Action Names (valid values for the right side of `[keys]` / the left side of `[bindings]`)
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `jump_search`, `file_search`, `zip_marked`, `unzip`, `cancel_tasks`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `sort_dialog`, `toggle_size_format`, `calc_dir_size`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `rename_marks`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `filter`, `clear_filter`, `jump_search`, `file_search`, `zip_marked`, `unzip`, `cancel_tasks`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
 
 You can always check the current effective key bindings corresponding to this list from the in-app help screen (`h`/`?`).
 
@@ -581,6 +623,7 @@ Directory history and bookmarks are persisted as JSON files.
 
 - `history.json`: Visited directories per pane (up to 50, deduplicated, most-recent order)
 - `bookmarks.json`: The bookmark list (in the order added)
+- `sort_prefs.json`: Remembered per-directory sort choices (up to 200, most-recently-changed order; see "Per-directory sort memory" above)
 
 If either file is missing, it starts in an empty state. If a file is corrupted (unparseable), it also falls back to an empty state, and this is shown in the log (never silently ignored). Bookmarks are saved on every change; history is saved on exit.
 
@@ -596,7 +639,7 @@ If either file is missing, it starts in an empty state. If a file is corrupted (
 - **`Shift+Enter` only works as `open_default` if the terminal supports the kitty keyboard protocol.** On unsupported terminals, it arrives as a plain `Enter`, opening the built-in viewer instead (see "External Program Integration" above).
 - **A Virtual Directory does not recursively browse nested archives (an archive inside an archive).** Opening a `.zip`/`.tar.gz`/etc. from within an archive simply opens it in the built-in viewer (usually as a hex dump, since it's binary).
 - **Tar-family archives do not support 7z or rar.** Only gzip, bzip2, and xz compression are supported; any other `.tar.*` (e.g., zstd, lz4) is not recognized and is opened as a regular file in the built-in viewer.
-- **Password-protected zips can be listed, but their contents cannot be viewed or extracted.** The archive listing (filenames, sizes) can be shown without a password since it's read only from the central directory's metadata, but actually reading file contents (opening in the viewer, extracting with `C`) is shown as an error in the log.
+- **Password-protected zip support has caveats.** Viewing and extracting work via a masked password prompt (see "Virtual Directory" above), but zip *creation* (`p`) never encrypts, and legacy ZipCrypto's weak integrity check lets roughly 1 in 256 wrong passwords past the initial verification (they still fail, as a logged error, during the actual read).
 - **The settings screen does not support mouse operations.** Every category, item, and edit screen requires keyboard input only.
 - Unusual regex syntax and highly unusual filenames (e.g., containing NUL bytes) have not been explicitly tested.
 - **`ozzel update` does not work until the repository is published on GitHub.** Both checking the remote version and reinstalling via `cargo install --git` fail, and a corresponding error message is shown (it does not crash).

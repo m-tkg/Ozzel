@@ -14,8 +14,11 @@ pub mod layout;
 // `pub` (rather than `pub(crate)`) so `benches/`'s criterion bench, an
 // external target, can reach `wrap_log_lines` directly.
 pub mod log_view;
-mod modal;
-mod pane_view;
+// `pub(crate)` (not private) so `app`'s tests can assert the sort
+// dialog's labels stay index-aligned with `App::SORT_DIALOG_CHOICES`.
+pub(crate) mod modal;
+// `pub(crate)` so `App::collision_info` can reuse `format_mtime`.
+pub(crate) mod pane_view;
 mod settings_view;
 mod text;
 mod viewer_view;
@@ -118,6 +121,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
         executable: app.config.colors.executable,
     };
     let show_permissions = app.config.show_permissions;
+    let size_format = app.config.size_format;
     let left_layout = pane_view::render(
         frame,
         panes[0],
@@ -125,6 +129,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
         app.active == ActivePane::Left,
         colors,
         show_permissions,
+        size_format,
     );
     let right_layout = pane_view::render(
         frame,
@@ -133,6 +138,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
         app.active == ActivePane::Right,
         colors,
         show_permissions,
+        size_format,
     );
 
     log_view::render(frame, rows[1], app);
@@ -163,6 +169,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
             render_status_bar(frame, rows[2], app);
             modal::render_confirm(frame, area, message);
         }
+        Mode::TransferCollision { .. } => {
+            render_status_bar(frame, rows[2], app);
+            modal::render_transfer_collision(frame, area, &app.mode);
+        }
         Mode::FunctionList { .. } => {
             render_status_bar(frame, rows[2], app);
             function_list_view::render(frame, area, app);
@@ -170,6 +180,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
         Mode::FileSearch { .. } => {
             render_status_bar(frame, rows[2], app);
             file_search_view::render(frame, area, app);
+        }
+        Mode::SortSelect { .. } => {
+            render_status_bar(frame, rows[2], app);
+            modal::render_sort_select(frame, area, &app.mode);
         }
         Mode::Normal => render_status_bar(frame, rows[2], app),
         Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } | Mode::Settings { .. } => {

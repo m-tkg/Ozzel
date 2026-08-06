@@ -249,6 +249,8 @@ impl App {
                     "mouse" => self.config.mouse,
                     "file_search_incremental" => self.config.file_search_incremental,
                     "command_line_interactive" => self.config.command_line_interactive,
+                    "natural_sort" => self.config.natural_sort,
+                    "cursor_wrap" => self.config.cursor_wrap,
                     "show_permissions" => self.config.show_permissions,
                     "dim_inactive" => self.config.colors.dim_inactive,
                     _ => unreachable!("unknown bool key {:?}", item.key),
@@ -269,8 +271,22 @@ impl App {
                     },
                 };
             }
+            settings::ItemKind::SizeFormatEnum => {
+                let cursor_pos = match self.config.size_format {
+                    crate::config::SizeFormat::Bytes => 0,
+                    crate::config::SizeFormat::BytesGrouped => 1,
+                    crate::config::SizeFormat::Human => 2,
+                };
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor: cursor,
+                        editor: SettingsEditor::SizeFormat { cursor: cursor_pos },
+                    },
+                };
+            }
             settings::ItemKind::Color | settings::ItemKind::OptionalText => {
-                unreachable!("Behavior items are always Bool or DeleteBehaviorEnum")
+                unreachable!("Behavior items are always Bool or an enum select")
             }
         }
     }
@@ -420,6 +436,9 @@ impl App {
             SettingsEditor::DeleteBehavior { cursor } => {
                 self.handle_settings_delete_behavior_key(code, category, item_cursor, cursor);
             }
+            SettingsEditor::SizeFormat { cursor } => {
+                self.handle_settings_size_format_key(code, category, item_cursor, cursor);
+            }
             SettingsEditor::Color {
                 key,
                 cursor,
@@ -515,6 +534,45 @@ impl App {
                     DeleteBehavior::Permanent
                 };
                 self.settings_save(|path| settings::save_delete_behavior(path, value));
+                self.settings_back_to_items(category, item_cursor);
+            }
+            _ => {}
+        }
+    }
+
+    /// `size_format`'s three-way select — same shape as
+    /// `handle_settings_delete_behavior_key`, one more row.
+    fn handle_settings_size_format_key(
+        &mut self,
+        code: KeyCode,
+        category: Category,
+        item_cursor: usize,
+        cursor: usize,
+    ) {
+        use crate::config::SizeFormat;
+        const CHOICES: [SizeFormat; 3] = [
+            SizeFormat::Bytes,
+            SizeFormat::BytesGrouped,
+            SizeFormat::Human,
+        ];
+        match code {
+            KeyCode::Esc => self.settings_back_to_items(category, item_cursor),
+            KeyCode::Up | KeyCode::Down => {
+                let next = match code {
+                    KeyCode::Up => cursor.checked_sub(1).unwrap_or(CHOICES.len() - 1),
+                    _ => (cursor + 1) % CHOICES.len(),
+                };
+                self.mode = Mode::Settings {
+                    screen: SettingsScreen::Editor {
+                        category,
+                        item_cursor,
+                        editor: SettingsEditor::SizeFormat { cursor: next },
+                    },
+                };
+            }
+            KeyCode::Enter => {
+                let value = CHOICES[cursor];
+                self.settings_save(|path| settings::save_size_format(path, value));
                 self.settings_back_to_items(category, item_cursor);
             }
             _ => {}

@@ -23,12 +23,30 @@ pub enum Action {
     Open,
     Parent,
     CycleSort,
+    /// Opens the sort dialog (`Mode::SortSelect`): pick a sort key *and*
+    /// direction in one modal, instead of cycling keys with `CycleSort`.
+    /// The chosen state is also remembered per directory (see
+    /// `crate::persist::SortPrefs`).
+    SortDialog,
+    /// Cycles the size column's display format (bytes → grouped bytes →
+    /// human) and persists the choice to the config file. See
+    /// `crate::config::SizeFormat`.
+    ToggleSizeFormat,
+    /// Computes the recursive size of the marked directories (or the one
+    /// under the cursor) on a background task, replacing their `<DIR>`
+    /// size cells with real numbers for as long as the pane stays in this
+    /// directory. See `App::begin_calc_dir_size`.
+    CalcDirSize,
     ToggleHidden,
     SwapPanes,
     Refresh,
     Mark,
     MarkAll,
     Rename,
+    /// Renames every marked entry one after another, each through its own
+    /// prompt (prefilled with the current name, titled with `(n/total)`
+    /// progress); Esc cancels the rest. See `App::begin_rename_marks`.
+    RenameMarks,
     Mkdir,
     Delete,
     Copy,
@@ -142,7 +160,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 46] = [
+    pub const ALL: [Action; 50] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -155,18 +173,22 @@ impl Action {
         Action::Open,
         Action::Parent,
         Action::CycleSort,
+        Action::SortDialog,
+        Action::ToggleSizeFormat,
         Action::ToggleHidden,
         Action::SwapPanes,
         Action::Refresh,
         Action::Mark,
         Action::MarkAll,
         Action::Rename,
+        Action::RenameMarks,
         Action::Mkdir,
         Action::Delete,
         Action::Copy,
         Action::Move,
         Action::Duplicate,
         Action::CopyPath,
+        Action::CalcDirSize,
         Action::ZipMarked,
         Action::Unzip,
         Action::CancelTasks,
@@ -195,12 +217,11 @@ impl Action {
         use Action::*;
         match self {
             CursorUp | CursorDown | PageUp | PageDown | Top | Bottom | SwitchPane | FocusLeft
-            | FocusRight | Open | Parent | CycleSort | ToggleHidden | SwapPanes | Refresh => {
-                ActionCategory::Movement
-            }
+            | FocusRight | Open | Parent | CycleSort | SortDialog | ToggleSizeFormat
+            | ToggleHidden | SwapPanes | Refresh => ActionCategory::Movement,
             Mark | MarkAll => ActionCategory::Marks,
-            Rename | Mkdir | Delete | Copy | Move | Duplicate | CopyPath | ZipMarked | Unzip
-            | CancelTasks => ActionCategory::FileOps,
+            Rename | RenameMarks | Mkdir | Delete | Copy | Move | Duplicate | CopyPath
+            | CalcDirSize | ZipMarked | Unzip | CancelTasks => ActionCategory::FileOps,
             Filter | ClearFilter | JumpSearch | FileSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
@@ -226,12 +247,16 @@ impl Action {
             Open => "Open directory (navigate in), or view file",
             Parent => "Go to the parent directory",
             CycleSort => "Cycle the sort key",
+            SortDialog => "Choose the sort key and direction from a dialog",
+            ToggleSizeFormat => "Cycle the size display format (bytes / grouped / human)",
+            CalcDirSize => "Compute sizes of marked directories (or the cursor directory)",
             ToggleHidden => "Toggle hidden files",
             SwapPanes => "Swap the left and right panes",
             Refresh => "Reload both panes",
             Mark => "Mark/unmark the cursor entry",
             MarkAll => "Toggle marks on all visible entries",
             Rename => "Rename the cursor entry",
+            RenameMarks => "Rename each marked entry, one prompt after another",
             Mkdir => "Create a new directory",
             Delete => "Delete marked entries (or the cursor entry)",
             Copy => "Copy marked entries (or the cursor entry) to the other pane",
@@ -280,12 +305,16 @@ impl Action {
             Open => "open",
             Parent => "parent",
             CycleSort => "cycle_sort",
+            SortDialog => "sort_dialog",
+            ToggleSizeFormat => "toggle_size_format",
+            CalcDirSize => "calc_dir_size",
             ToggleHidden => "toggle_hidden",
             SwapPanes => "swap_panes",
             Refresh => "refresh",
             Mark => "mark",
             MarkAll => "mark_all",
             Rename => "rename",
+            RenameMarks => "rename_marks",
             Mkdir => "mkdir",
             Delete => "delete",
             Copy => "copy",

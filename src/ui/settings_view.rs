@@ -223,6 +223,7 @@ fn render_items(frame: &mut Frame, area: Rect, app: &mut App, category: Category
 fn render_editor(frame: &mut Frame, area: Rect, app: &App, editor: &SettingsEditor) {
     match editor {
         SettingsEditor::DeleteBehavior { cursor } => render_delete_behavior(frame, area, *cursor),
+        SettingsEditor::SizeFormat { cursor } => render_size_format(frame, area, *cursor),
         SettingsEditor::Color {
             key,
             cursor,
@@ -259,12 +260,35 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &App, editor: &SettingsEdit
 }
 
 fn render_delete_behavior(frame: &mut Frame, area: Rect, cursor: usize) {
+    render_choice_list(
+        frame,
+        area,
+        " delete_behavior",
+        &["trash", "permanent"],
+        cursor,
+    );
+}
+
+fn render_size_format(frame: &mut Frame, area: Rect, cursor: usize) {
+    render_choice_list(
+        frame,
+        area,
+        " size_format",
+        &["bytes", "bytes_grouped", "human"],
+        cursor,
+    );
+}
+
+/// The generic n-way select both enum editors above render through: a
+/// title, one highlighted row per choice, and the shared footer hint.
+fn render_choice_list(frame: &mut Frame, area: Rect, title: &str, choices: &[&str], cursor: usize) {
     let rows = frame_rows(frame, area);
-    render_title(frame, rows[0], " delete_behavior");
-    let items = vec![
-        list_item(" trash".to_string(), cursor == 0),
-        list_item(" permanent".to_string(), cursor == 1),
-    ];
+    render_title(frame, rows[0], title);
+    let items: Vec<ListItem> = choices
+        .iter()
+        .enumerate()
+        .map(|(i, choice)| list_item(format!(" {choice}"), i == cursor))
+        .collect();
     frame.render_widget(List::new(items), rows[1]);
     render_footer(frame, rows[2], " Enter:select  Esc:cancel");
 }

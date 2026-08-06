@@ -6,6 +6,7 @@
 pub mod archive;
 pub mod copy_move;
 pub mod delete;
+pub mod dir_size;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,6 +34,16 @@ pub enum TaskEvent {
     Log {
         id: TaskId,
         line: String,
+    },
+    /// One directory's recursive size, from a `calc_dir_size` worker
+    /// (`dir_size.rs`) — sent per directory as each finishes, so results
+    /// land on screen incrementally. Structured (rather than stuffed into
+    /// `Finished`'s summary string) because the receiver needs the actual
+    /// `(path, bytes)` to stamp onto the pane's entry list.
+    DirSize {
+        id: TaskId,
+        path: std::path::PathBuf,
+        bytes: u64,
     },
     Finished {
         id: TaskId,
@@ -137,6 +148,9 @@ impl TaskManager {
                 None
             }
             TaskEvent::Log { .. } => None,
+            // Routed by `App::handle_task_event` onto the pane it belongs
+            // to; nothing to update in `running` and nothing to log here.
+            TaskEvent::DirSize { .. } => None,
             TaskEvent::Finished { id, result } => {
                 let desc = self
                     .running

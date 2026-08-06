@@ -93,27 +93,30 @@ pub fn find_collisions(sources: &[PathBuf], dest_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Worker entry point for a copy task; matches the `TaskManager::spawn`
-/// closure signature.
+/// closure signature. `pairs` are exact `(src, dest)` paths — the caller
+/// (main thread) decides every destination up front, which is what lets
+/// the collision dialog's "Rename" answer transfer under a different
+/// name. `dest_dir` is only used to label the completion summary.
 pub fn run_copy(
     id: TaskId,
     tx: Sender<TaskEvent>,
     cancel: Arc<AtomicBool>,
-    sources: Vec<PathBuf>,
+    pairs: Vec<(PathBuf, PathBuf)>,
     dest_dir: PathBuf,
 ) {
-    run_transfer(id, tx, cancel, sources, dest_dir, TransferMode::Copy);
+    run_transfer(id, tx, cancel, pairs, dest_dir, TransferMode::Copy);
 }
 
-/// Worker entry point for a move task; matches the `TaskManager::spawn`
-/// closure signature.
+/// Worker entry point for a move task; see `run_copy` for the pair
+/// semantics.
 pub fn run_move(
     id: TaskId,
     tx: Sender<TaskEvent>,
     cancel: Arc<AtomicBool>,
-    sources: Vec<PathBuf>,
+    pairs: Vec<(PathBuf, PathBuf)>,
     dest_dir: PathBuf,
 ) {
-    run_transfer(id, tx, cancel, sources, dest_dir, TransferMode::Move);
+    run_transfer(id, tx, cancel, pairs, dest_dir, TransferMode::Move);
 }
 
 /// Worker entry point for `duplicate` (`c`): copies `source` to an exact
@@ -155,11 +158,11 @@ fn run_transfer(
     id: TaskId,
     tx: Sender<TaskEvent>,
     cancel: Arc<AtomicBool>,
-    sources: Vec<PathBuf>,
+    pairs: Vec<(PathBuf, PathBuf)>,
     dest_dir: PathBuf,
     mode: TransferMode,
 ) {
-    let sizes: Vec<u64> = sources.iter().map(|s| path_size(s)).collect();
+    let sizes: Vec<u64> = pairs.iter().map(|(s, _)| path_size(s)).collect();
     let total: u64 = sizes.iter().sum();
     let mut throttle = Throttle::new(PROGRESS_MIN_INTERVAL);
     let mut ctx = TransferCtx {
@@ -173,26 +176,15 @@ fn run_transfer(
     };
     let mut failures = 0usize;
 
-    for (src, size) in sources.iter().zip(sizes.iter()) {
+    for ((src, dest), size) in pairs.iter().zip(sizes.iter()) {
         if ctx.is_cancelled() {
             finish_cancelled(&tx, id);
             return;
         }
 
-        let Some(name) = src.file_name() else {
-            send_log(
-                &tx,
-                id,
-                format!("{}: has no file name, skipped", src.display()),
-            );
-            failures += 1;
-            continue;
-        };
-        let dest = dest_dir.join(name);
-
         let outcome = match mode {
-            TransferMode::Copy => copy_one(&mut ctx, src, &dest),
-            TransferMode::Move => move_one(&mut ctx, src, &dest, *size),
+            TransferMode::Copy => copy_one(&mut ctx, src, dest),
+            TransferMode::Move => move_one(&mut ctx, src, dest, *size),
         };
 
         match outcome {
@@ -212,7 +204,7 @@ fn run_transfer(
         TransferMode::Copy => "copied",
         TransferMode::Move => "moved",
     };
-    let succeeded = sources.len() - failures;
+    let succeeded = pairs.len() - failures;
     let result = if failures == 0 {
         Ok(format!(
             "{succeeded} item(s) {verb} to {}",
@@ -221,7 +213,7 @@ fn run_transfer(
     } else {
         Err(format!(
             "{succeeded}/{} {verb}, {failures} failed (see log)",
-            sources.len()
+            pairs.len()
         ))
     };
     let _ = tx.send(TaskEvent::Finished { id, result });
@@ -421,6 +413,19 @@ mod tests {
         rx.try_iter().collect()
     }
 
+    /// The "copy INTO a directory, keeping each source's own name"
+    /// pairing every pre-pair-API test used implicitly — the real app
+    /// builds these in `App::begin_transfer`/the collision dialog now.
+    fn into_pairs(sources: Vec<PathBuf>, dest_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+        sources
+            .into_iter()
+            .map(|src| {
+                let dest = dest_dir.join(src.file_name().unwrap());
+                (src, dest)
+            })
+            .collect()
+    }
+
     #[test]
     fn find_collisions_reports_only_existing_destinations() {
         let src_dir = tempfile::tempdir().unwrap();
@@ -448,7 +453,13 @@ mod tests {
         let id = TaskId::next();
         let sources = vec![src_dir.path().join("a.txt"), src_dir.path().join("b.txt")];
 
-        run_copy(id, tx, cancel, sources, dest_dir.path().to_path_buf());
+        run_copy(
+            id,
+            tx,
+            cancel,
+            into_pairs(sources, dest_dir.path()),
+            dest_dir.path().to_path_buf(),
+        );
 
         let events = drain(&rx);
         let mut last_done = 0u64;
@@ -469,6 +480,38 @@ mod tests {
     }
 
     #[test]
+    fn run_copy_honors_an_exact_renamed_destination() {
+        // The pair API's whole point: the collision dialog's Rename
+        // answer transfers under a different name than the source's.
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        fs::write(src_dir.path().join("a.txt"), b"payload").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let id = TaskId::next();
+        run_copy(
+            id,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            vec![(
+                src_dir.path().join("a.txt"),
+                dest_dir.path().join("renamed.txt"),
+            )],
+            dest_dir.path().to_path_buf(),
+        );
+
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert_eq!(
+            fs::read(dest_dir.path().join("renamed.txt")).unwrap(),
+            b"payload"
+        );
+        assert!(!dest_dir.path().join("a.txt").exists());
+    }
+
+    #[test]
     fn run_move_relocates_and_removes_source() {
         let src_dir = tempfile::tempdir().unwrap();
         let dest_dir = tempfile::tempdir().unwrap();
@@ -481,7 +524,7 @@ mod tests {
             id,
             tx,
             cancel,
-            vec![src_dir.path().join("a.txt")],
+            into_pairs(vec![src_dir.path().join("a.txt")], dest_dir.path()),
             dest_dir.path().to_path_buf(),
         );
 
@@ -507,7 +550,7 @@ mod tests {
             id,
             tx,
             cancel,
-            vec![src_dir.path().join("a.txt")],
+            into_pairs(vec![src_dir.path().join("a.txt")], dest_dir.path()),
             dest_dir.path().to_path_buf(),
         );
 
@@ -536,7 +579,7 @@ mod tests {
             id,
             tx,
             cancel,
-            vec![src_dir.path().join("a.txt"), missing],
+            into_pairs(vec![src_dir.path().join("a.txt"), missing], dest_dir.path()),
             dest_dir.path().to_path_buf(),
         );
 
@@ -605,7 +648,7 @@ mod tests {
             id,
             tx,
             cancel,
-            vec![src_dir.path().join("nested")],
+            into_pairs(vec![src_dir.path().join("nested")], dest_dir.path()),
             dest_dir.path().to_path_buf(),
         );
 
@@ -636,7 +679,7 @@ mod tests {
             id,
             tx,
             cancel,
-            vec![src_dir.path().join("big.bin")],
+            into_pairs(vec![src_dir.path().join("big.bin")], dest_dir.path()),
             dest_dir.path().to_path_buf(),
         );
 
@@ -677,7 +720,7 @@ mod tests {
             id,
             tx,
             cancel,
-            vec![small, large],
+            into_pairs(vec![small, large], dest_dir.path()),
             dest_dir.path().to_path_buf(),
         );
         assert!(matches!(

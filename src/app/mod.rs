@@ -23,12 +23,13 @@ use crate::filter::FilterSpec;
 use crate::help::HelpLine;
 use crate::keymap::{KeyCombo, Keymap};
 use crate::mode::{
-    LineEditor, Mode, PendingOp, PromptKind, SearchDirection, SelectKind, SettingsEditor,
-    SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch,
+    COLLISION_CHOICES, CollisionInfo, CollisionState, LineEditor, Mode, PasswordPending, PendingOp,
+    PromptKind, SearchDirection, SelectKind, SettingsEditor, SettingsScreen, TextField,
+    TransferKind, ViewMode, ViewerSearch,
 };
 use crate::ops;
-use crate::pane::{CursorAnchor, PAGE_SIZE, Pane};
-use crate::persist::{Bookmarks, History, Side};
+use crate::pane::{CursorAnchor, PAGE_SIZE, Pane, SortKey};
+use crate::persist::{Bookmarks, History, Side, SortPrefs};
 use crate::search;
 use crate::settings::{self, Category};
 use crate::tasks::delete as delete_task;
@@ -195,6 +196,10 @@ pub struct App {
     /// Bookmarked directories; same load/save-is-the-caller's-job story as
     /// `history`.
     pub bookmarks: Bookmarks,
+    /// Per-directory remembered sort choices (`t`/`s` record, every cwd
+    /// change restores); same load/save-is-the-caller's-job story as
+    /// `history` — `main.rs` loads it after `App::new` and saves on quit.
+    pub sort_prefs: SortPrefs,
     /// Every side-channel output an event might queue for `main.rs`'s loop
     /// to carry out — see `Outbox`'s own doc comment. Drained once per
     /// iteration by `take_outbox`, rather than four separately-polled
@@ -224,6 +229,12 @@ pub struct App {
     /// `handle_task_event` the moment *that exact* task's `Finished`
     /// event arrives.
     pending_delete_anchor: HashMap<TaskId, (ActivePane, Option<CursorAnchor>)>,
+    /// Which pane a `calc_dir_size` task's incoming `TaskEvent::DirSize`
+    /// results should be applied to, keyed by that task's `TaskId` — the
+    /// same "keyed by the task's own id so an unrelated task can never
+    /// misapply it" pattern as `pending_delete_anchor`. Consumed (removed)
+    /// when that task's `Finished` arrives.
+    pending_dir_size: HashMap<TaskId, ActivePane>,
     /// Overrides `config::config_path()` for the settings screen's own
     /// `toml_edit` writes and its post-write `reload_config_from` call —
     /// `None` (the real-app default) means "use the real, XDG-resolved
@@ -414,8 +425,13 @@ impl App {
         let keymap = build_keymap(&config)?;
         let (tx, task_rx) = mpsc::channel();
 
+        let mut left = Pane::new_empty(left);
+        let mut right = Pane::new_empty(right);
+        left.set_natural_sort(config.natural_sort);
+        right.set_natural_sort(config.natural_sort);
+
         Ok(Self {
-            panes: [Pane::new_empty(left), Pane::new_empty(right)],
+            panes: [left, right],
             active: ActivePane::Left,
             should_quit: false,
             mode: Mode::Normal,
@@ -426,11 +442,13 @@ impl App {
             task_rx,
             history: History::default(),
             bookmarks: Bookmarks::default(),
+            sort_prefs: SortPrefs::default(),
             outbox: Outbox::default(),
             pane_layout: [None, None],
             drag: None,
             last_click: None,
             pending_delete_anchor: HashMap::new(),
+            pending_dir_size: HashMap::new(),
             settings_config_path: None,
             log_view_width: DEFAULT_LOG_VIEW_WIDTH,
             log_generation: 0,
@@ -599,12 +617,23 @@ impl App {
         if let TaskEvent::Log { line, .. } = &event {
             self.log_info(line.clone());
         }
+        // A dir-size result is routed straight onto the pane its task was
+        // started from (`pending_dir_size`, keyed by TaskId) —
+        // `Pane::set_dir_size` itself drops it if that pane has since
+        // moved to a different directory.
+        if let TaskEvent::DirSize { id, path, bytes } = &event {
+            if let Some(&target) = self.pending_dir_size.get(id) {
+                self.panes[target.index()].set_dir_size(path.clone(), *bytes);
+            }
+            return;
+        }
         let finished = matches!(event, TaskEvent::Finished { .. });
         // Only ever `Some` when `event` is this *exact* delete task's own
         // `Finished` — an unrelated task finishing first (or a second,
         // concurrent delete) can never pick up an anchor that isn't
         // theirs, since each is keyed by its own `TaskId`.
         let delete_anchor = if let TaskEvent::Finished { id, .. } = &event {
+            self.pending_dir_size.remove(id);
             self.pending_delete_anchor.remove(id)
         } else {
             None
@@ -654,11 +683,13 @@ impl App {
                 Mode::Select { .. } => self.handle_select_key(code),
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
+                Mode::TransferCollision { .. } => self.handle_transfer_collision_key(code),
                 Mode::Viewer { .. } => self.handle_viewer_key(code, modifiers),
                 Mode::Help { .. } => self.handle_help_key(code, modifiers),
                 Mode::Log { .. } => self.handle_log_view_key(code, modifiers),
                 Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
                 Mode::FileSearch { .. } => self.handle_file_search_key(code, modifiers),
+                Mode::SortSelect { .. } => self.handle_sort_select_key(code),
                 Mode::Settings { .. } => self.handle_settings_key(code, modifiers),
             },
             AppEvent::Mouse(mouse_event) => self.handle_mouse(mouse_event),
@@ -678,11 +709,11 @@ impl App {
     pub fn dispatch(&mut self, action: Action) {
         let result: anyhow::Result<()> = match action {
             Action::CursorUp => {
-                self.active_pane_mut().move_cursor(-1);
+                self.move_cursor_step(-1);
                 Ok(())
             }
             Action::CursorDown => {
-                self.active_pane_mut().move_cursor(1);
+                self.move_cursor_step(1);
                 Ok(())
             }
             Action::PageUp => {
@@ -723,6 +754,19 @@ impl App {
             }
             Action::CycleSort => {
                 self.active_pane_mut().cycle_sort();
+                self.record_sort_pref();
+                Ok(())
+            }
+            Action::SortDialog => {
+                self.begin_sort_dialog();
+                Ok(())
+            }
+            Action::ToggleSizeFormat => {
+                self.toggle_size_format();
+                Ok(())
+            }
+            Action::CalcDirSize => {
+                self.begin_calc_dir_size();
                 Ok(())
             }
             Action::ToggleHidden => {
@@ -747,6 +791,10 @@ impl App {
             }
             Action::Rename => {
                 self.begin_rename();
+                Ok(())
+            }
+            Action::RenameMarks => {
+                self.begin_rename_marks();
                 Ok(())
             }
             Action::Mkdir => {
@@ -919,6 +967,123 @@ impl App {
         self.log_info(format!("cancelling {n} task(s)"));
     }
 
+    /// Single-step cursor movement (`CursorUp`/`CursorDown`) — the one
+    /// place `config.cursor_wrap` is consulted. Page/Home/End/wheel
+    /// movement always clamps (see `Pane::move_cursor_wrapping`).
+    fn move_cursor_step(&mut self, delta: isize) {
+        if self.config.cursor_wrap {
+            self.active_pane_mut().move_cursor_wrapping(delta);
+        } else {
+            self.active_pane_mut().move_cursor(delta);
+        }
+    }
+
+    /// The fixed (key, direction) rows the sort dialog shows, in cursor
+    /// order. Kept as a const so the key handler and the renderer index
+    /// the exact same list.
+    pub const SORT_DIALOG_CHOICES: [(SortKey, bool); 8] = [
+        (SortKey::Name, true),
+        (SortKey::Name, false),
+        (SortKey::Size, true),
+        (SortKey::Size, false),
+        (SortKey::MTime, true),
+        (SortKey::MTime, false),
+        (SortKey::Ext, true),
+        (SortKey::Ext, false),
+    ];
+
+    /// `t`: opens the sort dialog with the cursor preselecting the active
+    /// pane's current (key, direction).
+    fn begin_sort_dialog(&mut self) {
+        let pane = self.active_pane();
+        let current = (pane.sort, pane.ascending);
+        let cursor = Self::SORT_DIALOG_CHOICES
+            .iter()
+            .position(|&c| c == current)
+            .unwrap_or(0);
+        self.mode = Mode::SortSelect { cursor };
+    }
+
+    fn handle_sort_select_key(&mut self, code: KeyCode) {
+        let Mode::SortSelect { cursor } = &mut self.mode else {
+            return;
+        };
+        let len = Self::SORT_DIALOG_CHOICES.len();
+        match code {
+            KeyCode::Up => *cursor = cursor.checked_sub(1).unwrap_or(len - 1),
+            KeyCode::Down => *cursor = (*cursor + 1) % len,
+            KeyCode::Enter => {
+                let (key, ascending) = Self::SORT_DIALOG_CHOICES[*cursor];
+                self.mode = Mode::Normal;
+                self.active_pane_mut().set_sort(key, ascending);
+                self.record_sort_pref();
+            }
+            KeyCode::Esc => self.mode = Mode::Normal,
+            _ => {}
+        }
+    }
+
+    /// Records the active pane's current sort state as the preference for
+    /// its cwd — called after any explicit sort change (`s`'s cycle, the
+    /// `t` dialog's Enter). Skipped while virtual: `cwd` still points at
+    /// the real directory *containing* the archive, so recording would
+    /// mis-attribute an archive-internal sort change to it.
+    fn record_sort_pref(&mut self) {
+        if self.active_pane().is_virtual() {
+            return;
+        }
+        let pane = self.active_pane();
+        let (cwd, key, ascending) = (pane.cwd.clone(), pane.sort, pane.ascending);
+        self.sort_prefs.record(cwd, key.as_str(), ascending);
+    }
+
+    /// Restores the active pane's remembered sort for its (new) cwd, if
+    /// one was recorded; otherwise the pane keeps whatever sort it already
+    /// had (the pre-existing "sort follows the pane" behavior).
+    fn apply_sort_pref_to_active(&mut self) {
+        let cwd = self.active_pane().cwd.clone();
+        if let Some((key_str, ascending)) = self.sort_prefs.get(&cwd)
+            && let Some(key) = SortKey::from_str(key_str)
+        {
+            self.active_pane_mut().set_sort(key, ascending);
+        }
+    }
+
+    /// Applies loaded sort preferences to both panes' startup directories —
+    /// called by `main.rs` once, right after it overwrites `sort_prefs`
+    /// with the persisted file's contents (`App` itself never touches
+    /// disk, same story as `history`).
+    pub fn apply_startup_sort_prefs(&mut self) {
+        for pane in &mut self.panes {
+            if let Some((key_str, ascending)) = self.sort_prefs.get(&pane.cwd)
+                && let Some(key) = SortKey::from_str(key_str)
+            {
+                pane.set_sort(key, ascending);
+            }
+        }
+    }
+
+    /// `v`: cycles the size column format, persists the choice to the
+    /// config file (best-effort — a write failure is logged and the
+    /// in-memory setting still applies), and logs the new state.
+    fn toggle_size_format(&mut self) {
+        let next = self.config.size_format.next();
+        self.config.size_format = next;
+        self.log_info(format!("size format: {}", next.as_str()));
+        let path = self
+            .settings_config_path
+            .clone()
+            .or_else(config::config_path);
+        match path {
+            Some(path) => {
+                if let Err(err) = settings::save_size_format(&path, next) {
+                    self.log_error(format!("failed to save size_format: {err}"));
+                }
+            }
+            None => self.log_error("failed to save size_format: no config directory available"),
+        }
+    }
+
     /// Runs `f` against the active pane and, if its `cwd` actually
     /// changed, records the new directory in `history`. The shared
     /// entry point for every cwd-changing action (`Enter`, `Parent`,
@@ -948,6 +1113,7 @@ impl App {
             let pane = self.active_pane_mut();
             pane.back.push(before.to_path_buf());
             pane.forward.clear();
+            self.apply_sort_pref_to_active();
         }
     }
 
@@ -963,7 +1129,12 @@ impl App {
         };
         let current = self.active_pane().cwd.clone();
         match self.active_pane_mut().jump_to(target.clone()) {
-            Ok(()) => self.active_pane_mut().forward.push(current),
+            Ok(()) => {
+                self.active_pane_mut().forward.push(current);
+                // Bypasses `navigate`/`record_history_if_changed`, so the
+                // per-directory sort restore has to happen here too.
+                self.apply_sort_pref_to_active();
+            }
             Err(err) => {
                 // jump_to already reverted cwd on failure; put the target
                 // back so a retry (or S-left again) isn't silently lossy.
@@ -981,7 +1152,11 @@ impl App {
         };
         let current = self.active_pane().cwd.clone();
         match self.active_pane_mut().jump_to(target.clone()) {
-            Ok(()) => self.active_pane_mut().back.push(current),
+            Ok(()) => {
+                self.active_pane_mut().back.push(current);
+                // Same bypass as `begin_history_back` — restore here.
+                self.apply_sort_pref_to_active();
+            }
             Err(err) => {
                 self.active_pane_mut().forward.push(target);
                 self.log_error(err.to_string());
@@ -1370,6 +1545,14 @@ impl App {
             Ok(new_keymap) => {
                 self.config = new_config;
                 self.keymap = new_keymap;
+                // Panes hold their own copy of `natural_sort` (they never
+                // read config) — push the (possibly changed) value onto
+                // both, invalidating their sort caches only on an actual
+                // change (see `Pane::set_natural_sort`).
+                let natural = self.config.natural_sort;
+                for pane in &mut self.panes {
+                    pane.set_natural_sort(natural);
+                }
                 self.log_info("config reloaded");
             }
             Err(err) => self.log_error(format!("config reload failed: {err}")),
@@ -1833,6 +2016,27 @@ impl App {
     fn handle_prompt_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match code {
             KeyCode::Esc => {
+                // A rename_marks sequence cancels *as a whole*: the
+                // renames already committed stand (each was applied the
+                // moment its prompt was confirmed), the rest are dropped,
+                // and the log says how far it got.
+                match &self.mode {
+                    Mode::Prompt {
+                        kind: PromptKind::RenameMany { done, total, .. },
+                        ..
+                    } => {
+                        let (done, total) = (*done, *total);
+                        self.log_info(format!("rename marks cancelled ({done}/{total} renamed)"));
+                    }
+                    // Esc in the collision-rename prompt cancels the
+                    // whole transfer, exactly like Esc in the dialog it
+                    // came from — not just this one entry.
+                    Mode::Prompt {
+                        kind: PromptKind::CollisionRename { .. },
+                        ..
+                    } => self.log_info("transfer cancelled"),
+                    _ => {}
+                }
                 self.mode = Mode::Normal;
                 return;
             }
@@ -1883,6 +2087,158 @@ impl App {
             PromptKind::ZipName { targets } => self.commit_zip_name(targets, value),
             PromptKind::Command => self.commit_command(value),
             PromptKind::Duplicate { source } => self.commit_duplicate(source, value),
+            PromptKind::RenameMany {
+                dir,
+                current,
+                queue,
+                done,
+                total,
+            } => self.commit_rename_many(dir, current, queue, done, total, value),
+            PromptKind::CollisionRename { state } => self.commit_collision_rename(*state, value),
+            PromptKind::ArchivePassword { pending } => self.commit_archive_password(pending, value),
+        }
+    }
+
+    /// A typed archive password: verified on the main thread (one-byte
+    /// decrypt of the first encrypted entry — see
+    /// `virtual_dir::verify_zip_password`), then the pending operation
+    /// proceeds with it. A wrong password logs and re-opens the same
+    /// prompt; for the Virtual-Directory-scoped operations (View/Extract)
+    /// a verified password is cached on the `VirtualDir` so the rest of
+    /// the session doesn't re-ask.
+    fn commit_archive_password(&mut self, pending: PasswordPending, password: String) {
+        let archive_path = match &pending {
+            PasswordPending::View { archive_path, .. }
+            | PasswordPending::Extract { archive_path, .. }
+            | PasswordPending::Unzip { archive_path, .. } => archive_path.clone(),
+        };
+        if let Err(err) = virtual_dir::verify_zip_password(&archive_path, &password) {
+            let is_wrong = err
+                .downcast_ref::<virtual_dir::ZipPasswordError>()
+                .is_some();
+            self.log_error(err.to_string());
+            if is_wrong {
+                // Re-open the prompt for another try; any other failure
+                // (unreadable archive, say) stays cancelled.
+                self.mode = Mode::Prompt {
+                    kind: PromptKind::ArchivePassword { pending },
+                    input: LineEditor::new(),
+                };
+            }
+            return;
+        }
+
+        match pending {
+            PasswordPending::View {
+                archive_path,
+                inner_path,
+            } => {
+                if let Some(vd) = &self.active_pane().virtual_dir {
+                    vd.cache_password(password.clone());
+                }
+                match virtual_dir::extract_single_to_memory(
+                    &archive_path,
+                    &inner_path,
+                    viewer::SIZE_CAP,
+                    Some(&password),
+                ) {
+                    Ok((bytes, truncated)) => {
+                        self.show_virtual_bytes(&archive_path, &inner_path, bytes, truncated);
+                    }
+                    Err(err) => self.log_error(format!("{}: {err}", inner_path.display())),
+                }
+            }
+            PasswordPending::Extract {
+                archive_path,
+                inner_targets,
+                dest_dir,
+            } => {
+                if let Some(vd) = &self.active_pane().virtual_dir {
+                    vd.cache_password(password.clone());
+                }
+                self.continue_extract(archive_path, inner_targets, dest_dir, Some(password));
+            }
+            PasswordPending::Unzip {
+                archive_path,
+                dest_dir,
+            } => {
+                // No VirtualDir session here (`u` runs from a real pane) —
+                // nothing to cache the password on; it just rides the op.
+                self.continue_unzip(archive_path, dest_dir, Some(password));
+            }
+        }
+    }
+
+    /// The collision dialog's "Rename" answer, committed: validates the
+    /// typed name and resolves the current conflict to `dest_dir/<name>`.
+    /// A name that itself collides (or is empty/contains a path
+    /// separator) re-opens the same conflict's dialog with the problem
+    /// logged — never silently overwriting through the rename path.
+    fn commit_collision_rename(&mut self, mut state: CollisionState, value: String) {
+        let invalid =
+            value.is_empty() || value.contains(std::path::MAIN_SEPARATOR) || value.contains('/');
+        if invalid {
+            self.log_error(format!("invalid name: {value:?}"));
+            self.mode = Mode::TransferCollision { state };
+            return;
+        }
+        let dest = state.dest_dir.join(&value);
+        if dest.exists() {
+            self.log_error(format!("{value}: already exists in the destination too"));
+            self.mode = Mode::TransferCollision { state };
+            return;
+        }
+        state.resolved.push((state.current.src.clone(), dest));
+        self.advance_collision(state);
+    }
+
+    /// One confirmed step of `rename_marks`: applies (or skips) this
+    /// entry's rename, then either re-enters the prompt with the next
+    /// queued name or logs the final summary. A failed rename is logged
+    /// and the sequence *continues* — one locked file shouldn't abort the
+    /// remaining nine renames the user already planned.
+    fn commit_rename_many(
+        &mut self,
+        dir: PathBuf,
+        current: String,
+        mut queue: std::collections::VecDeque<String>,
+        done: usize,
+        total: usize,
+        value: String,
+    ) {
+        let mut done = done;
+        if value.is_empty() || value == current {
+            self.log_info(format!("skipped: {current}"));
+        } else {
+            match ops::rename(&dir, &current, &value) {
+                Ok(()) => {
+                    self.log_info(format!("renamed {current} -> {value}"));
+                    done += 1;
+                }
+                Err(err) => self.log_error(err.to_string()),
+            }
+        }
+
+        match queue.pop_front() {
+            Some(next) => {
+                self.mode = Mode::Prompt {
+                    input: LineEditor::from_str(&next),
+                    kind: PromptKind::RenameMany {
+                        dir,
+                        current: next,
+                        queue,
+                        done,
+                        total,
+                    },
+                };
+                // Reload behind the prompt so the listing tracks each
+                // rename as it happens rather than all at the end.
+                self.reload_both();
+            }
+            None => {
+                self.log_info(format!("rename marks finished ({done}/{total} renamed)"));
+                self.reload_both();
+            }
         }
     }
 

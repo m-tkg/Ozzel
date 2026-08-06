@@ -47,12 +47,18 @@ fn main() -> anyhow::Result<()> {
     // gate terminal startup on it the way a malformed config does.
     let (history, history_warning) = persist::load_history();
     let (bookmarks, bookmarks_warning) = persist::load_bookmarks();
+    let (sort_prefs, sort_prefs_warning) = persist::load_sort_prefs();
     app.history = history;
     app.bookmarks = bookmarks;
+    app.sort_prefs = sort_prefs;
+    app.apply_startup_sort_prefs();
     if let Some(msg) = history_warning {
         app.log_error(msg);
     }
     if let Some(msg) = bookmarks_warning {
+        app.log_error(msg);
+    }
+    if let Some(msg) = sort_prefs_warning {
         app.log_error(msg);
     }
 
@@ -66,6 +72,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Err(err) = persist::save_bookmarks(&app.bookmarks) {
         eprintln!("ozzel: failed to save bookmarks: {err}");
+    }
+    if let Err(err) = persist::save_sort_prefs(&app.sort_prefs) {
+        eprintln!("ozzel: failed to save sort prefs: {err}");
     }
 
     // `guard` (and with it, the terminal) is still alive here — writing the

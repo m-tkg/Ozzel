@@ -6,5 +6,6 @@ mod mouse;
 mod navigation;
 mod pager;
 mod settings;
+mod sorting;
 mod startup;
 mod virtual_dir;
