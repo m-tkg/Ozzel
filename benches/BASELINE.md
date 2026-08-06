@@ -1,149 +1,149 @@
-# ベンチマーク ベースライン
+# Benchmark baseline
 
-このファイルはリファクタリング期間中の before/after 追跡用。数値はローカルマシン依存（下記の実行環境でしか意味を持たない絶対値ではなく、同一環境での相対比較に使うこと）。再計測する場合は `cargo bench` を実行し、`Benchmarking <name>` の直後に出る `time: [下限 中央値 上限]` の中央値をこの表に転記する。
+This file is for before/after tracking during the refactoring period. The numbers are dependent on the local machine (they are not absolute values meaningful outside the execution environment described below — use them only for relative comparison within the same environment). To remeasure, run `cargo bench` and transcribe the median from the `time: [lower median upper]` line that appears right after `Benchmarking <name>` into this table.
 
-## 実行環境
+## Execution environment
 
-- 日付: 2026-08-05
-- マシン: Apple M3 Pro (arm64, macOS Darwin 27.0.0)
+- Date: 2026-08-05
+- Machine: Apple M3 Pro (arm64, macOS Darwin 27.0.0)
 - rustc: 1.94.0 (4a4ef493e 2026-03-02, Homebrew)
-- ビルドプロファイル: `cargo bench`（release + `lto = "thin"` + `codegen-units = 1"`）
+- Build profile: `cargo bench` (release + `lto = "thin"` + `codegen-units = 1"`)
 - criterion 0.8.2
 
-## 結果（Phase 0 ベースライン、中央値）
+## Results (Phase 0 baseline, median)
 
-| ベンチ | 対象 | 中央値 |
+| Bench | Target | Median |
 |---|---|---|
-| `pane_visible_entries/1000_files/Name` | `Pane::new` + `visible_entries()`、1,000ファイル、ソートキー Name | 2.5231 ms |
-| `pane_visible_entries/1000_files/Ext` | 同上、ソートキー Ext | 3.0284 ms |
-| `pane_visible_entries/10000_files/Name` | 同上、10,000ファイル、ソートキー Name | 33.305 ms |
-| `pane_visible_entries/10000_files/Ext` | 同上、10,000ファイル、ソートキー Ext | 40.049 ms |
-| `wrap_log_lines_500_lines_width_80` | `ui::log_view::wrap_log_lines`、合成500行（タイムスタンプ+日本語含む可変長メッセージ）、幅80 | 650.70 µs |
-| `archive_listing/zip_100_entries` | `virtual_dir::read_archive_dir_entries`、zip・100エントリ（ネスト付き） | 274.90 µs |
-| `archive_listing/tar_gz_100_entries` | 同上、tar.gz・100エントリ（ネスト付き） | 101.67 µs |
+| `pane_visible_entries/1000_files/Name` | `Pane::new` + `visible_entries()`, 1,000 files, sort key Name | 2.5231 ms |
+| `pane_visible_entries/1000_files/Ext` | Same as above, sort key Ext | 3.0284 ms |
+| `pane_visible_entries/10000_files/Name` | Same as above, 10,000 files, sort key Name | 33.305 ms |
+| `pane_visible_entries/10000_files/Ext` | Same as above, 10,000 files, sort key Ext | 40.049 ms |
+| `wrap_log_lines_500_lines_width_80` | `ui::log_view::wrap_log_lines`, 500 synthetic lines (variable-length messages including timestamps and Japanese text), width 80 | 650.70 µs |
+| `archive_listing/zip_100_entries` | `virtual_dir::read_archive_dir_entries`, zip, 100 entries (with nesting) | 274.90 µs |
+| `archive_listing/tar_gz_100_entries` | Same as above, tar.gz, 100 entries (with nesting) | 101.67 µs |
 
-各ベンチの生ログ（外れ値情報含む）は `cargo bench` の標準出力を参照。criterion は加えて `target/criterion/` 以下にHTMLレポートと生データ（`estimates.json` 等）を保存するので、次回以降の `cargo bench` はそれと自動比較して "Performance has improved/regressed" を出力する。
+For each bench's raw log (including outlier info), see the `cargo bench` standard output. criterion also saves HTML reports and raw data (`estimates.json`, etc.) under `target/criterion/`, so subsequent `cargo bench` runs will automatically compare against it and print "Performance has improved/regressed".
 
-## 結果（Phase 1 後、中央値）
+## Results (after Phase 1, median)
 
-Phase 1 で入れた変更: `FsEntry::name_lower`/`ext_lower` の事前計算（`compare_entries`/`FilterSpec::matches`/`jump_matches` の per-call alloc を除去）、`Pane::visible_entries` のソート済みインデックスキャッシュ（`Rc<Vec<usize>>`、`invalidate_visible_cache` で明示的に無効化）、`Pane::selected_entry` 統合アクセサ、`main.rs` の dirty flag（`App::needs_redraw`）+ アイドル時ポーリング間隔延長（50ms → 250ms）。実行環境は上記「実行環境」節と同一マシン・同一プロファイル（rustc 1.94.0、criterion 0.8.2）。
+Changes made in Phase 1: precomputing `FsEntry::name_lower`/`ext_lower` (eliminating per-call allocations in `compare_entries`/`FilterSpec::matches`/`jump_matches`), a sorted-index cache for `Pane::visible_entries` (`Rc<Vec<usize>>`, explicitly invalidated via `invalidate_visible_cache`), a consolidated `Pane::selected_entry` accessor, and a dirty flag in `main.rs` (`App::needs_redraw`) + a longer idle polling interval (50ms → 250ms). The execution environment is the same machine and profile as in the "Execution environment" section above (rustc 1.94.0, criterion 0.8.2).
 
-`pane_visible_entries/*` は Phase 0 と同じ計測方法（毎イテレーション `Pane::new` からやり直す、常にキャッシュミス経路）。新規追加した `pane_visible_entries_cached/*` は `Pane` を `b.iter` の外で一度だけ作り、以降は常にキャッシュヒット経路を計測したもの — 実際のアプリでカーソル移動・描画のたびに繰り返し呼ばれるのはこちら側に近い。
+`pane_visible_entries/*` uses the same measurement method as Phase 0 (starting over from `Pane::new` every iteration, always the cache-miss path). The newly added `pane_visible_entries_cached/*` creates the `Pane` once outside `b.iter` and measures only the cache-hit path thereafter — this is closer to what actually happens repeatedly in the real app on cursor movement and redraws.
 
-| ベンチ | 対象 | Phase 0 中央値 | Phase 1 後 中央値 | 変化 |
+| Bench | Target | Phase 0 median | After Phase 1 median | Change |
 |---|---|---|---|---|
-| `pane_visible_entries/1000_files/Name` | キャッシュミス（`Pane::new` 毎回）、1,000ファイル、Name | 2.5231 ms | 1.3949 ms | -44.7% |
-| `pane_visible_entries/1000_files/Ext` | 同上、Ext | 3.0284 ms | 1.4024 ms | -54.2% |
-| `pane_visible_entries/10000_files/Name` | キャッシュミス、10,000ファイル、Name | 33.305 ms | 18.454 ms | -44.4% |
-| `pane_visible_entries/10000_files/Ext` | 同上、Ext | 40.049 ms | 18.394 ms | -53.9% |
-| `pane_visible_entries_cached/1000_files/cache_hit` | キャッシュヒット、1,000ファイル（Phase 0 に対応ベンチなし） | — | 342.87 ns | 参考: ミス経路比 約 -99.98%（1/4070） |
-| `pane_visible_entries_cached/10000_files/cache_hit` | キャッシュヒット、10,000ファイル（Phase 0 に対応ベンチなし） | — | 3.2360 µs | 参考: ミス経路比 約 -99.98%（1/5700） |
-| `wrap_log_lines_500_lines_width_80` | 変更なし（比較用の対照ベンチ） | 650.70 µs | 654.94 µs | ノイズ内（+0.4%） |
-| `archive_listing/zip_100_entries` | `read_archive_dir_entries`（`FsEntry::name_lower`/`ext_lower` 計算が1エントリにつき1回増加） | 274.90 µs | 280.19 µs | +1.8%（ほぼノイズ、想定内） |
-| `archive_listing/tar_gz_100_entries` | 同上 | 101.67 µs | 100.58 µs | -1.7%（ノイズ内） |
+| `pane_visible_entries/1000_files/Name` | Cache miss (`Pane::new` every time), 1,000 files, Name | 2.5231 ms | 1.3949 ms | -44.7% |
+| `pane_visible_entries/1000_files/Ext` | Same as above, Ext | 3.0284 ms | 1.4024 ms | -54.2% |
+| `pane_visible_entries/10000_files/Name` | Cache miss, 10,000 files, Name | 33.305 ms | 18.454 ms | -44.4% |
+| `pane_visible_entries/10000_files/Ext` | Same as above, Ext | 40.049 ms | 18.394 ms | -53.9% |
+| `pane_visible_entries_cached/1000_files/cache_hit` | Cache hit, 1,000 files (no corresponding bench in Phase 0) | — | 342.87 ns | Reference: about -99.98% (1/4070) vs. the miss path |
+| `pane_visible_entries_cached/10000_files/cache_hit` | Cache hit, 10,000 files (no corresponding bench in Phase 0) | — | 3.2360 µs | Reference: about -99.98% (1/5700) vs. the miss path |
+| `wrap_log_lines_500_lines_width_80` | Unchanged (control bench for comparison) | 650.70 µs | 654.94 µs | Within noise (+0.4%) |
+| `archive_listing/zip_100_entries` | `read_archive_dir_entries` (one extra `FsEntry::name_lower`/`ext_lower` computation per entry) | 274.90 µs | 280.19 µs | +1.8% (nearly noise, as expected) |
+| `archive_listing/tar_gz_100_entries` | Same as above | 101.67 µs | 100.58 µs | -1.7% (within noise) |
 
-所見:
+Observations:
 
-- キャッシュミス経路（`pane_visible_entries/*`）は `compare_entries`/`extension_lower` の per-comparison alloc がなくなったことで Phase 0 比 約44〜54% 改善。事前計算のオーバーヘッド（`read_dir_entries` 側で1エントリにつき1回 `lower_keys` を呼ぶ）を含めてもなお大幅改善しており、ミス経路の悪化はない。
-- キャッシュヒット経路（`pane_visible_entries_cached/*`）はミス経路比で約4000〜5700倍高速 — 実アプリでの効果はここが本命（カーソル移動・毎フレーム描画・selected_entry系アクセサはほぼ常にヒット経路を通る）。
-- `archive_listing/zip_100_entries` の +1.8% は `group_children` 側で追加した `lower_keys` 呼び出し1回分のコストで、ノイズと判別しづらいレベル（tar_gz 側は逆に -1.7% で相殺方向）。ここは元々ホットパスの対象外なので許容。
-- dirty flag + ポーリング延長（main.rs の `run` ループ）は criterion ベンチの対象外（イベントループ全体の挙動）。効果は `benches/BASELINE.md` の「アイドル CPU の手動計測手順」で確認すること — 本ラウンドでは自動テスト（`cargo test`）と `cargo run --release` での手動操作確認のみ実施し、アイドル CPU の実測値はまだ追記していない。
+- The cache-miss path (`pane_visible_entries/*`) improved about 44–54% versus Phase 0 thanks to eliminating per-comparison allocations in `compare_entries`/`extension_lower`. Even including the overhead of precomputation (`read_dir_entries` calling `lower_keys` once per entry), it is still a large improvement, with no regression on the miss path.
+- The cache-hit path (`pane_visible_entries_cached/*`) is about 4000–5700x faster than the miss path — this is where the real-world impact matters most (cursor movement, per-frame rendering, and the `selected_entry`-family accessors almost always go through the hit path).
+- The +1.8% on `archive_listing/zip_100_entries` is the cost of one additional `lower_keys` call added on the `group_children` side — a level that's hard to distinguish from noise (the tar_gz side moved in the opposite direction, -1.7%, offsetting it). This is not on the hot path to begin with, so it's acceptable.
+- The dirty flag + extended polling interval (in the `run` loop in main.rs) is outside the scope of criterion benches (it concerns the overall event loop behavior). Its effect should be checked via the "Manual idle-CPU measurement procedure" section of `benches/BASELINE.md` — this round only ran automated tests (`cargo test`) and manual verification via `cargo run --release`; actual idle-CPU numbers have not yet been recorded.
 
-## 結果（Phase 2 後、中央値）
+## Results (after Phase 2, median)
 
-Phase 2 で入れた変更: ログ下部パネル（`ui::log_view::render_log_lines`）を全行 wrap → tail slice から、新設の `wrap_log_lines_tail`（末尾行から逆順に wrap し必要行数分だけで打ち切り）へ変更。`LogLine` にタイムスタンプ整形済み文字列（`formatted_timestamp`）を追加し `App::log_push` 時に一度だけ `chrono::format` する（`wrap_log_lines`/`wrap_log_lines_tail` 双方から恩恵、後者だけでなく前者＝フルログビュー/検索の経路も速くなっている）。加えて `App` に `(log_generation, width)` キーのフルログ wrap キャッシュ、`Keymap::generation`（生成時に一意 id を採番するだけ — 生成後は差し替えのみで in-place 変更されないため）キーの help/settings キーバインド行キャッシュ、typed query キーの function-list フィルタ結果キャッシュを追加。settings のカテゴリ一覧・function-list パレットは可視ウィンドウ分だけ `ListItem` を構築するよう変更（オフスクリーン分の `combos_for`/フォーマットを回避）。viewer の `slice_display_cols` は全 ASCII 行なら byte range の直接スライスに短絡（巨大な1行ファイルの横スクロール向け）。`/`/`?` 検索は `Matcher`（コンパイル済み regex）を `ViewerSearch::Active` に `Rc` で保持し、viewer/help/log 3画面とも描画毎の再コンパイルを廃止。filter 入力は生テキストが変わっていなければ `FilterSpec::parse` を再実行しない。実行環境は上記「実行環境」節と同一マシン・同一プロファイル（rustc 1.94.0、criterion 0.8.2）。
+Changes made in Phase 2: changed the log bottom panel (`ui::log_view::render_log_lines`) from wrapping all lines and then taking a tail slice, to the newly added `wrap_log_lines_tail` (wraps from the last line backwards and stops as soon as enough rows are produced). Added a pre-formatted timestamp string (`formatted_timestamp`) to `LogLine`, formatted once with `chrono::format` at `App::log_push` time (this benefits both `wrap_log_lines` and `wrap_log_lines_tail` — so not just the latter, but also the former's path, i.e. the full log view/search, gets faster too). Also added a full-log-wrap cache to `App` keyed on `(log_generation, width)`, a help/settings keybinding row cache keyed on `Keymap::generation` (an id assigned only when generated — since after generation it's only ever replaced, never mutated in place), and a function-list filter result cache keyed on the typed query. Changed the settings category list and the function-list palette to build `ListItem`s only for the visible window (avoiding `combos_for`/formatting for off-screen entries). The viewer's `slice_display_cols` now short-circuits to a direct byte-range slice when a line is all ASCII (for horizontal scrolling in huge single-line files). The `/`/`?` search now holds a `Matcher` (compiled regex) via `Rc` in `ViewerSearch::Active`, eliminating recompilation on every redraw across all three of the viewer/help/log screens. Filter input no longer re-runs `FilterSpec::parse` if the raw text hasn't changed. The execution environment is the same machine and profile as in the "Execution environment" section above (rustc 1.94.0, criterion 0.8.2).
 
-`wrap_log_lines_tail_500_lines_width_80_need_4_rows` が今回の新規ベンチ（Phase 0/1 に対応ベンチなし）— ログ下部パネルの典型ケース（500行中、直近4行相当だけ必要）を模したもの。`pane_visible_entries/*` 系は Phase 2 で一切触っていないコード（`pane.rs`）だが、この日の計測で ±5〜11% ほど揺れており（`pane_visible_entries/1000_files/Name` を単体で再計測すると逆方向に -5.4% と出た）、マシン負荷由来のノイズと判断し無視してよい。
+`wrap_log_lines_tail_500_lines_width_80_need_4_rows` is the new bench for this round (no corresponding bench in Phase 0/1) — it models the typical case for the log bottom panel (only the last 4 or so of 500 lines are actually needed). The `pane_visible_entries/*` family is code (`pane.rs`) that Phase 2 did not touch at all, but this day's measurements fluctuated by about ±5–11% (re-measuring `pane_visible_entries/1000_files/Name` alone came out -5.4% in the opposite direction) — judged to be noise from machine load and safe to ignore.
 
-| ベンチ | 対象 | Phase 1 後 中央値 | Phase 2 後 中央値 | 変化 |
+| Bench | Target | After Phase 1 median | After Phase 2 median | Change |
 |---|---|---|---|---|
-| `wrap_log_lines_500_lines_width_80` | フルログビュー/検索が通る経路（全500行 wrap）。`formatted_timestamp` 事前計算の効果がそのまま乗る | 654.94 µs | 540.72 µs | -17.4%（chrono format の除去分） |
-| `wrap_log_lines_tail_500_lines_width_80_need_4_rows` | ログ下部パネルが実際に通る経路（末尾4行だけ必要）。Phase 0/1 に対応ベンチなし | — | 2.5848 µs | 参考: フル wrap 比 約 -99.5%（1/209） |
-| `pane_visible_entries/1000_files/Name` | 未変更コード（対照） | 1.3949 ms | 1.5003 ms（再計測で 1.4366 ms） | ノイズ内（この日の実行間ブレが ±5〜11%） |
-| `pane_visible_entries/1000_files/Ext` | 未変更コード（対照） | 1.4024 ms | 1.4187 ms | ノイズ内（+1.2%） |
-| `pane_visible_entries/10000_files/Name` | 未変更コード（対照） | 18.454 ms | 20.319 ms | ノイズ内（実行間ブレ、後述） |
-| `pane_visible_entries/10000_files/Ext` | 未変更コード（対照） | 18.394 ms | 19.970 ms | ノイズ内（実行間ブレ、後述） |
-| `pane_visible_entries_cached/1000_files/cache_hit` | 未変更コード（対照） | 342.87 ns | 347.14 ns | ノイズ内（+1.2%） |
-| `pane_visible_entries_cached/10000_files/cache_hit` | 未変更コード（対照） | 3.2360 µs | 3.2402 µs | 変化なし |
-| `archive_listing/zip_100_entries` | 未変更コード（対照） | 280.19 µs | 280.15 µs | 変化なし |
-| `archive_listing/tar_gz_100_entries` | 未変更コード（対照） | 100.58 µs | 101.92 µs | ノイズ内（+1.3%） |
+| `wrap_log_lines_500_lines_width_80` | The path taken by the full log view/search (wrapping all 500 lines). Directly benefits from the `formatted_timestamp` precomputation | 654.94 µs | 540.72 µs | -17.4% (from removing the chrono format call) |
+| `wrap_log_lines_tail_500_lines_width_80_need_4_rows` | The path actually taken by the log bottom panel (only the last 4 lines needed). No corresponding bench in Phase 0/1 | — | 2.5848 µs | Reference: about -99.5% (1/209) vs. the full wrap |
+| `pane_visible_entries/1000_files/Name` | Unchanged code (control) | 1.3949 ms | 1.5003 ms (1.4366 ms on re-measurement) | Within noise (this day's run-to-run variance was ±5–11%) |
+| `pane_visible_entries/1000_files/Ext` | Unchanged code (control) | 1.4024 ms | 1.4187 ms | Within noise (+1.2%) |
+| `pane_visible_entries/10000_files/Name` | Unchanged code (control) | 18.454 ms | 20.319 ms | Within noise (run-to-run variance, discussed below) |
+| `pane_visible_entries/10000_files/Ext` | Unchanged code (control) | 18.394 ms | 19.970 ms | Within noise (run-to-run variance, discussed below) |
+| `pane_visible_entries_cached/1000_files/cache_hit` | Unchanged code (control) | 342.87 ns | 347.14 ns | Within noise (+1.2%) |
+| `pane_visible_entries_cached/10000_files/cache_hit` | Unchanged code (control) | 3.2360 µs | 3.2402 µs | No change |
+| `archive_listing/zip_100_entries` | Unchanged code (control) | 280.19 µs | 280.15 µs | No change |
+| `archive_listing/tar_gz_100_entries` | Unchanged code (control) | 100.58 µs | 101.92 µs | Within noise (+1.3%) |
 
-所見:
+Observations:
 
-- 本フェーズの主目的（ログ下部パネルの毎フレームコスト削減）は `wrap_log_lines_tail` ベンチで直接確認できる: 500行フル wrap 比で約 1/209（99.5%減）。実アプリでは毎フレーム（起動中ずっと）通る経路なので、体感上の効果は `pane_visible_entries` キャッシュヒット化（Phase 1）と並んで大きいはず。
-- `wrap_log_lines_500_lines_width_80`（フルログビュー/検索の経路、コード自体は「全行 wrap」のままで変えていない）も -17.4% 改善している — これは `LogLine::formatted_timestamp` の事前計算（`App::log_push` 時に一度だけ `chrono::format`、以降は `wrap_log_lines`/`wrap_log_lines_tail` とも文字列 clone のみ）の効果で、tail-first 化そのものとは別に効いている。
-- help/settings のキーバインド行キャッシュ、function-list のフィルタ結果キャッシュ、viewer/help/log の `Matcher` 再利用、filter 入力の再パース抑止は、いずれも「同じフレームを何度も再計算しない」系の変更で、criterion の単発呼び出しベンチでは測りにくい（呼ばれる頻度が減ることが効果の本体であって、1回あたりのコストはほぼ変えていない）。正しさは `cargo test`（キャッシュが実際のキーマップ変更/クエリ変更に追従することを検証する新規テスト込み）で担保 — 対話的な手動操作での体感確認は今回未実施。
-- `pane_visible_entries/*`・`pane_visible_entries_cached/*`・`archive_listing/*` は Phase 2 で一切触れていない対照群。`pane_visible_entries/10000_files/*` の Phase 1 比 +8〜10% は、`pane_visible_entries/1000_files/Name` を単体で再計測した際に -5.4% と逆方向に振れたことから、コード変更ではなくこの日の実行間ノイズ（他プロセスの負荷等）と判断した。
+- The main goal of this phase (reducing the per-frame cost of the log bottom panel) can be confirmed directly with the `wrap_log_lines_tail` bench: about 1/209 (a 99.5% reduction) compared to a full 500-line wrap. Since this path runs every frame in the real app (the whole time it's running), the felt improvement should be significant, on par with the `pane_visible_entries` cache-hit change in Phase 1.
+- `wrap_log_lines_500_lines_width_80` (the full log view/search path, whose code itself is still "wrap all lines" and unchanged) also improved by -17.4% — this comes from precomputing `LogLine::formatted_timestamp` (`chrono::format` called once at `App::log_push` time, with only a string clone from then on in both `wrap_log_lines` and `wrap_log_lines_tail`), an effect separate from the tail-first change itself.
+- The keybinding row caches for help/settings, the function-list filter result cache, `Matcher` reuse across viewer/help/log, and suppressing filter input re-parsing are all changes in the category of "don't recompute the same frame over and over" — these are hard to measure with criterion's single-call benches (the benefit is in how often they're called, not the per-call cost, which is essentially unchanged). Correctness is backed by `cargo test` (including new tests verifying the caches actually track keymap/query changes); no interactive manual confirmation was done this round.
+- `pane_visible_entries/*`, `pane_visible_entries_cached/*`, and `archive_listing/*` are the control group untouched by Phase 2. The +8–10% on `pane_visible_entries/10000_files/*` vs. Phase 1 is judged to be run-to-run noise on this day (other process load, etc.) rather than a code change, since re-measuring `pane_visible_entries/1000_files/Name` alone swung the opposite way, -5.4%.
 
-## アイドル CPU の手動計測手順
+## Manual idle-CPU measurement procedure
 
-自動化された計測ベンチではなく、実機での体感確認用の手順。
+Not an automated bench — a procedure for hands-on, felt confirmation on real hardware.
 
-1. リリースビルドを用意する。
+1. Prepare a release build.
 
    ```sh
    cargo build --release
    ```
 
-2. リリースバイナリを起動し、何も操作せず放置する。
+2. Launch the release binary and leave it idle without any operation.
 
    ```sh
    ./target/release/ozzel
    ```
 
-3. 別のターミナルを開き、起動した ozzel の PID を確認する。
+3. Open another terminal and check the PID of the running ozzel.
 
    ```sh
    pgrep -x ozzel
    ```
 
-4. その PID に対して `ps` で `%cpu` を数回（例: 5〜10回、1〜2秒間隔で）サンプリングし、平均を取る。
+4. Sample `%cpu` for that PID with `ps` a few times (e.g. 5–10 times, at 1–2 second intervals) and average them.
 
    ```sh
    for i in $(seq 1 10); do ps -o %cpu= -p <pid>; sleep 1; done
    ```
 
-   ワンライナーで平均まで出す場合:
+   As a one-liner that also computes the average:
 
    ```sh
    for i in $(seq 1 10); do ps -o %cpu= -p <pid>; sleep 1; done | awk '{s+=$1; n++} END {print s/n "%"}'
    ```
 
-5. 得られた平均値をこのファイルに追記し、前後のリファクタリングで比較する。イベントループが `Duration::from_millis(50)` のポーリング間隔で回っている（`main.rs` の `run` 関数）ため、何もしていない間もこのポーリング周期に応じたCPU消費が発生する — 削減余地があるとすればここが対象になる。
+5. Append the resulting average to this file and compare before/after each refactoring round. Since the event loop runs on a `Duration::from_millis(50)` polling interval (the `run` function in `main.rs`), some CPU usage proportional to this polling cycle occurs even while idle — this would be the target if there's room to reduce it.
 
-## 結果（Phase 3 後、中央値）
+## Results (after Phase 3, median)
 
-Phase 3 で入れた変更:
+Changes made in Phase 3:
 
-1. **`VirtualDir` エントリ一覧キャッシュ**（`src/virtual_dir.rs`）: アーカイブの生エントリ一覧（`RawEntry` 全件）を `VirtualDir`（`Rc<RefCell<Option<CachedEntries>>>`）に保持し、`(mtime, len)` が変わらない限り descend/go_parent/`Pane::reload` のたびの再オープン・再パース・再解凍を排除。zip は central directory の再パース、tar 系はストリームの再走査、`.tar.xz` はアーカイブ全体の再インフレートをそれぞれ回避する。`VirtualDir::clone`（`Pane::virtual_go_parent` が使う）はキャッシュを共有（`Rc` のクローンのみ）するので、archive 内を潜っても登っても同じキャッシュを使い続ける。アーカイブファイル自体が置き換わった場合（mtime/len 変化）は再読込。`stat` 自体が失敗する場合（アーカイブ削除後など）は既存キャッシュをそのまま使う（一覧のための stat 失敗を「変化なし」として扱う）。
-2. **コピーの高速化**（`src/tasks/copy_move.rs`）: `WHOLE_FILE_COPY_THRESHOLD`（4 MiB）以下のファイルは `std::fs::copy` 一発（OS の clonefile/copy_file_range が効き、permissions もコピーされる）。それを超えるファイルは従来通りチャンク読み書き（`TransferCtx::buf` に1回だけ確保した 1 MiB バッファを全ファイルで再利用、per-chunk のキャンセルチェック・進捗報告を維持）し、完了後に明示的に `src` の permissions を `dest` にコピーして両経路の挙動を揃えた。
-3. **起動時の初回描画**（`src/main.rs`/`src/app.rs`）: `App::new_unloaded` で両ペインを空のまま構築 → `run` の先頭で `terminal.draw` を1回実行 → `App::load_initial_dirs` で実際のディレクトリ読込 → 通常ループ、という順序に変更。遅いマウントや巨大ディレクトリでも alternate screen に入った直後に画面が出る。`App::new`（既存テスト・`test_app` が使う経路）自体の外部挙動は変えていない（`new_unloaded` + `load_initial_dirs` の合成のまま、eager load を維持）。
+1. **`VirtualDir` entry listing cache** (`src/virtual_dir.rs`): keeps the archive's raw entry listing (all `RawEntry`s) in `VirtualDir` (`Rc<RefCell<Option<CachedEntries>>>`), eliminating re-opening/re-parsing/re-decompression on every descend/go_parent/`Pane::reload` as long as `(mtime, len)` hasn't changed. This avoids re-parsing the central directory for zip, re-scanning the stream for tar formats, and re-inflating the entire archive for `.tar.xz`. `VirtualDir::clone` (used by `Pane::virtual_go_parent`) shares the cache (just clones the `Rc`), so the same cache keeps being used whether descending into or ascending out of the archive. If the archive file itself has been replaced (mtime/len changed), it is reloaded. If the `stat` call itself fails (e.g. after the archive was deleted), the existing cache is used as-is (a stat failure for listing purposes is treated as "no change").
+2. **Faster copying** (`src/tasks/copy_move.rs`): files at or below `WHOLE_FILE_COPY_THRESHOLD` (4 MiB) now go through a single `std::fs::copy` call (which benefits from the OS's clonefile/copy_file_range, and also copies permissions). Files above that threshold still use the previous chunked read/write approach (reusing a single 1 MiB buffer allocated once in `TransferCtx::buf` across all files, keeping the per-chunk cancellation check and progress reporting), and after completion explicitly copies `src`'s permissions to `dest` to make both paths behave the same way.
+3. **Initial draw at startup** (`src/main.rs`/`src/app.rs`): changed the order to construct both panes empty via `App::new_unloaded` → run `terminal.draw` once at the top of `run` → load the actual directories via `App::load_initial_dirs` → the normal loop. This means the screen appears right after entering the alternate screen, even with slow mounts or huge directories. The external behavior of `App::new` itself (the path used by existing tests / `test_app`) is unchanged (it remains the combination of `new_unloaded` + `load_initial_dirs`, i.e. eager loading is preserved).
 
-`archive_listing_cached/*` が今回の新規ベンチ（Phase 0〜2 に対応ベンチなし）— `VirtualDir::list` を一度呼んでキャッシュを温めた後、同じインスタンスに対して繰り返し呼ぶ「実際にアプリ内で descend/go_parent するたびに通る」経路を計測したもの。`archive_listing/*`（`read_archive_dir_entries` 直呼び、`VirtualDir` を経由しない常にコールド経路）は Phase 3 で一切変更していない対照群として残してある。実行環境は上記「実行環境」節と同一マシン・同一プロファイル（rustc 1.94.0、criterion 0.8.2）。
+`archive_listing_cached/*` is the new bench for this round (no corresponding bench in Phase 0–2) — it measures the path taken by repeated calls on the same instance after warming the cache with one call to `VirtualDir::list`, i.e. the path actually taken every time you descend/go_parent within the app. `archive_listing/*` (calling `read_archive_dir_entries` directly, always a cold path that bypasses `VirtualDir`) remains as the control group untouched in Phase 3. The execution environment is the same machine and profile as in the "Execution environment" section above (rustc 1.94.0, criterion 0.8.2).
 
-| ベンチ | 対象 | Phase 2 後 中央値 | Phase 3 後 中央値 | 変化 |
+| Bench | Target | After Phase 2 median | After Phase 3 median | Change |
 |---|---|---|---|---|
-| `archive_listing/zip_100_entries` | 常にコールド（`read_archive_dir_entries` 直呼び、対照） | 280.15 µs | 273.69 µs | ノイズ内（-2.3%） |
-| `archive_listing/tar_gz_100_entries` | 同上（対照） | 101.92 µs | 98.875 µs | ノイズ内（-3.0%） |
-| `archive_listing/tar_xz_100_entries` | 同上（対照、Phase 2 に対応ベンチなし） | — | 93.515 µs | — |
-| `archive_listing_cached/zip_100_entries/cache_hit` | `VirtualDir::list` キャッシュヒット（Phase 2 に対応ベンチなし） | — | 12.891 µs | 参考: コールド比 約 -95.3%（1/21） |
-| `archive_listing_cached/tar_gz_100_entries/cache_hit` | 同上 | — | 12.866 µs | 参考: コールド比 約 -87.0%（1/7.7） |
-| `archive_listing_cached/tar_xz_100_entries/cache_hit` | 同上 | — | 12.849 µs | 参考: コールド比 約 -86.3%（1/7.3） |
-| `pane_visible_entries/1000_files/Name` | 未変更コード（対照） | 1.5003 ms | 1.2954 ms | ノイズ内（-13.6%、実行間ブレ） |
-| `pane_visible_entries/10000_files/Name` | 未変更コード（対照） | 20.319 ms | 15.774 ms | ノイズ内（-22.4%、実行間ブレ） |
-| `pane_visible_entries_cached/10000_files/cache_hit` | 未変更コード（対照） | 3.2402 µs | 3.2054 µs | 変化なし |
-| `wrap_log_lines_500_lines_width_80` | 未変更コード（対照） | 540.72 µs | 521.85 µs | ノイズ内（-3.5%） |
-| `wrap_log_lines_tail_500_lines_width_80_need_4_rows` | 未変更コード（対照） | 2.5848 µs | 2.5264 µs | ノイズ内（-2.3%） |
+| `archive_listing/zip_100_entries` | Always cold (`read_archive_dir_entries` called directly, control) | 280.15 µs | 273.69 µs | Within noise (-2.3%) |
+| `archive_listing/tar_gz_100_entries` | Same as above (control) | 101.92 µs | 98.875 µs | Within noise (-3.0%) |
+| `archive_listing/tar_xz_100_entries` | Same as above (control, no corresponding bench in Phase 2) | — | 93.515 µs | — |
+| `archive_listing_cached/zip_100_entries/cache_hit` | `VirtualDir::list` cache hit (no corresponding bench in Phase 2) | — | 12.891 µs | Reference: about -95.3% (1/21) vs. cold |
+| `archive_listing_cached/tar_gz_100_entries/cache_hit` | Same as above | — | 12.866 µs | Reference: about -87.0% (1/7.7) vs. cold |
+| `archive_listing_cached/tar_xz_100_entries/cache_hit` | Same as above | — | 12.849 µs | Reference: about -86.3% (1/7.3) vs. cold |
+| `pane_visible_entries/1000_files/Name` | Unchanged code (control) | 1.5003 ms | 1.2954 ms | Within noise (-13.6%, run-to-run variance) |
+| `pane_visible_entries/10000_files/Name` | Unchanged code (control) | 20.319 ms | 15.774 ms | Within noise (-22.4%, run-to-run variance) |
+| `pane_visible_entries_cached/10000_files/cache_hit` | Unchanged code (control) | 3.2402 µs | 3.2054 µs | No change |
+| `wrap_log_lines_500_lines_width_80` | Unchanged code (control) | 540.72 µs | 521.85 µs | Within noise (-3.5%) |
+| `wrap_log_lines_tail_500_lines_width_80_need_4_rows` | Unchanged code (control) | 2.5848 µs | 2.5264 µs | Within noise (-2.3%) |
 
-所見:
+Observations:
 
-- `archive_listing_cached/*` は3フォーマットとも約 12.8〜12.9 µs で横並び — キャッシュヒット後は `group_children`（メモリ内の `HashMap` フィルタ）のコストが支配的で、元のフォーマット差（zip の central directory 再パース vs tar 系のストリーム再走査 vs xz の全展開）が完全に消えている。これは狙い通り: descend/go_parent/`reload` の毎回のコストが、フォーマットに関係なく「小さな一定コスト」に潰れた。
-- コールド経路（`archive_listing/*`）に対する削減率は zip が最大（約 1/21）、tar_gz/tar_xz が約 1/7〜1/8。zip はそもそも central directory の再パースコストが tar 系の逐次ストリーム走査より重く、キャッシュの効果がそのまま比率に出ている。
-- `.tar.xz` はこのベンチのアーカイブサイズ（100エントリ・ペイロード17バイトずつ）では全展開のコストがまだ小さいため、削減率自体は tar_gz と大差ない。プランで問題視されていた「2GBのtar.xzで1階層降りるだけで2GB再解凍」のような巨大アーカイブほど、キャッシュ有無の差は絶対時間で見て桁違いに開く（全展開コストがアーカイブサイズに比例するのに対し、キャッシュヒット後のコストはエントリ数にしか依存しないため）。
-- `pane_visible_entries/*`・`wrap_log_lines*` は Phase 3 で一切触れていない対照群。今回の実行では前回計測比で軒並み改善方向に振れているが、コード変更のない箇所なので Phase 1/2 の記録同様この日の実行間ノイズ（マシン負荷差）と判断し、Phase 3 の効果としては扱わない。`pane_visible_entries_cached/10000_files/cache_hit` はノイズの影響が最も小さい参照点として「実質変化なし」を確認する用途で見るとよい。
-- コピー高速化（`src/tasks/copy_move.rs`）と起動時初回描画（`main.rs`/`app.rs`）は criterion の単発関数呼び出しベンチでは測りにくい種類の変更（前者は `std::fs::copy` の OS 側最適化次第、後者はイベントループ全体の見た目の挙動）。正しさは `cargo test` の新規テスト（`copy_preserves_source_permissions_on_both_the_small_and_chunked_paths`、`run_copy_of_a_large_file_goes_through_the_chunked_path_and_finishes_ok`、`new_unloaded_builds_both_panes_with_no_entries_and_no_io` 等）で担保。体感確認は `cargo run --release` での手動操作のみ（巨大ファイルコピー時の alloc 削減、起動直後に空ペインがすぐ表示されること）。
+- `archive_listing_cached/*` comes in at about 12.8–12.9 µs across all three formats — once the cache is hit, the cost of `group_children` (an in-memory `HashMap` filter) dominates, and the original format differences (zip's central directory re-parse vs. tar's stream re-scan vs. xz's full expansion) disappear entirely. This is as intended: the per-descend/go_parent/`reload` cost has collapsed to a small, constant cost regardless of format.
+- Compared to the cold path (`archive_listing/*`), the reduction is largest for zip (about 1/21), and about 1/7–1/8 for tar_gz/tar_xz. zip's central directory re-parse cost was already heavier than tar's sequential stream scan to begin with, so the caching benefit shows up directly in the ratio.
+- For `.tar.xz`, at this bench's archive size (100 entries, 17-byte payload each), the cost of full expansion is still small, so the reduction ratio isn't much different from tar_gz. For a huge archive of the kind the plan flagged as problematic ("re-decompressing 2GB of tar.xz just to descend one level"), the gap with/without caching would open up by orders of magnitude in absolute time (full-expansion cost scales with archive size, whereas post-cache-hit cost depends only on the entry count).
+- `pane_visible_entries/*` and `wrap_log_lines*` are the control group untouched by Phase 3. This run's numbers moved uniformly in the improved direction compared to the previous measurement, but since this is code with no changes, it's judged — as in the Phase 1/2 records — to be run-to-run noise (machine load differences) on this day, and not counted as an effect of Phase 3. `pane_visible_entries_cached/10000_files/cache_hit` is the reference point least affected by noise, useful for confirming "effectively no change."
+- The copy speedup (`src/tasks/copy_move.rs`) and the initial draw at startup (`main.rs`/`app.rs`) are the kind of change that's hard to measure with criterion's single-function-call benches (the former depends on the OS's own optimizations for `std::fs::copy`, the latter concerns the overall look of the event loop's behavior). Correctness is backed by new `cargo test` tests (`copy_preserves_source_permissions_on_both_the_small_and_chunked_paths`, `run_copy_of_a_large_file_goes_through_the_chunked_path_and_finishes_ok`, `new_unloaded_builds_both_panes_with_no_entries_and_no_io`, etc.). Felt confirmation was manual-only, via `cargo run --release` (reduced allocations when copying huge files, empty panes appearing immediately at startup).
 
-### 設計判断メモ
+### Design decision notes
 
-- **xz の展開済みバッファ保持について**: 一覧のためだけの再解凍はキャッシュで解消したが、単一ファイルの抽出/ビューア表示経路（`extract_single_from_tar`、ひいては `.tar.xz` の場合は `open_tar_archive` の全展開）は今回のスコープでは従来通り毎回再解凍する。理由: (1) 展開済みバッファを `VirtualDir` に保持すると、巨大な `.tar.xz`（プラン記載の2GB級）をブラウズしているだけでその全体をメモリに常駐させ続けることになり、「一覧のための再解凍を避ける」という目的に対してメモリコストが不釣り合いに大きい。(2) 単一ファイルの抽出はユーザー操作（ビューアで開く/展開する）のたびに1回起きるだけで、一覧のように「ディレクトリ移動のたびに毎回」ではないため、頻度あたりのコスト削減効果が一覧キャッシュよりずっと小さい。以上より「一覧はキャッシュ、単一抽出は従来通り」で本フェーズの目標（ブラウズ操作のたびの重い再デコードの排除）は達成していると判断し、単一抽出側のキャッシュ化は将来課題として見送った。
-- **コピー閾値（`WHOLE_FILE_COPY_THRESHOLD` = 4 MiB）について**: 進捗バーの更新間隔（`PROGRESS_MIN_INTERVAL` = 100ms）を下回る時間で完了するファイルは、そもそもチャンク単位の進捗報告が画面に反映される機会がほとんどない。4 MiB は目安として「一般的なディスク/SSD速度なら100ms以内に転送が終わる規模」を想定した値。この閾値以下は `std::fs::copy` 一発（cancel チェックはファイル開始前のみ）、超える場合は従来通りチャンクループ（cancel チェックはチャンク毎、進捗報告も継続）とし、大量の小ファイルコピー（例: 10万ファイル）で `vec![0u8; 1MiB]` の zeroed alloc がファイル数分発生していた問題を解消しつつ、大きい単一ファイルのコピー中に体感できるキャンセル応答性・進捗表示は変えていない。
+- **On keeping the decompressed xz buffer**: repeated re-decompression for listing purposes alone has been resolved by the cache, but the path for extracting/viewing a single file (`extract_single_from_tar`, and for `.tar.xz`, the full expansion in `open_tar_archive`) still re-decompresses every time, unchanged, within this phase's scope. Reasons: (1) keeping the decompressed buffer in `VirtualDir` would mean that merely browsing a huge `.tar.xz` (the 2GB-class case mentioned in the plan) would keep the whole thing resident in memory, which is a disproportionately large memory cost relative to the goal of "avoid re-decompression for listing." (2) extracting a single file only happens once per user action (opening in the viewer / extracting), not "every time you change directories" like listing — so the cost reduction per occurrence is much smaller than for the listing cache. Given the above, "cache listing, keep single extraction as-is" is judged to meet this phase's goal (eliminating heavy re-decoding on every browsing operation), and caching the single-extraction side has been deferred as future work.
+- **On the copy threshold (`WHOLE_FILE_COPY_THRESHOLD` = 4 MiB)**: files that finish copying in less time than the progress bar's update interval (`PROGRESS_MIN_INTERVAL` = 100ms) barely get a chance for chunked progress reporting to show up on screen anyway. 4 MiB was chosen as a rough estimate of "a size that a typical disk/SSD can transfer within 100ms." At or below this threshold, a single `std::fs::copy` call is used (cancellation is only checked before the file starts); above it, the previous chunked loop is used as before (cancellation checked per chunk, progress reporting continues). This resolves the issue where copying a large number of small files (e.g. 100,000 files) caused a zeroed `vec![0u8; 1MiB]` allocation per file, while leaving unchanged the cancellation responsiveness and progress display felt during the copy of a single large file.

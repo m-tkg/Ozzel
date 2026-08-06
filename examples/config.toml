@@ -1,160 +1,175 @@
-# ozzel サンプル設定ファイル
+# ozzel sample configuration file
 #
-# 配置先（存在しない場合はデフォルト設定で起動します）:
+# Location (if it doesn't exist, ozzel starts with default settings):
 #   Linux / macOS: $XDG_CONFIG_HOME/ozzel/config.toml
-#                  （$XDG_CONFIG_HOME 未設定時は ~/.config/ozzel/config.toml）
+#                  (~/.config/ozzel/config.toml if $XDG_CONFIG_HOME is unset)
 #   Windows:       %APPDATA%\ozzel\config\config.toml
 #
-# このファイルをそのままコピーして使う場合は、コメントアウトされた行を
-# 必要に応じて有効化（先頭の # を削除）してください。すべての項目は省略可能です。
+# If you copy this file as-is to use it, enable the commented-out lines
+# as needed (remove the leading #). All items are optional.
 #
-# ozzel を起動して `,` キーを押すと、このファイルとまったく同じ内容の
-# テンプレートから設定ファイルを新規作成し、エディタで開きます（既に
-# 存在する場合はそのまま開くだけで、上書きはしません）。保存してエディタを
-# 終了すると、再起動なしでその場に設定が反映されます。
+# Launch ozzel and press the `,` key to create a new config file from a
+# template with exactly the same content as this file, and open it in an
+# editor (if one already exists, it just opens it as-is without
+# overwriting it). Save and quit the editor, and the settings take
+# effect immediately, without restarting.
 
-# --- 削除の挙動 -------------------------------------------------------
-# "trash"（デフォルト）: OS のゴミ箱へ移動する
-# "permanent": 確認後に完全削除する（ゴミ箱を経由しない）
+# --- Delete behavior ----------------------------------------------------
+# "trash" (default): move to the OS trash/recycle bin
+# "permanent": permanently delete after confirmation (bypasses the trash)
 #
-# Linux でのゴミ箱移動は XDG 対応デスクトップ環境が前提です。対応していない
-# 環境では失敗し、エラーを表示します（無言で完全削除にフォールバックしません）。
+# Moving to the trash on Linux assumes an XDG-compliant desktop
+# environment. On unsupported environments it fails and shows an error
+# (it does not silently fall back to permanent deletion).
 delete_behavior = "trash"
 
-# --- ホームディレクトリ ------------------------------------------------
-# `~` キーで移動する先。省略時は OS のホームディレクトリが使われます。
-# 先頭の `~`（`~` 単体、または `~/以下のパス`）は展開されるので
-# home = "~/work" のようにも書けます（`~user` 形式は非対応）。
+# --- Home directory ------------------------------------------------------
+# The destination for the `~` key. If omitted, the OS home directory is
+# used. A leading `~` (either `~` alone, or `~/` followed by a path) is
+# expanded, so you can also write something like home = "~/work"
+# (the `~user` form is not supported).
 # home = "/Users/you/projects"
 
-# --- エディタ -----------------------------------------------------------
-# `e` キーで開くエディタコマンド。省略時は環境変数 $EDITOR が使われ、
-# それも未設定の場合はエラーになります。
+# --- Editor ---------------------------------------------------------------
+# The editor command opened with the `e` key. If omitted, the $EDITOR
+# environment variable is used, and it is an error if that is also unset.
 # editor = "vim"
 
-# --- コピー・移動の確認 -------------------------------------------------
-# デフォルト true: 削除と同様、コピー・移動も実行前に確認ダイアログを
-# 表示します（`Copy 3 item(s) -> /dest? (y/n)`）。false にすると、
-# 上書き衝突がない限り確認なしで即実行します（衝突がある場合は
-# false でも常に確認ダイアログが出ます — 無条件でスキップはされません）。
+# --- Copy/move confirmation -----------------------------------------------
+# Default true: like delete, copy/move also show a confirmation dialog
+# before executing (`Copy 3 item(s) -> /dest? (y/n)`). Set to false to
+# execute immediately without confirmation, unless there is an overwrite
+# conflict (if there is a conflict, the confirmation dialog is always
+# shown even with false — it is never skipped unconditionally).
 # confirm_operations = false
 
-# --- 終了時の確認 ---------------------------------------------------------
-# デフォルト true: 実行中のタスクがない場合でも、`q`/Ctrl+C での終了前に
-# 「Quit ozzel? (y/n)」の確認を表示します。false にすると確認なしで
-# 即座に終了します（タスク実行中の確認はこの設定に関わらず常に表示されます）。
+# --- Confirmation on quit ---------------------------------------------------
+# Default true: shows a "Quit ozzel? (y/n)" confirmation before quitting
+# with `q`/Ctrl+C, even when there are no running tasks. Set to false to
+# quit immediately without confirmation (the confirmation shown while a
+# task is running is always displayed regardless of this setting).
 confirm_quit = true
 
-# --- 終了時のディレクトリ書き出し（--cwd-file） -----------------------------
-# デフォルト true: `ozzel --cwd-file <path>` で起動していた場合、終了時に
-# フォーカスしていたペインのディレクトリを <path> へ書き出します。
-# false にすると、--cwd-file を指定していても一切書き出しません
-# （--cwd-file を他用途で使いたい場合の完全なオプトアウト用）。
-# シェル側の連携方法は README.md の「終了時にシェルの cd を追従させる」を
-# 参照してください。
+# --- Writing out the directory on quit (--cwd-file) -----------------------
+# Default true: if launched with `ozzel --cwd-file <path>`, writes the
+# directory of the focused pane to <path> on quit. Set to false to never
+# write it out at all, even if --cwd-file is specified (a full opt-out
+# for when you want to use --cwd-file for another purpose). See the
+# "Making the shell's cd follow on quit" section of README.md for how to
+# wire up the shell side.
 quit_cd = true
 
-# --- ファイル名検索の実行タイミング ------------------------------------------
-# デフォルト true: `g` のファイル名検索（カレントディレクトリ配下を再帰検索）
-# は入力の度に結果を更新します（インクリメンタル）。false にすると、入力中は
-# 前回の結果を表示したままにし、Enter を押したときだけ検索を実行します
-# （巨大なツリーで毎キーストロークの再マッチが重い場合向け）。
+# --- When file name search runs --------------------------------------------
+# Default true: the `g` file name search (recursive search under the
+# current directory) updates its results on every keystroke
+# (incremental). Set to false to keep showing the previous results while
+# typing, and only run the search when you press Enter (for cases where
+# re-matching on every keystroke is heavy on a huge tree).
 file_search_incremental = true
 
-# --- : コマンドのシェルモード ------------------------------------------------
-# デフォルト false: `:` のコマンドは非対話シェル（unix: $SHELL -c、
-# Windows: %COMSPEC% /C）で実行されます。非対話シェルは .zshrc/.bashrc を
-# 読み込まないため、対話シェル用の alias やシェル関数は使えません。
-# true にすると -i 付き（$SHELL -i -c ...）で起動し、rc ファイルが読み込まれて
-# alias・関数が使えるようになります。代わりに、コマンド実行ごとに rc の
-# 読み込みコストと副作用（プロンプト初期化の出力、rm -i のような対話用 alias の
-# 有効化など）が発生します。rc に exec tmux のような処理がある場合は
-# 有効化しないでください。unix のみ有効。Windows では無視されます。
+# --- Shell mode for the : command --------------------------------------------
+# Default false: `:` commands run in a non-interactive shell (unix:
+# $SHELL -c, Windows: %COMSPEC% /C). A non-interactive shell does not
+# load .zshrc/.bashrc, so aliases and shell functions meant for
+# interactive shells cannot be used. Set to true to launch with -i
+# ($SHELL -i -c ...), which loads the rc file so aliases and functions
+# become available. In exchange, every command execution incurs the
+# cost of loading the rc file and its side effects (prompt
+# initialization output, interactive aliases like rm -i being enabled,
+# etc.). Do not enable this if your rc file does something like exec
+# tmux. Only takes effect on unix; ignored on Windows.
 command_line_interactive = false
 
-# --- マウス操作 -------------------------------------------------------------
-# デフォルト true: クリックでのペイン/カーソル移動、ホイールでのスクロール、
-# ドラッグでの範囲トグルマーク（通過した行のマーク状態を反転）、
-# ダブルクリックでの open が有効になります。
-# false にすると、マウスキャプチャを一切有効化しません（ターミナル本来の
-# テキスト選択がそのまま使えます）。true のままターミナルのネイティブな
-# テキスト選択をしたい場合は、多くのターミナルで Shift キーを押しながら
-# ドラッグすると選択できます（TUI アプリの一般的な作法です）。
+# --- Mouse operations -------------------------------------------------------
+# Default true: enables pane/cursor movement by click, scrolling with
+# the wheel, range toggle-marking by drag (flips the mark state of the
+# lines passed over), and open on double-click. Set to false to not
+# enable mouse capture at all (the terminal's native text selection can
+# then be used as-is). If you want to use the terminal's native text
+# selection while keeping this true, in most terminals you can select
+# by dragging while holding Shift (a common convention for TUI apps).
 mouse = true
 
-# --- パーミッション列 -------------------------------------------------------
-# デフォルト true: 各行の名前の隣に `drwxr-xr-x` 形式（Windows では
-# 簡易表示の `rw-`/`ro-`/`rwd` 等）のパーミッション列を表示します。
-# ペイン幅が狭いときは、名前列が潰れる前にこの列が自動的に非表示になります。
-# false にすると常に非表示にします。
+# --- Permissions column ------------------------------------------------------
+# Default true: shows a permissions column next to each row's name, in
+# `drwxr-xr-x` format (on Windows, a simplified display such as
+# `rw-`/`ro-`/`rwd`). When the pane is narrow, this column is
+# automatically hidden before the name column gets squeezed. Set to
+# false to always hide it.
 show_permissions = true
 
-# --- 拡張子ごとの外部ビューア ------------------------------------------------
-# `open`（Enter/o）で開いたときに、組み込みビューアの代わりに使う外部コマンド
-# を拡張子ごとに指定できます。キーは小文字・ドットなしの拡張子、値はシェル
-# コマンドです。コマンド中に "{}" があればそこにパスが（シェルクォート
-# 済みで）埋め込まれ、なければ末尾にパスが追加されます。対応するエントリが
-# ない拡張子（や拡張子なしのファイル）は、これまでどおり組み込みビューアで
-# 開きます。Virtual Directory（zip）内のファイルには適用されません（実ファ
-# イルが存在しないため、常に組み込みビューアにフォールバックします）。
+# --- External viewer per extension ------------------------------------------
+# You can specify, per extension, an external command to use instead of
+# the built-in viewer when opening with `open` (Enter/o). Keys are
+# lowercase extensions without a dot, and values are shell commands. If
+# the command contains "{}", the path is embedded there (shell-quoted);
+# otherwise the path is appended at the end. Extensions with no
+# corresponding entry (or files with no extension) continue to be
+# opened with the built-in viewer as before. This does not apply to
+# files inside a Virtual Directory (zip), since no real file exists
+# there — it always falls back to the built-in viewer.
 # [viewers]
-# md = "glow {}"    # Markdown を glow で表示
-# log = "less {}"   # ログファイルを less で表示
-# jpg = "open {}"   # 画像を OS既定の GUI アプリで開く（macOS の例）
+# md = "glow {}"    # Display Markdown with glow
+# log = "less {}"   # Display log files with less
+# jpg = "open {}"   # Open images with the OS's default GUI app (macOS example)
 
-# --- 色 -------------------------------------------------------------------
+# --- Colors -----------------------------------------------------------------
 [colors]
-# カーソル行の背景色。名前付きの ratatui カラー（大文字小文字を区別しない。
-# 例: "red", "light_green", "lightgreen" はどちらも同じ色）、または
-# "#RRGGBB" 形式の16進数カラーコードを指定できます。不正な値を指定した場合は
-# 他の設定エラーと同様に起動時にエラーとなります。
+# The background color of the cursor row. You can specify a named
+# ratatui color (case-insensitive; e.g. "red", "light_green", and
+# "lightgreen" are all the same color), or a hex color code in
+# "#RRGGBB" format. An invalid value is an error at startup, like any
+# other configuration error.
 #
-# デフォルトは薄い緑（#90EE90）です。トゥルーカラー非対応のターミナルでは
-# 正しく表示されないことがあるため、その場合は ANSI の近似色として
-# cursor = "light_green" を指定してください。
+# The default is light green (#90EE90). This may not display correctly
+# on terminals without true color support, in which case specify
+# cursor = "light_green" as an approximate ANSI color.
 cursor = "#90EE90"
 
-# 非アクティブ側ペインのカーソル行の背景色。指定できる値は cursor と同じです。
-# デフォルトは白（"white"）。アクティブ側の緑カーソルと見分けやすくするための
-# ものです。
+# The background color of the cursor row in the inactive pane. Accepts
+# the same values as cursor. The default is white ("white"), making it
+# easy to distinguish from the active pane's green cursor.
 cursor_inactive = "white"
 
-# 非アクティブ側ペインの行（カーソル行・枠線・タイトルを含む全体）を薄暗く
-# 表示するかどうか。デフォルトは true。false にすると両ペインとも常に
-# 通常の明るさで表示されます。カーソル行だけは背景色そのものを黒寄りに
-# 暗くする方式（ターミナルの SGR dim は背景色にほとんど効かないため）で、
-# それ以外の行はターミナルの薄暗い表示に任せます。
+# Whether to dim the inactive pane's rows (the whole pane, including
+# the cursor row, border, and title). The default is true. Set to false
+# to always display both panes at normal brightness. The cursor row
+# alone is dimmed by darkening its background color toward black
+# (since a terminal's SGR dim attribute barely affects the background
+# color), while other rows are left to the terminal's own dim display.
 dim_inactive = true
 
-# 種別ごとの行の色（カーソル行以外に適用されます。指定できる値は cursor と
-# 同じです）。ある行が複数の種別に該当する場合（例: 隠しディレクトリ）は
-# hidden > executable > directory の優先順位で1色だけが使われます。
-# マークされた行の色（黄色）は常にこれらより優先されます。
+# Row colors per entry type (applied to rows other than the cursor row;
+# accepts the same values as cursor). If a row matches multiple types
+# (e.g. a hidden directory), only one color is used, with priority
+# hidden > executable > directory. The color of a marked row (yellow)
+# always takes priority over these.
 directory = "cyan"
 hidden = "red"
 executable = "yellow"
 
-# --- キーバインドの上書き -----------------------------------------------
-# 左辺: キーの組み合わせ（"C-" = Ctrl, "S-" = Shift, "A-" = Alt を
-#        プレフィックスとして重ねられます。例: "C-r", "S-tab"）
-# 右辺: アクション名（snake_case）。"none" を指定するとそのキーの
-#        割り当てを解除します。
+# --- Keybinding overrides -------------------------------------------------
+# Left side: a key combination ("C-" = Ctrl, "S-" = Shift, "A-" = Alt
+#        can be stacked as prefixes; e.g. "C-r", "S-tab")
+# Right side: an action name (snake_case). Specifying "none" clears the
+#        assignment for that key.
 #
-# デフォルトのキーバインドについては README.md の「キーバインド一覧」を
-# 参照してください。
+# See the "Keybinding list" section of README.md for the default
+# keybindings.
 [keys]
-# 例: Ctrl+C にコピーを割り当てる（デフォルトの終了キーと衝突するので
-# 変更する場合は、終了用のキーを別途 "q" などに残しておくことを推奨します）
+# Example: assign copy to Ctrl+C (this conflicts with the default quit
+# key, so if you make this change, it's recommended to leave a
+# separate key such as "q" for quitting)
 # "C-c" = "copy"
 
-# 例: "q" 単体での終了を無効化し、誤操作を防ぐ
+# Example: disable quitting with "q" alone, to prevent accidental operation
 # "q" = "none"
 
-# 例: x に元の「OS既定アプリで開く」を割り当てる（デフォルトでは未割り当て。
-# x はデフォルトで空いているキーです）
+# Example: assign the original "open with the OS's default app" to x
+# (unassigned by default; x is an unused key by default)
 # "x" = "open_default"
 
-# 使用できるアクション名の一覧:
+# List of available action names:
 # cursor_up, cursor_down, focus_left, focus_right, page_up, page_down,
 # top, bottom, switch_pane, open, parent, cycle_sort, toggle_hidden,
 # swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
@@ -164,22 +179,22 @@ executable = "yellow"
 # bookmark_add, go_home, command_line, open_editor, open_default,
 # help, edit_config, show_log, function_list, settings, quit
 
-# --- キーバインドの上書き（逆向き記法・デフォルトの全キーバインド一覧） ---
-# [keys] とは逆に、左辺がアクション名、右辺がキーの組み合わせの配列です。
-# 1つのアクションに複数のキーをまとめて割り当てたいときに便利です。
-# [keys] より後に適用されるため、両方が同じキーに言及した場合は
-# こちらが勝ちます。
+# --- Keybinding overrides (reverse notation, full list of default keybindings) ---
+# Unlike [keys], the left side is the action name and the right side is
+# an array of key combinations. Useful when you want to assign multiple
+# keys to a single action at once. This is applied after [keys], so if
+# both mention the same key, this one wins.
 #
-# 以下は現在のデフォルトキーバインドをすべて書き出したものです（`ozzel`
-# を再ビルドせずとも、ここを直接編集するだけで全キーバインドを見渡して
-# 変更できるようにするためのものです）。すべて有効な行なので、そのまま
-# 起動しても動作は今までどおり変わりません。
+# Below is a full dump of the current default keybindings (so that you
+# can see and change all keybindings just by editing here directly,
+# without rebuilding `ozzel`). Every line is active, so launching as-is
+# does not change the behavior from before.
 #
-# 重要: この [bindings] は「追加・上書き」専用です。行を削除しても
-# そのキーの割り当ては消えません（コード側のデフォルトが引き続き効きます）。
-# 特定のキーを本当に無効化したい場合は、この行を消すのではなく、上の
-# [keys] セクションで "そのキー" = "none" を指定してください
-# （例: "q" = "none"）。
+# Important: this [bindings] section is for "adding/overriding" only.
+# Deleting a line does not remove that key's assignment (the code's
+# default keeps taking effect). If you really want to disable a
+# specific key, don't delete this line — instead specify "that key" =
+# "none" in the [keys] section above (e.g. "q" = "none").
 [bindings]
 cursor_up = ["Up", "i"]
 cursor_down = ["Down", "k"]

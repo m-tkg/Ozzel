@@ -74,11 +74,11 @@ impl Category {
 
     pub fn label(self) -> &'static str {
         match self {
-            Category::Behavior => "動作",
-            Category::Colors => "色",
-            Category::Startup => "起動/連携",
-            Category::Viewers => "拡張子ビューア",
-            Category::Keybindings => "キーバインド",
+            Category::Behavior => "Behavior",
+            Category::Colors => "Colors",
+            Category::Startup => "Startup / integration",
+            Category::Viewers => "Extension viewers",
+            Category::Keybindings => "Keybindings",
         }
     }
 }
@@ -110,37 +110,37 @@ pub enum ItemKind {
 pub const BEHAVIOR_ITEMS: [Item; 9] = [
     Item {
         key: "confirm_operations",
-        label: "confirm_operations（コピー/移動前に確認）",
+        label: "confirm_operations (confirm before copy/move)",
         kind: ItemKind::Bool,
     },
     Item {
         key: "confirm_quit",
-        label: "confirm_quit（終了前に確認）",
+        label: "confirm_quit (confirm before quitting)",
         kind: ItemKind::Bool,
     },
     Item {
         key: "quit_cd",
-        label: "quit_cd（終了時に --cwd-file へ書き出す）",
+        label: "quit_cd (write --cwd-file on quit)",
         kind: ItemKind::Bool,
     },
     Item {
         key: "mouse",
-        label: "mouse（マウス操作）",
+        label: "mouse (mouse support)",
         kind: ItemKind::Bool,
     },
     Item {
         key: "delete_behavior",
-        label: "delete_behavior（削除方式）",
+        label: "delete_behavior (delete mode)",
         kind: ItemKind::DeleteBehaviorEnum,
     },
     Item {
         key: "show_permissions",
-        label: "show_permissions（パーミッション列）",
+        label: "show_permissions (permissions column)",
         kind: ItemKind::Bool,
     },
     Item {
         key: "dim_inactive",
-        label: "dim_inactive（非アクティブ側を薄暗く）",
+        label: "dim_inactive (dim the inactive pane)",
         kind: ItemKind::Bool,
     },
     // Appended last (rather than next to its `g`-key relatives) so the
@@ -148,12 +148,12 @@ pub const BEHAVIOR_ITEMS: [Item; 9] = [
     // memory both index into this array.
     Item {
         key: "file_search_incremental",
-        label: "file_search_incremental（ファイル名検索を入力の度に実行）",
+        label: "file_search_incremental (re-run the file-name search on every keystroke)",
         kind: ItemKind::Bool,
     },
     Item {
         key: "command_line_interactive",
-        label: "command_line_interactive（: を対話シェル $SHELL -i で実行）",
+        label: "command_line_interactive (run : commands in an interactive shell, $SHELL -i)",
         kind: ItemKind::Bool,
     },
 ];
@@ -161,27 +161,27 @@ pub const BEHAVIOR_ITEMS: [Item; 9] = [
 pub const COLOR_ITEMS: [Item; 5] = [
     Item {
         key: "cursor",
-        label: "cursor（アクティブ側カーソル色）",
+        label: "cursor (active-pane cursor color)",
         kind: ItemKind::Color,
     },
     Item {
         key: "cursor_inactive",
-        label: "cursor_inactive（非アクティブ側カーソル色）",
+        label: "cursor_inactive (inactive-pane cursor color)",
         kind: ItemKind::Color,
     },
     Item {
         key: "directory",
-        label: "directory（ディレクトリ色）",
+        label: "directory (directory color)",
         kind: ItemKind::Color,
     },
     Item {
         key: "hidden",
-        label: "hidden（隠しファイル色）",
+        label: "hidden (hidden-file color)",
         kind: ItemKind::Color,
     },
     Item {
         key: "executable",
-        label: "executable（実行可能ファイル色）",
+        label: "executable (executable-file color)",
         kind: ItemKind::Color,
     },
 ];
@@ -189,12 +189,12 @@ pub const COLOR_ITEMS: [Item; 5] = [
 pub const STARTUP_ITEMS: [Item; 2] = [
     Item {
         key: "home",
-        label: "home（~ の移動先。未設定なら OS のホーム）",
+        label: "home (where ~ jumps; OS home when unset)",
         kind: ItemKind::OptionalText,
     },
     Item {
         key: "editor",
-        label: "editor（e で開くエディタ。未設定なら $EDITOR）",
+        label: "editor (editor for e; $EDITOR when unset)",
         kind: ItemKind::OptionalText,
     },
 ];
@@ -250,7 +250,7 @@ pub fn display_delete_behavior(value: DeleteBehavior) -> &'static str {
 
 /// Private — only `item_value_display` (this module) calls it.
 fn display_optional_text(value: &Option<String>) -> String {
-    value.clone().unwrap_or_else(|| "(未設定)".to_string())
+    value.clone().unwrap_or_else(|| "(unset)".to_string())
 }
 
 /// Reads `item`'s current value out of `config` as a display string, for
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn display_optional_text_shows_a_placeholder_when_unset() {
-        assert_eq!(display_optional_text(&None), "(未設定)");
+        assert_eq!(display_optional_text(&None), "(unset)");
         assert_eq!(display_optional_text(&Some("vim".to_string())), "vim");
     }
 
@@ -606,7 +606,7 @@ mod tests {
         let home_item = &STARTUP_ITEMS[0];
         assert_eq!(
             item_value_display(Category::Startup, home_item, &config),
-            "(未設定)"
+            "(unset)"
         );
     }
 

@@ -1,382 +1,382 @@
-# 手動テストチェックリスト
+# Manual Test Checklist
 
-自動テスト（`cargo test`）では確認しづらい項目（実ターミナルでの描画、TUI の退避・復帰、シグナル、子プロセスとの対話など）を対象とした手動スモークテストの一覧です。開発中に各フェーズで実際に確認した内容をエリアごとに整理しています。
+A list of manual smoke tests covering items that are hard to verify with automated tests (`cargo test`) — rendering in a real terminal, TUI suspend/resume, signals, interaction with child processes, and so on. The items are organized by area, based on what was actually checked in each phase during development.
 
-新しいターミナル（または `tmux` などの多重化ツール）で `cargo run --` を実行し、以下を順に確認してください。日本語ファイル名を含むディレクトリを用意しておくと、幅計算まわりの確認がしやすくなります。
+Run `cargo run --` in a new terminal (or a multiplexer such as `tmux`) and go through the following in order. Having a directory with Japanese file names on hand makes it easier to check width-calculation behavior.
 
-## 1. ブラウズ
+## 1. Browsing
 
-- [ ] `ozzel [左dir] [右dir]` で起動し、両ペインが指定ディレクトリで開く
-- [ ] 引数を省略すると、両ペインがカレントディレクトリで開く
-- [ ] 存在しないディレクトリを指定すると、エラーメッセージを表示して（ターミナルを壊さずに）終了する
-- [ ] `↑` / `↓` でカーソルが移動する。`PageUp` / `PageDown` / `Home` / `End` も同様
-- [ ] `i` / `k`（新規）でも `↑` / `↓` と同じくカーソルが移動する
-- [ ] `Shift+↑` / `Shift+↓` で一覧の先頭・末尾へジャンプする（`Home`/`End` と同じ挙動）
-- [ ] `Tab` でアクティブペインが切り替わり、枠線の太さが変わる
-- [ ] `←` で左ペイン、`→` で右ペインへ直接フォーカスが移動する。既にそちらがアクティブなときは何も起きない
-- [ ] `j` / `l`（新規）でも `←` / `→` と同じく左右ペインへ直接フォーカスが移動する
-- [ ] `K`（Shift+k）で mkdir プロンプトが開く（小文字 `k` はカーソル移動専用になり、mkdir は開かないことを確認する）
-- [ ] `Enter` でディレクトリに入る。`..` の `Enter` で親に戻る
-- [ ] 親に戻った直後、カーソルが直前までいたディレクトリの位置に復元される
-- [ ] `Backspace` で親ディレクトリに戻る
-- [ ] `s` でソートキーが 名前→サイズ→更新日時→拡張子→名前 と巡回する。ディレクトリは常にファイルより上に来る
-- [ ] `.` で隠しファイル（ドットファイル）の表示・非表示が切り替わる
-- [ ] `w` で左右ペインの内容が入れ替わる
-- [ ] `Ctrl+R` で両ペインが再読み込みされる
-- [ ] 日本語ファイル名（`日本語ファイル名.txt` など）が他の行と桁がずれずに表示される
-- [ ] ウィンドウ幅が狭いとき、パス・ファイル名が省略記号（`…`）付きで適切に切り詰められる
-- [ ] カーソル行が薄い緑の背景・黒文字で表示される（デフォルト設定の場合）。マークされた行がカーソル位置に来ても、`*` 表示で見分けがつく
-- [ ] 非アクティブ側ペインのカーソル行が白背景・黒文字で表示される（デフォルト設定の場合）。アクティブ側は引き続き緑
-- [ ] 非アクティブ側ペインの行・枠線・タイトルが薄暗く表示される（デフォルト `dim_inactive = true`）。非アクティブ側のカーソル行（白背景）も薄暗くなるが、背景があるのはその行だけなので位置は判別できることを確認する
-- [ ] **非アクティブ側カーソル行の背景色が実際に暗い色になっている（新規）。** `Tab` でアクティブペインを切り替えながら両ペインを見比べ、非アクティブ側のカーソル行の背景が単に「薄い白」ではなく、はっきりと暗いグレーになっていることを確認する（ターミナルの SGR dim は背景色にほとんど効かないため、以前はアクティブ側と同じ明るさの白背景に見えていた — この修正の確認）。アクティブ側のカーソル行の色は変わらず設定どおりの明るさのままであることも確認する
-- [ ] `[colors]` の `cursor_inactive` を目立つ色（例 `"#00FF00"`）に変更しても、非アクティブ側のカーソル行がその色を暗くした色で表示されることを確認する（設定した色そのままの明るさで薄暗くなっていない・逆に真っ黒になっていないこと）
+- [ ] Launching with `ozzel [left dir] [right dir]` opens both panes in the specified directories
+- [ ] Omitting the arguments opens both panes in the current directory
+- [ ] Specifying a nonexistent directory shows an error message and exits (without breaking the terminal)
+- [ ] `↑` / `↓` move the cursor. Same for `PageUp` / `PageDown` / `Home` / `End`
+- [ ] `i` / `k` (new) move the cursor the same way as `↑` / `↓`
+- [ ] `Shift+↑` / `Shift+↓` jump to the top/bottom of the list (same behavior as `Home`/`End`)
+- [ ] `Tab` switches the active pane, and the border thickness changes
+- [ ] `←` moves focus directly to the left pane, `→` to the right pane. Nothing happens if that side is already active
+- [ ] `j` / `l` (new) also move focus directly to the left/right pane, same as `←` / `→`
+- [ ] `K` (Shift+k) opens the mkdir prompt (confirm that lowercase `k` is dedicated to cursor movement and does not open mkdir)
+- [ ] `Enter` enters a directory. `Enter` on `..` goes back to the parent
+- [ ] Right after going back to the parent, the cursor is restored to the position of the directory just left
+- [ ] `Backspace` goes back to the parent directory
+- [ ] `s` cycles the sort key through Name → Size → Modified time → Extension → Name. Directories always come above files
+- [ ] `.` toggles showing/hiding hidden files (dotfiles)
+- [ ] `w` swaps the contents of the left and right panes
+- [ ] `Ctrl+R` reloads both panes
+- [ ] Japanese file names (e.g. `日本語ファイル名.txt`) display without misaligning columns relative to other rows
+- [ ] When the window width is narrow, paths and file names are truncated appropriately with an ellipsis (`…`)
+- [ ] The cursor row is shown with a light green background and black text (with default settings). Even if a marked row is at the cursor position, it can still be distinguished by the `*` marker
+- [ ] The cursor row of the inactive pane is shown with a white background and black text (with default settings). The active side remains green
+- [ ] The rows, border, and title of the inactive pane are dimmed (default `dim_inactive = true`). The inactive pane's cursor row (white background) is dimmed too, but since only that row has a background, its position remains distinguishable
+- [ ] **(New) The inactive-side cursor row's background color is actually a dark color.** Switch the active pane with `Tab` and compare both panes: confirm the inactive side's cursor row background is not just "a light white" but a clearly dark gray (terminal SGR dim has almost no effect on background colors, so previously it looked like the same bright white background as the active side — check this fix). Also confirm the active side's cursor row color remains at the brightness configured, unchanged
+- [ ] Even after changing `cursor_inactive` in `[colors]` to a vivid color (e.g. `"#00FF00"`), confirm the inactive pane's cursor row is shown as a darkened version of that color (not at the configured brightness as-is, and not turned pure black either)
 
-## 2. マーク・同期操作
+## 2. Marking & Synchronous Operations
 
-- [ ] `Space` でカーソル位置がマークされ（`*` 表示・黄色）、カーソルが1つ下に進む
-- [ ] `..` の上で `Space` を押しても何も起きない
-- [ ] `a` で表示中の全エントリのマーク状態が反転する
-- [ ] `R` でリネームプロンプトが現在の名前で入力済みの状態で開き、確定すると実際にリネームされる
-- [ ] `r`（小文字）でも同じくリネームプロンプトが開く（`R`/`r` は同じアクションへの複数キー割り当て）
-- [ ] `K` で mkdir プロンプトが開き、確定すると新規ディレクトリが作成される
-- [ ] `D` で削除確認ダイアログ（対象件数付き）が出る。`y` で削除、`n`/`Esc` でキャンセル
-- [ ] `d`（小文字）でも同じく削除確認ダイアログが開く
-- [ ] 設定の `delete_behavior` が `trash` のとき、ゴミ箱に移動する（デスクトップ環境がない場合は失敗してエラー表示になることを確認。無言で完全削除にフォールバックしないこと）
-- [ ] **macOS:** スクラッチディレクトリに適当なファイルを作り、`D`/`y` で削除して `The AppleScript exited with error` のようなエラーが出ないこと、ログに「moved 1 item(s) to trash」と表示されること、実際に `~/.Trash/` にファイルが移動していることを確認する（`ls ~/.Trash/` で確認。ターミナルに Automation 権限プロンプトが出ないことも合わせて確認）
+- [ ] `Space` marks the cursor position (shown as `*`, yellow) and moves the cursor down by one
+- [ ] Pressing `Space` on `..` does nothing
+- [ ] `a` toggles the mark state of all currently displayed entries
+- [ ] `R` opens the rename prompt pre-filled with the current name; confirming actually renames it
+- [ ] `r` (lowercase) also opens the same rename prompt (`R`/`r` are multiple key bindings for the same action)
+- [ ] `K` opens the mkdir prompt; confirming creates a new directory
+- [ ] `D` shows a delete confirmation dialog (with the target count). `y` deletes, `n`/`Esc` cancels
+- [ ] `d` (lowercase) also opens the same delete confirmation dialog
+- [ ] When `delete_behavior` is set to `trash`, items move to the trash (confirm that without a desktop environment it fails and shows an error, rather than silently falling back to permanent deletion)
+- [ ] **macOS:** Create a suitable file in a scratch directory, delete it with `D`/`y`, and confirm no error such as `The AppleScript exited with error` appears, that the log shows "moved 1 item(s) to trash", and that the file has actually moved into `~/.Trash/` (check with `ls ~/.Trash/`). Also confirm no Automation permission prompt appears in the terminal
 
-## 3. 非同期タスク・進捗表示
+## 3. Async Tasks & Progress Display
 
-- [ ] `C` でマーク（なければカーソル位置）をもう片方のペインへのコピー確認ダイアログが出る（`Copy N item(s) -> /dest? (y/n)`）。`y` で開始、開始直後にログ欄へゲージが表示される
-- [ ] 大きめのディレクトリ（数万ファイル程度）をコピーし、ゲージのパーセンテージが単調に増加していく様子を確認する
-- [ ] コピー実行中もカーソル移動など他の操作ができる（UI がブロックされない）
-- [ ] 2つの転送を続けて開始し（それぞれ `y` で確認）、両方のゲージが同時に、それぞれ独立して進行することを確認する
-- [ ] `M` で移動も同様に確認ダイアログ（`Move N item(s) -> /dest? (y/n)`）が出た上で非同期実行される
-- [ ] コピー・移動先に同名エントリがある場合、上書き件数を含む1つの確認ダイアログにまとまる（`Copy N item(s) -> /dest? (M will be overwritten) (y/n)`。2つの連続ダイアログにならないこと）
-- [ ] コピー・移動の確認で `n` を押すとキャンセルされ、タスクが一切開始されないことを確認する
-- [ ] `confirm_operations = false` を設定し、衝突がないコピー・移動が確認なしで即実行されることを確認する
-- [ ] `confirm_operations = false` の状態でも、衝突があるコピー・移動は必ず確認ダイアログが出ることを確認する（このケースだけは常に確認）
-- [ ] タスク完了後、両ペインが自動的に再読み込みされ、マークがクリアされ、ログに結果のサマリーが表示される
-- [ ] タスク実行中に `q` を押すと、実行中タスク数を含む確認ダイアログが出る。`y` で終了、`n` で継続
+- [ ] `C` shows a confirmation dialog for copying the marked entries (or the entry at the cursor, if none are marked) to the other pane (`Copy N item(s) -> /dest? (y/n)`). `y` starts it, and a gauge appears in the log area right away
+- [ ] Copy a fairly large directory (tens of thousands of files) and confirm the gauge percentage increases monotonically
+- [ ] Other operations, such as moving the cursor, remain possible while a copy is in progress (the UI is not blocked)
+- [ ] Start two transfers in a row (confirming each with `y`) and confirm both gauges progress simultaneously and independently
+- [ ] `M` similarly shows a confirmation dialog for moving (`Move N item(s) -> /dest? (y/n)`) before running it asynchronously
+- [ ] When the copy/move destination has entries with the same name, they are combined into a single confirmation dialog including the overwrite count (`Copy N item(s) -> /dest? (M will be overwritten) (y/n)`. It must not become two separate dialogs)
+- [ ] Pressing `n` on a copy/move confirmation cancels it, and confirm no task starts at all
+- [ ] Set `confirm_operations = false` and confirm that copies/moves with no conflicts run immediately without confirmation
+- [ ] Even with `confirm_operations = false`, confirm that copies/moves with conflicts still always show a confirmation dialog (this is the one case that is always confirmed)
+- [ ] After a task completes, both panes reload automatically, marks are cleared, and a result summary is shown in the log
+- [ ] Pressing `q` while a task is running shows a confirmation dialog including the number of running tasks. `y` quits, `n` continues
 
-### 終了確認 `confirm_quit`（新規）
+### Quit confirmation `confirm_quit` (new)
 
-- [ ] タスクが何も実行されていない状態で `q`（または `Ctrl+C`）を押すと、デフォルト（`confirm_quit = true`）では「Quit ozzel? (y/n)」の確認ダイアログが出る。`n`/`Esc` でキャンセルするとファイラーに戻り、アプリは終了しない
-- [ ] 同じ状態で `y` を押すと実際に終了する
-- [ ] `confirm_quit = false` を設定し、タスクが何も実行されていない状態で `q` を押すと、確認なしで即座に終了することを確認する
-- [ ] `confirm_quit = false` の状態でも、タスク実行中に `q` を押すと「N task(s) running — quit anyway?」の確認は変わらず表示されることを確認する（この確認は `confirm_quit` の設定に関わらず常に出る）
+- [ ] With no task running, pressing `q` (or `Ctrl+C`) shows a "Quit ozzel? (y/n)" confirmation dialog by default (`confirm_quit = true`). Canceling with `n`/`Esc` returns to the filer and the app does not quit
+- [ ] Pressing `y` in the same state actually quits
+- [ ] Set `confirm_quit = false` and confirm that, with no task running, pressing `q` quits immediately with no confirmation
+- [ ] Even with `confirm_quit = false`, confirm that pressing `q` while a task is running still shows the "N task(s) running — quit anyway?" confirmation (this confirmation always appears regardless of the `confirm_quit` setting)
 
-### ログのタイムスタンプ・折り返し（新規）
+### Log timestamps & wrapping (new)
 
-- [ ] 何らかの操作（例: `B` でブックマーク追加）を行うと、ログの行頭に `YYYY-MM-dd HH:MM:SS `（例: `2026-08-05 14:03:22`）形式の時刻（年を含む）が付いていることを確認する
-- [ ] ターミナル幅を狭め（80〜90桁程度）、パスの長いエラー（例: 深いディレクトリでの `B` ブックマーク追加、長いパスでの削除・リネームエラーなど）を発生させ、ログ欄の右端で文字が欠けず、複数行に折り返して全文が読めることを確認する
-- [ ] 上記の折り返しで、2行目以降がタイムスタンプの幅ぶん字下げされ（スペースのみで、時刻は繰り返し表示されない）、メッセージ本文の桁が1行目と揃っていることを確認する
-- [ ] 日本語を含む長いログ行でも、全角文字が半分に割れず正しく折り返されることを確認する
-- [ ] 折り返しで表示行数がログ欄の高さを超える場合、常に最新の内容が下端に表示され（古い内容が上から消えていく）、新しいログが埋もれないことを確認する
-- [ ] ログ欄の高さ全体を使う長さの操作（例: `B` を連打）を行い、ゲージ表示中でもログ欄が正しく残り行数分だけ折り返し表示されることを確認する（ゲージ行自体にはタイムスタンプが付かないことも確認する）
+- [ ] Perform some operation (e.g. adding a bookmark with `B`) and confirm the log line is prefixed with a timestamp in `YYYY-MM-dd HH:MM:SS ` format (including the year, e.g. `2026-08-05 14:03:22`)
+- [ ] Narrow the terminal width (to around 80–90 columns), trigger an error with a long path (e.g. adding a bookmark with `B` in a deep directory, or a delete/rename error with a long path), and confirm no characters are cut off at the right edge of the log area — the full text wraps across multiple lines and remains readable
+- [ ] In the wrapping above, confirm that from the second line onward the indentation matches the width of the timestamp (spaces only, the time itself is not repeated), and that the message body columns line up with the first line
+- [ ] Confirm that even long log lines containing Japanese text wrap correctly without splitting full-width characters in half
+- [ ] When the wrapped line count exceeds the height of the log area, confirm the latest content is always shown at the bottom (older content scrolls off the top) and new log lines are never buried
+- [ ] Perform an operation long enough to fill the entire height of the log area (e.g. repeatedly pressing `B`) and confirm the log area still wraps correctly within its remaining line count even while a gauge is displayed (also confirm the gauge line itself has no timestamp)
 
-## 4. 絞込・検索
+## 4. Filtering & Search
 
-- [ ] `f` または `/` で絞込モードに入り、1文字入力するたびに一覧がリアルタイムに絞り込まれる
-- [ ] ペインのヘッダに `[flt: 入力文字列]` が表示される
-- [ ] `re:` で始まる入力が正規表現として扱われる（例: `re:^IMG_[0-9]+\.jpg$`）
-- [ ] 不正な正規表現を入力すると、入力欄が赤字になりエラーメッセージが表示される。一覧は「一致なし」扱いになりクラッシュしない
-- [ ] `Enter` で絞込を確定（一覧は絞り込まれたまま通常モードに戻る）
-- [ ] 通常モードで `Esc` を押すと、有効な絞込が解除される
-- [ ] 絞込中でも `..` は常に表示される
+- [ ] Pressing `f` or `/` enters filter mode, and the list is filtered in real time as each character is typed
+- [ ] The pane header shows `[flt: <input string>]`
+- [ ] Input starting with `re:` is treated as a regular expression (e.g. `re:^IMG_[0-9]+\.jpg$`)
+- [ ] Entering an invalid regular expression turns the input field red and shows an error message. The list is treated as "no matches" and does not crash
+- [ ] `Enter` confirms the filter (the list stays filtered and returns to normal mode)
+- [ ] Pressing `Esc` in normal mode clears an active filter
+- [ ] `..` is always shown even while filtering
 
-## 5. zip 圧縮・展開
+## 5. Zip Compression & Extraction
 
-- [ ] `p` でマーク（なければカーソル位置）を zip 圧縮するプロンプトが `<対象名>.zip` 入力済みで開く
-- [ ] 確定すると、もう片方のペインのディレクトリにアーカイブが作成される
-- [ ] ネストしたディレクトリと日本語ファイル名を含むディレクトリを圧縮できる
-- [ ] 既存の同名アーカイブがある場合、上書き確認ダイアログが出る
-- [ ] `u` で `.zip` ファイルをもう片方のペインへ展開できる。`.zip` 以外のファイルで押すとエラーになる
-- [ ] 展開先に同名の上位階層エントリが既にある場合、上書き確認ダイアログが出る
-- [ ] 圧縮・展開したツリーが元の内容（ファイル内容・日本語ファイル名）と一致する
+- [ ] `p` opens a prompt for zip-compressing the marked entries (or the entry at the cursor, if none are marked), pre-filled with `<target-name>.zip`
+- [ ] Confirming creates the archive in the other pane's directory
+- [ ] Nested directories and directories containing Japanese file names can be compressed
+- [ ] If an archive with the same name already exists, an overwrite confirmation dialog appears
+- [ ] `u` extracts a `.zip` file into the other pane. Pressing it on a non-`.zip` file results in an error
+- [ ] If the extraction destination already has a top-level entry with the same name, an overwrite confirmation dialog appears
+- [ ] The compressed/extracted tree matches the original content (file contents, Japanese file names)
 
-## 6. 履歴・ブックマーク・ホーム
+## 6. History, Bookmarks & Home
 
-- [ ] `B` でアクティブペインの現在ディレクトリがブックマークに追加され、ログに表示される。同じディレクトリで再度押すと「既に登録済み」の旨がログに出る
-- [ ] `b` でブックマーク一覧が中央にポップアップ表示される
-- [ ] ブックマーク一覧で `↑`/`↓` で選択を移動し、`Enter` でアクティブペインがそこへ移動する
-- [ ] ブックマーク一覧で `d` を押すと、ハイライト中の項目が削除され、一覧がその場で更新される
-- [ ] `Esc` でブックマーク一覧を閉じても、ペインは移動しない
-- [ ] `H`（Shift+h）で履歴一覧が表示され、直近訪問したディレクトリが新しい順に並ぶ（**キー配置変更**: 以前の `h` は今回からヘルプ画面に割り当て。次のセクションで確認）
-- [ ] `~` でホームディレクトリ（設定の `home`、なければ OS のホーム）へ移動する
-- [ ] `H`（Shift+h）を押してもホームには移動しない（ヘルプ画面が変更前のホームキーを奪っていないことの確認 — 今は履歴専用）
-- [ ] 存在しない `home` を設定した状態で `~` を押すと、エラーがログに出て現在地は変わらない
+- [ ] `B` adds the active pane's current directory to bookmarks and shows this in the log. Pressing it again on the same directory logs that it is "already registered"
+- [ ] `b` shows a bookmark list popup in the center of the screen
+- [ ] In the bookmark list, `↑`/`↓` move the selection, and `Enter` moves the active pane to the selected directory
+- [ ] Pressing `d` in the bookmark list deletes the highlighted entry and updates the list in place
+- [ ] Closing the bookmark list with `Esc` does not move the pane
+- [ ] `H` (Shift+h) shows the history list, with recently visited directories ordered newest first (**key layout change**: the previous `h` binding is now assigned to the help screen — checked in the next section)
+- [ ] `~` moves to the home directory (the config's `home`, or the OS home if unset)
+- [ ] Pressing `H` (Shift+h) does not move to home (confirming the help screen has not taken over the old home key — it is now dedicated to history)
+- [ ] With a nonexistent `home` configured, pressing `~` logs an error and the current location does not change
 
-## 7. ヘルプ画面（新規）
+## 7. Help Screen (new)
 
-- [ ] `h` を押すとヘルプ画面がフルスクリーンで開く（上下のペイン・ログ・ステータスバーが一時的に消える）
-- [ ] `?` を押しても同じくヘルプ画面が開く
-- [ ] カテゴリ別（移動・マーク・ファイル操作・絞込・履歴/ブックマーク/ホーム・外部連携/ビューア・その他）に見出し付きで一覧表示されることを確認する
-- [ ] `rename` の行に `r` と `R` の両方がカンマ区切りで表示されていることを確認する（複数キー→1アクションの表示確認）
-- [ ] 一覧の末尾に、リマップ不可な固定キー（プロンプト・確認ダイアログ・履歴/ブックマークメニュー・ビューア・ヘルプ画面自身）の説明が静的セクションとして表示されることを確認する
-- [ ] `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End`（`g`/`G` も）でスクロールでき、末尾・先頭を超えない
-- [ ] `q`・`Esc`・`h` のいずれでもヘルプ画面が閉じてファイラーに戻ることを確認する
-- [ ] `[keys]` で `"z" = "quit"` のような上書きを設定し、ヘルプ画面の `quit` の行に `z` が表示される（現在の実効キーバインドを反映することの確認）
-- [ ] `edit_config` の行が `,` キー付きで一覧に表示されることを確認する（「外部連携/ビューア」カテゴリ）
-- [ ] `open` の行が1行だけ表示され、`Enter, o` のようにキーがカンマ区切りでまとまっていることを確認する（旧 `enter`/`view` の2行に分かれていないこと）
+- [ ] Pressing `h` opens the help screen full-screen (the top/bottom panes, log, and status bar temporarily disappear)
+- [ ] Pressing `?` also opens the same help screen
+- [ ] Confirm the list is shown with headings by category (Navigation, Marking, File Operations, Filtering, History/Bookmarks/Home, External Integration/Viewer, Other)
+- [ ] Confirm the `rename` row shows both `r` and `R`, comma-separated (checking the display for multiple keys mapped to one action)
+- [ ] Confirm that a static section at the end of the list describes the fixed, non-remappable keys (prompts, confirmation dialogs, history/bookmark menus, viewer, help screen itself)
+- [ ] Confirm scrolling works with `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` (and `g`/`G`), without going past the top or bottom
+- [ ] Confirm the help screen closes and returns to the filer with any of `q`, `Esc`, or `h`
+- [ ] Set an override such as `"z" = "quit"` in `[keys]` and confirm the help screen's `quit` row shows `z` (confirming it reflects the currently effective key bindings)
+- [ ] Confirm the `edit_config` row is shown in the list with the `,` key (in the "External Integration/Viewer" category)
+- [ ] Confirm the `open` row is shown as a single line, with its keys grouped comma-separated like `Enter, o` (not split into two lines for the old `enter`/`view`)
 
-## 8. ビューア（テキスト / 16進ダンプ）
+## 8. Viewer (Text / Hex Dump)
 
-- [ ] `o` でカーソル位置のファイルが組み込みのビューアで開く（フルスクリーン表示、上下のペイン・ログ・ステータスバーが一時的に消える）。`Enter` をファイルの上で押しても同じくビューアが開く（`Enter`/`o` は同じ1つのアクション `open` であることの確認）
-- [ ] `x` は何にも割り当てられていない（押しても何も起きない）ことを確認する（旧 View アクションのキーで、`open` への統合により解放された）
-- [ ] 長い Rust ソースファイルなどを開き、`↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End`（`g`/`G` も）でスクロールできる。末尾・先頭を超えてスクロールしない
-- [ ] `j`/`k`（1行）、`d`/`u`（半ページ）、`f`/`b`/`Space`（1ページ）が、それぞれ `↓`/`↑`・`PageDown`/`PageUp` と同じ量だけスクロールすることを確認する（`less` 互換のスクロールキー、新規）
-- [ ] フッターに `path  [text]  [12-45/230 lines]  Tab:hex/text  q:close` のように現在モード・現在位置・総行数が表示され、スクロールに応じて更新される
-- [ ] 日本語ファイル名・日本語テキストを含むファイルを開き、文字が正しく表示される（桁がずれない）
-- [ ] 長い行を含むファイルで `←`/`→` を押すと横スクロールする（折り返しではなくはみ出し部分の表示切替であることを確認）
-- [ ] テキストファイルを開いた状態で `Tab` を押すと16進ダンプ表示（`[hex]`）に切り替わり、フッターがバイト範囲表示（例: `[0-320 bytes]`）に変わる。もう一度 `Tab` でテキスト表示に戻る
-- [ ] 16進ダンプ表示で `xxd` と見た目が一致することを確認する（8桁オフセット、16バイトを8バイトずつ2組で16進表示、右端に `|...|` の ASCII ガター、非表示文字が `.` になる）。`xxd <ファイル>` と見比べるとよい
-- [ ] 16進ダンプ表示で `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` によるスクロールが1行=16バイト単位で動作し、末尾・先頭を超えない
-- [ ] バイナリファイル（実行ファイルや画像など）を開くと、拒否されずに最初から16進ダンプモードで開く。`Tab` を押すとテキスト表示（文字化けするが表示はされる）に切り替えられることを確認する
-- [ ] ディレクトリの上で `o`（または `Enter`）を押すと、エラーにならずそのディレクトリへ移動することを確認する（`open` が `view`/`enter` を統合した後の新しい挙動 — 以前の `View` はここでエラーだった）
-- [ ] `q` または `Esc` でビューアを閉じ、ファイラー画面に正しく復帰する（画面が乱れない）。テキスト/16進どちらのモードで閉じても復帰後の見た目が乱れないこと
-- [ ] `open_default`（旧: OS既定アプリで開く）を空いている `x` に割り当てて動作することを確認する（`[keys]` の `"x" = "open_default"` など）
+- [ ] `o` opens the file at the cursor position in the built-in viewer (full-screen display; the top/bottom panes, log, and status bar temporarily disappear). Pressing `Enter` on a file also opens the viewer (confirming `Enter`/`o` are the same single `open` action)
+- [ ] Confirm `x` is not bound to anything (pressing it does nothing) (this was the old View action's key, freed up by merging it into `open`)
+- [ ] Open a long Rust source file or similar and confirm scrolling works with `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` (and `g`/`G`), without scrolling past the top or bottom
+- [ ] Confirm `j`/`k` (1 line), `d`/`u` (half page), and `f`/`b`/`Space` (1 page) scroll by the same amount as `↓`/`↑` and `PageDown`/`PageUp` respectively (`less`-compatible scroll keys, new)
+- [ ] Confirm the footer shows the current mode, current position, and total line count, e.g. `path  [text]  [12-45/230 lines]  Tab:hex/text  q:close`, updating as you scroll
+- [ ] Open a file with a Japanese file name and Japanese text and confirm the characters display correctly (columns do not misalign)
+- [ ] In a file with long lines, confirm `←`/`→` scroll horizontally (confirm this is toggling the overflow display, not wrapping)
+- [ ] With a text file open, pressing `Tab` switches to hex dump display (`[hex]`), and the footer changes to a byte range display (e.g. `[0-320 bytes]`). Pressing `Tab` again returns to text display
+- [ ] Confirm the hex dump display matches `xxd`'s appearance (8-digit offset, 16 bytes shown as two groups of 8 in hex, an ASCII gutter with `|...|` on the right, non-printable characters shown as `.`). Comparing against `xxd <file>` is a good way to check
+- [ ] Confirm scrolling in hex dump display with `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` works in units of 1 line = 16 bytes, without going past the top or bottom
+- [ ] Opening a binary file (an executable or image, etc.) is not rejected and opens directly in hex dump mode. Confirm pressing `Tab` switches to text display (garbled but displayed)
+- [ ] Confirm pressing `o` (or `Enter`) on a directory moves into that directory without an error (new behavior after `open` merged `view`/`enter` — previously `View` errored here)
+- [ ] Confirm `q` or `Esc` closes the viewer and correctly returns to the filer screen (no display corruption). Confirm the return display is not corrupted regardless of whether it closes from text or hex mode
+- [ ] Confirm `open_default` (formerly: open with the OS default app) works when bound to a free key such as `x` (e.g. `"x" = "open_default"` in `[keys]`)
 
-## 9. 外部プログラム連携（TUI の退避・復帰）
+## 9. External Program Integration (TUI Suspend/Resume)
 
-この項目は自動テストの対象外です。実ターミナル（`tmux` 推奨）で必ず確認してください。
+This item is not covered by automated tests. Be sure to check it in a real terminal (`tmux` recommended).
 
-- [ ] `:` でコマンド入力プロンプトが開く。空欄のまま `Enter` を押すと何も実行されずキャンセルされる
-- [ ] `: ls` → `Enter` で TUI が退避し、`ls` の出力がそのまま表示される。実行後 `[ozzel] exit: ... — press any key` が出て、何かキーを押すと TUI が正しく復帰する（画面が乱れない）
-- [ ] `: vim <ファイル名>` → `Enter` で vim がフルスクリーンで起動し、通常どおり編集できる。`:q` で終了すると「press any key」を経て TUI に戻る
-- [ ] `e` でカーソル位置のファイルをエディタ（`config.editor` または `$EDITOR`）で直接開く。終了すると（「press any key」を経由せず）即座に TUI へ復帰する
-- [ ] `e` をディレクトリの上で押すとエラーになる。ファイルが選択されていない状態（`..` など）でも同様
-- [ ] エディタ未設定・`$EDITOR` 未設定の状態で `e` を押すと、エラーメッセージがログに出る
-- [ ] `: sleep 30` のようにしばらく待つコマンドを実行し、途中で `Ctrl+C` を押す。**子プロセスだけが中断され、`ozzel` 自体は生存して「press any key」表示になること**（プロセスグループが正しく分離されているかの確認。退行しやすい箇所なので必ず確認する）
-- [ ] バックグラウンドでコピータスクを実行中に `:` や `e` で子プロセス・エディタを開き、しばらくしてから終了する。復帰後に画面が乱れておらず、進捗ゲージが正しく再開・継続していることを確認する
+- [ ] `:` opens the command input prompt. Pressing `Enter` with an empty input cancels without running anything
+- [ ] `: ls` → `Enter` suspends the TUI and shows `ls`'s output as-is. After it runs, `[ozzel] exit: ... — press any key` is shown, and pressing any key correctly resumes the TUI (no display corruption)
+- [ ] `: vim <filename>` → `Enter` launches vim full-screen, and you can edit normally. Quitting with `:q` returns to the TUI via the "press any key" prompt
+- [ ] `e` opens the file at the cursor directly in the editor (`config.editor` or `$EDITOR`). Quitting returns to the TUI immediately (without going through "press any key")
+- [ ] Pressing `e` on a directory results in an error. Same when no file is selected (e.g. on `..`)
+- [ ] With no editor configured and no `$EDITOR` set, pressing `e` logs an error message
+- [ ] Run a command that takes a while, such as `: sleep 30`, and press `Ctrl+C` partway through. **Confirm only the child process is interrupted and `ozzel` itself survives, showing the "press any key" prompt** (checking whether the process group is correctly separated — this is prone to regressions, so be sure to check it)
+- [ ] While a copy task is running in the background, open a child process/editor with `:` or `e`, wait a while, then quit. Confirm the display is not corrupted after returning, and that the progress gauge correctly resumes and continues
 
-### `,`（edit_config）と設定の live reload（新規）
+### `,` (edit_config) and config live reload (new)
 
-- [ ] 設定ファイルが存在しない状態で `,` を押すと、`examples/config.toml` と同内容のテンプレートから新規作成され（親ディレクトリごと）、エディタ（`config.editor` → `$EDITOR` → 未設定なら `vim`）で開くことを確認する
-- [ ] 開いたテンプレートの `[bindings]` セクションに、デフォルトの全キーバインドが `cursor_up = ["Up", "i"]` から `quit = ["C-c", "q"]` まで1行ずつアクティブな行として書き出されていることを確認する（コメントアウトされた一例だけではないこと）
-- [ ] `[bindings]` の `quit` 行を編集して `quit = ["C-c", "q", "Z"]` のようにキーを1つ追加し、`:wq` で保存すると、「config reloaded」が出て、追加したキー（`Z`）で即座に終了できることを確認する
-- [ ] `editor`/`$EDITOR` を両方未設定にしても `,` は `vim` にフォールバックして問題なく開くことを確認する（`e` はこの場合エラーになるが、`,` はならないこと）
-- [ ] 設定ファイル内でカーソル色（`[colors] cursor`）を変更し、`:wq` で保存・終了すると、ログに「config reloaded」と表示され、**アプリを再起動せずに**新しいカーソル色が即座に反映されることを確認する
-- [ ] 同じ編集で `[keys]` に新しいキー割り当て（例: `"z" = "quit"`）を追加すると、保存後すぐにそのキーが実際に効くことを確認する（ヘルプ画面 `h` で新しい割り当てが表示されることも合わせて確認）
-- [ ] 続けてもう一度 `,` を押し、TOML として不正な内容（例: 閉じ括弧を消す）に編集して `:wq` すると、アプリが終了せず、エラーメッセージがログに表示され、直前まで有効だった設定（変更後の色・キー割り当て）がそのまま保持されていることを確認する
-- [ ] 既に存在する設定ファイルに対して `,` を押しても、内容が上書き・初期化されないことを確認する
+- [ ] With no config file present, pressing `,` creates a new one (including parent directories) from a template identical to `examples/config.toml`, and opens it in the editor (`config.editor` → `$EDITOR` → falling back to `vim` if unset)
+- [ ] Confirm the opened template's `[bindings]` section writes out every default key binding as an active line, one per line, from `cursor_up = ["Up", "i"]` through `quit = ["C-c", "q"]` (not just a single commented-out example)
+- [ ] Edit the `quit` line in `[bindings]` to add a key, e.g. `quit = ["C-c", "q", "Z"]`, and confirm that saving with `:wq` shows "config reloaded" and the added key (`Z`) immediately quits the app
+- [ ] Confirm `,` falls back to `vim` and opens fine even with both `editor`/`$EDITOR` unset (`e` errors in this case, but `,` must not)
+- [ ] Change the cursor color (`[colors] cursor`) in the config file, save and quit with `:wq`, and confirm "config reloaded" appears in the log and the new cursor color takes effect immediately **without restarting the app**
+- [ ] In the same edit, add a new key binding to `[keys]` (e.g. `"z" = "quit"`) and confirm the key works immediately after saving (also confirm the new binding shows up in the help screen via `h`)
+- [ ] Press `,` again, edit it into invalid TOML (e.g. remove a closing bracket), and save with `:wq`. Confirm the app does not exit, an error message is shown in the log, and the config that was in effect just before (the changed color and key binding) is kept as-is
+- [ ] Confirm pressing `,` for a config file that already exists does not overwrite or reset its contents
 
 ### `Shift+Enter` / kitty keyboard protocol
 
-- [ ] **tmux（kitty protocol 対応）で確認:** ファイル上で `Shift+Enter` を押すと、`open_default`（OS既定アプリで開く）が発火することを確認する（`Enter` 単体では組み込みビューアが開くこととの違いを確認）
-- [ ] 同じ tmux セッションで、`C`/`M`/`D`/`R`/`K`（大文字・Shift 修飾のデフォルトキーバインド）がすべて従来どおり動作することを確認する（kitty protocol の `DISAMBIGUATE_ESCAPE_CODES` フラグが有効な状態でも、Phase 2 の大文字＋SHIFT正規化が壊れていないことの回帰確認）
-- [ ] **kitty protocol 非対応のターミナル（例: macOS 標準 Terminal.app、または tmux を使わない生の xterm）で確認:** `Shift+Enter` を押すと素の `Enter` として届き、組み込みビューアが開く（`open_default` は発火しない）ことを確認する。クラッシュや誤動作がないこと
-- [ ] tmux 内で `: vim <ファイル名>` → 編集 → `:q` で TUI に復帰した直後、`Shift+Enter` が復帰前と同じように動作すること（フラグの push/pop が非対称になっていないかの確認。壊れていると復帰後に `Shift+Enter` が効かなくなる、あるいは通常キー入力が乱れる）
-- [ ] 同じ復帰直後の状態で `C`/`M`/`D`/`R`/`K` も引き続き動作することを確認する
+- [ ] **Check in tmux (with kitty protocol support):** confirm pressing `Shift+Enter` on a file triggers `open_default` (open with the OS default app) (confirming the difference from `Enter` alone, which opens the built-in viewer)
+- [ ] In the same tmux session, confirm `C`/`M`/`D`/`R`/`K` (the default uppercase/Shift-modified key bindings) all still work as before (a regression check that Phase 2's uppercase+SHIFT normalization is not broken even with the kitty protocol's `DISAMBIGUATE_ESCAPE_CODES` flag enabled)
+- [ ] **Check in a terminal without kitty protocol support (e.g. macOS's stock Terminal.app, or a raw xterm without tmux):** confirm pressing `Shift+Enter` arrives as a plain `Enter` and opens the built-in viewer (`open_default` does not fire). Confirm no crash or misbehavior
+- [ ] Right after resuming the TUI in tmux via `: vim <filename>` → edit → `:q`, confirm `Shift+Enter` works the same as before suspension (checking whether the flag push/pop has become asymmetric — if broken, `Shift+Enter` stops working after resume, or normal key input gets garbled)
+- [ ] In the same just-resumed state, confirm `C`/`M`/`D`/`R`/`K` still work too
 
-**終了後にフラグが漏れていないことの確認（回帰テスト、新規）:** kitty keyboard protocol は main screen（通常の画面）と alternate screen（ozzel が使う画面）でフラグのスタックを別々に持っているため、push/pop のタイミングを一箇所でも誤ると、ozzel 終了後もシェル側にフラグが残ってしまいます（残ると `Ctrl+A` などを押したときにシェルへ `7;5u` のような文字列がそのまま入力されてしまいます）。kitty protocol に対応したターミナル（**Ghostty**、kitty 本体、対応版 WezTerm など）で必ず確認してください（tmux を挟まない直接起動でも、対応 tmux 経由でも両方確認するのが望ましい）。
+**Confirming no flag leaks after exit (regression test, new):** the kitty keyboard protocol keeps separate flag stacks for the main screen (the normal screen) and the alternate screen (the one ozzel uses), so a single mistake in push/pop timing can leave a flag set in the shell even after ozzel exits (if this happens, pressing something like `Ctrl+A` will type a raw string such as `7;5u` straight into the shell). Be sure to check this in a terminal that supports the kitty protocol (**Ghostty**, kitty itself, a supporting version of WezTerm, etc.) — ideally check both launching directly without tmux and via a supporting tmux.
 
-- [ ] `ozzel` を起動し、何も操作せずすぐに `q`/`y` で終了する。終了直後に `Ctrl+A`（や他の Ctrl 修飾キー）を押し、シェルのプロンプトが通常どおり反応する（カーソルが行頭に移動する等）ことを確認する。文字列 `u` を含む謎の文字列（`7;5u` 等）がプロンプトに入力されないこと
-- [ ] `ozzel` の中で何度かファイルを開いたりコピーしたりしてから終了し、同様に `Ctrl+A` 等が正常に効くことを確認する
-- [ ] `: vim <ファイル名>` のように `:`/`e` で外部コマンド・エディタを一度以上起動してから `ozzel` を終了し、同様に `Ctrl+A` 等が正常に効くことを確認する（suspend/resume を経由した場合の回帰確認）
-- [ ] （可能であれば）意図的にパニックを起こす、または `kill -TERM` 以外の方法でクラッシュに近い終了をさせても、シェルにフラグが残らないことを確認する
-- [ ] 上記いずれのケースでも、`ozzel` 再起動後の `Shift+Enter`/大文字キーの動作に異常がないことを確認する（前回セッションの終了処理が今回の起動に悪影響を与えていないこと）
+- [ ] Launch `ozzel`, quit right away with `q`/`y` without doing anything. Right after quitting, press `Ctrl+A` (or another Ctrl-modified key) and confirm the shell prompt responds normally (e.g. the cursor moves to the start of the line). Confirm no mystery string containing `u` (such as `7;5u`) gets typed into the prompt
+- [ ] Open and copy a few files inside `ozzel`, then quit, and confirm `Ctrl+A` etc. still work normally the same way
+- [ ] Launch an external command/editor at least once via `:`/`e` (e.g. `: vim <filename>`), then quit `ozzel`, and confirm `Ctrl+A` etc. still work normally (a regression check for the case that goes through suspend/resume)
+- [ ] (If possible) even after intentionally triggering a panic, or exiting in a way close to a crash other than `kill -TERM`, confirm no flag is left in the shell
+- [ ] In every case above, confirm `Shift+Enter`/uppercase keys behave normally after restarting `ozzel` (confirming the previous session's exit handling does not adversely affect this launch)
 
-### 今回の変更の回帰確認（キー配置変更まわり）
+### Regression check for this change (key layout changes)
 
-- [ ] `C`/`M`/`D`/`R`/`K` の大文字キーがすべて従来どおり動作する（コピー確認・移動確認・削除確認・リネーム・mkdir）
-- [ ] `d`/`r`（小文字の新規エイリアス）もそれぞれ削除確認・リネームを起動する
-- [ ] `h`/`?` がヘルプ画面を開き、`H`（Shift+h）が履歴一覧を開く（`h` 単体では履歴が開かないこと）
-- [ ] `~` がホームへ移動する（`H` では移動しないこと）
-- [ ] `:vim` での TUI 退避・復帰後も、上記すべて（大文字/小文字キー、ヘルプ、履歴、ホーム）が壊れず動作することを確認する
+- [ ] The uppercase keys `C`/`M`/`D`/`R`/`K` all still work as before (copy confirm, move confirm, delete confirm, rename, mkdir)
+- [ ] `d`/`r` (the new lowercase aliases) also trigger delete confirmation and rename respectively
+- [ ] `h`/`?` open the help screen, and `H` (Shift+h) opens the history list (`h` alone does not open history)
+- [ ] `~` moves to home (`H` does not move)
+- [ ] After TUI suspend/resume via `:vim`, confirm all of the above (uppercase/lowercase keys, help, history, home) still work without breaking
 
-## 10. 設定の上書き
+## 10. Config Overrides
 
-- [ ] 設定ファイルが存在しない状態で起動し、デフォルトキーバインドで動作することを確認する
-- [ ] 設定ファイルのパス（OS ごと。README 参照）に妥当な TOML を置き、`[keys]` でのキー再割り当てが反映されることを確認する（例: `"C-c" = "copy"`、`"q" = "none"`）
-- [ ] `"none"` を割り当てたキーが本当に無効化されることを確認する
-- [ ] 構文的に不正な TOML を置いて起動し、（画面を一切表示せずに）分かりやすいエラーメッセージを出して終了することを確認する
-- [ ] `delete_behavior = "permanent"` を設定し、削除がゴミ箱を経由せず完全削除になることを確認する
-- [ ] `home` を設定し、`~` がそのディレクトリへ移動することを確認する（`H` はホームには反応しないことも合わせて確認 — 履歴専用）
-- [ ] `editor` を設定し、`e` がそのコマンドで起動することを確認する
-- [ ] `confirm_operations = false` を設定し、衝突のないコピー・移動が確認なしで即実行されることを確認する（セクション3で確認済みならここでは再確認のみでよい）
-- [ ] `confirm_quit = false` を設定し、タスク未実行時に `q` が確認なしで即終了することを確認する（セクション3で確認済みならここでは再確認のみでよい）
-- [ ] `[bindings]` に `rename = ["r", "S-r"]` のような配列を設定し、両方のキーが実際にリネームを起動することを確認する
-- [ ] `[bindings]` と `[keys]` の両方が同じキーに言及した場合、`[bindings]` 側が勝つことを確認する（例: `[keys]` で `"z" = "quit"`、`[bindings]` で `copy = ["z"]` とした場合、`z` はコピーになる）
-- [ ] `[bindings]` に存在しないアクション名や不正なキー表記を指定して起動すると、他の設定エラーと同様にエラーメッセージを出して終了することを確認する
-- [ ] `[colors]` の `cursor` に named color（例: `"red"`）を設定し、カーソル色が変わることを確認する
-- [ ] `[colors]` の `cursor` に `"#RRGGBB"` 形式の16進数を設定し、その色が反映されることを確認する
-- [ ] `[colors]` の `cursor` に不正な値（例: `"not-a-color"`）を設定して起動すると、他の設定エラーと同様にエラーメッセージを出して終了することを確認する
-- [ ] `[colors]` の `cursor_inactive` に named color / `#RRGGBB` を設定し、非アクティブ側ペインのカーソル色が変わることを確認する
-- [ ] `[colors]` の `dim_inactive = false` を設定し、非アクティブ側ペインが薄暗くならず、アクティブ側と同じ明るさで表示されることを確認する
-- [ ] `[keys]` によるデフォルトキーバインドの再割り当てが今回の変更後も引き続き機能することを再確認する（例: `"C-c" = "copy"`、`"q" = "none"`、`"S-enter" = "none"` でも問題なく解除できること）
+- [ ] Launching with no config file present works with the default key bindings
+- [ ] Place valid TOML at the config file path (OS-specific, see README) and confirm key reassignment via `[keys]` takes effect (e.g. `"C-c" = "copy"`, `"q" = "none"`)
+- [ ] Confirm a key assigned `"none"` is actually disabled
+- [ ] Launching with syntactically invalid TOML in place exits with a clear error message (without displaying the screen at all)
+- [ ] Set `delete_behavior = "permanent"` and confirm deletion is permanent, bypassing the trash
+- [ ] Set `home` and confirm `~` moves to that directory (also confirm `H` does not respond to home — it's dedicated to history)
+- [ ] Set `editor` and confirm `e` launches with that command
+- [ ] Set `confirm_operations = false` and confirm conflict-free copies/moves run immediately without confirmation (if already confirmed in section 3, a re-check here is enough)
+- [ ] Set `confirm_quit = false` and confirm `q` quits immediately without confirmation when no task is running (if already confirmed in section 3, a re-check here is enough)
+- [ ] Set an array such as `rename = ["r", "S-r"]` in `[bindings]` and confirm both keys actually trigger rename
+- [ ] Confirm that when both `[bindings]` and `[keys]` refer to the same key, `[bindings]` wins (e.g. with `"z" = "quit"` in `[keys]` and `copy = ["z"]` in `[bindings]`, `z` becomes copy)
+- [ ] Specifying a nonexistent action name or invalid key notation in `[bindings]` exits with an error message, the same as other config errors
+- [ ] Set `cursor` in `[colors]` to a named color (e.g. `"red"`) and confirm the cursor color changes
+- [ ] Set `cursor` in `[colors]` to a `"#RRGGBB"` hex value and confirm that color is applied
+- [ ] Setting `cursor` in `[colors]` to an invalid value (e.g. `"not-a-color"`) exits with an error message, the same as other config errors
+- [ ] Set `cursor_inactive` in `[colors]` to a named color / `#RRGGBB` and confirm the inactive pane's cursor color changes
+- [ ] Set `dim_inactive = false` in `[colors]` and confirm the inactive pane is no longer dimmed and displays at the same brightness as the active side
+- [ ] Re-confirm that key reassignment of the default bindings via `[keys]` still works after this change (e.g. `"C-c" = "copy"`, `"q" = "none"`, and that `"S-enter" = "none"` still disables it without issue)
 
-## 11. ディレクトリ履歴（戻る/進む）・--cwd-file（新規）
+## 11. Directory History (Back/Forward) & `--cwd-file` (new)
 
-- [ ] いくつかディレクトリを移動したあと `Shift+←` を押すと、1つ前にいたディレクトリへそのペインだけ戻ることを確認する
-- [ ] 戻った状態で `Shift+→` を押すと、戻る前にいたディレクトリへ進むことを確認する
-- [ ] 戻る/進む先がない状態でそれぞれのキーを押すと、エラーにならずログにその旨（戻る/進む先がない）が表示され、現在地が変わらないことを確認する
-- [ ] 左右のペインを別々のディレクトリへ移動させたあと、それぞれ独立して `Shift+←`/`Shift+→` が機能する（片方の履歴がもう片方に影響しない）ことを確認する
-- [ ] `Shift+←` で戻ったあとに（`Shift+→` を押さず）別のディレクトリへ移動すると、「進む」スタックがクリアされ `Shift+→` が効かなくなる（ブラウザと同じ挙動）ことを確認する
-- [ ] `H`（Shift+h、履歴メニュー）はこれとは別に引き続き動作し、`Shift+←`/`Shift+→` の操作と混同しないことを確認する
-- [ ] README の `oz()` シェル関数（zsh/bash）を `~/.zshrc` などに追加し、`oz` でファイラーを起動、ディレクトリを移動してから `q` で終了すると、シェルのカレントディレクトリがそのディレクトリに追従することを確認する
-- [ ] `--cwd-file <path>` を手動で指定して `cargo run -- --cwd-file /tmp/ozzel-cwd` のように起動し、終了後に `/tmp/ozzel-cwd` の中身が終了時にフォーカスしていたペインのディレクトリと一致することを確認する
-- [ ] 設定に `quit_cd = false` を設定した状態で `--cwd-file` を指定して起動・終了すると、ファイルが書き込まれない（もしくは中身が変わらない）ことを確認する
-- [ ] `--cwd-file` を指定せずに通常起動・終了しても、エラーにならず何も書き込まれないことを確認する
-- [ ] `oz()` ラッパーを定義**せず**に、素の `ozzel --cwd-file <path>` をシェルから直接起動・終了した場合、`<path>` にはファイルが書き込まれる（アプリ側は仕様どおり動く）が、**シェル自身のカレントディレクトリは変化しない**ことを確認する（ラッパー未経由では `cd` が起きないのが仕様であることの確認）
+- [ ] After moving through a few directories, pressing `Shift+←` goes back to the previous directory, for that pane only
+- [ ] After going back, pressing `Shift+→` goes forward to the directory you were at before going back
+- [ ] Pressing either key when there is nowhere to go back/forward to does not error; the log shows that there's nowhere to go, and the current location does not change
+- [ ] After moving the left and right panes to different directories, confirm `Shift+←`/`Shift+→` work independently for each (one pane's history does not affect the other)
+- [ ] After going back with `Shift+←`, moving to a different directory (without pressing `Shift+→`) clears the "forward" stack, so `Shift+→` stops working (same behavior as a browser)
+- [ ] Confirm `H` (Shift+h, the history menu) continues to work independently of this, and is not confused with `Shift+←`/`Shift+→`
+- [ ] Add the README's `oz()` shell function (zsh/bash) to `~/.zshrc` or similar, launch the filer with `oz`, move to a directory, and quit with `q`. Confirm the shell's current directory follows to that directory
+- [ ] Manually specify `--cwd-file <path>`, launching e.g. `cargo run -- --cwd-file /tmp/ozzel-cwd`, and confirm that after quitting, the contents of `/tmp/ozzel-cwd` match the directory of the pane that was focused at exit
+- [ ] With `quit_cd = false` set in the config, launch and quit with `--cwd-file` specified, and confirm the file is not written (or its contents don't change)
+- [ ] Launching and quitting normally without specifying `--cwd-file` does not error and nothing is written
+- [ ] Without defining the `oz()` wrapper, launch plain `ozzel --cwd-file <path>` directly from the shell and quit. Confirm `<path>` is written to (the app itself behaves as specified), but **the shell's own current directory does not change** (confirming that without the wrapper, no `cd` happens — this is by design)
 
-## 12. ログビューア（`L`、新規）
+## 12. Log Viewer (`L`, new)
 
-- [ ] `L`（Shift+l）を押すと、フルスクリーンのログビューアが開く（パネル・ステータスバーが一時的に消える）
-- [ ] 開いた直後、スクロール位置が最新（末尾）の内容になっていることを確認する
-- [ ] 操作を積み重ねてログを500行以上溜めた状態で `L` を開き、`↑`/`↓`/`PageUp`/`PageDown`/`Home`（`g`）/`End`（`G`）でスクロールできることを確認する。`Home`/`g` で先頭（最も古い内容）まで、`End`/`G` で末尾（最新）まで到達することを確認する
-- [ ] 長いログ行（パスを含むエラーなど）が折り返され、継続行がタイムスタンプ幅ぶん字下げされていることを確認する（ステータス欄下のミニログと同じ書式）
-- [ ] `q`/`Esc` でログビューアを閉じ、ファイラー画面に正しく復帰することを確認する（画面が乱れない）
-- [ ] `ozzel` を再起動するとログビューアの内容が空になる（インメモリのみで永続化されないこと）ことを確認する
+- [ ] Pressing `L` (Shift+l) opens the full-screen log viewer (the panels and status bar temporarily disappear)
+- [ ] Right after opening, confirm the scroll position is at the latest (bottom) content
+- [ ] Accumulate 500+ lines of log by performing repeated operations, open it with `L`, and confirm scrolling works with `↑`/`↓`/`PageUp`/`PageDown`/`Home` (`g`)/`End` (`G`). Confirm `Home`/`g` reaches the top (the oldest content) and `End`/`G` reaches the bottom (the latest)
+- [ ] Confirm long log lines (e.g. errors containing paths) wrap, with continuation lines indented by the width of the timestamp (the same formatting as the mini-log below the status area)
+- [ ] Confirm `q`/`Esc` closes the log viewer and correctly returns to the filer screen (no display corruption)
+- [ ] Confirm the log viewer's contents are empty after restarting `ozzel` (in-memory only, not persisted)
 
-## 13. コマンドパレット（`F`、新規）
+## 13. Command Palette (`F`, new)
 
-- [ ] `F`（Shift+f）を押すと、中央にコマンドパレットのポップアップが開く
-- [ ] 何も入力しない状態で全アクションが一覧表示されることを確認する
-- [ ] `rena` のように入力すると `rename` だけに（アクション名の部分一致で）絞り込まれることを確認する
-- [ ] アクション名に含まれない単語（説明文にのみ含まれる単語、例: `cursor`）で検索しても該当アクションが絞り込まれることを確認する（説明文も検索対象であることの確認）
-- [ ] `↑`/`↓` でハイライトが移動することを確認する
-- [ ] `mkdir` などプロンプトを要求するアクションを選んで `Enter` を押すと、パレットが閉じたうえで mkdir プロンプトが開くことを確認する（パレット経由でも通常どおりプロンプト・確認ダイアログが機能する）
-- [ ] `Esc` で何も実行せずパレットが閉じることを確認する
-- [ ] `Backspace` で絞込文字列を削除でき、削除に応じて一覧が再計算されることを確認する
+- [ ] Pressing `F` (Shift+f) opens the command palette popup in the center of the screen
+- [ ] With no input, confirm all actions are listed
+- [ ] Typing e.g. `rena` narrows the list to just `rename` (partial match on the action name)
+- [ ] Confirm that searching for a word not contained in the action name but only in its description (e.g. `cursor`) also narrows to the matching action (confirming the description text is also searched)
+- [ ] Confirm `↑`/`↓` move the highlight
+- [ ] Selecting an action that requires a prompt, such as `mkdir`, and pressing `Enter` closes the palette and opens the mkdir prompt (confirming prompts/confirmation dialogs work normally even via the palette)
+- [ ] Confirm `Esc` closes the palette without executing anything
+- [ ] Confirm `Backspace` deletes characters from the filter string, and the list is recomputed accordingly
 
-## 14. 行の色分け・パーミッション列（新規）
+## 14. Row Coloring & Permissions Column (new)
 
-- [ ] ディレクトリの行が水色（シアン）で表示されることを確認する（カーソル行を除く）
-- [ ] 隠しファイル・隠しディレクトリの行が赤色で表示されることを確認する
-- [ ] 実行可能ファイル（`chmod +x` したファイル）の行が黄色で表示されることを確認する。ディレクトリの実行ビット（検索可能属性）は無視され、ディレクトリの色（水色）のまま変わらないことを確認する
-- [ ] 隠しディレクトリ（例: `.git`）が赤（hidden 優先）で表示され、水色にならないことを確認する（優先順位: hidden > executable > directory）
-- [ ] マークした行が実行可能ファイルであっても、黄色（マーク色）のまま表示され、実行可能ファイルの色と視覚的に区別が付きにくくないか確認する（両方黄色なので同化する — 問題があれば報告）
-- [ ] 非アクティブ側ペインで、種別による色（水色・赤・黄色）が薄暗い表示と組み合わさって見えることを確認する（色が完全に消えずに薄暗くなること）
-- [ ] `[colors]` の `directory`/`hidden`/`executable` を別の色に変更し、それぞれ反映されることを確認する
-- [ ] デフォルト（`show_permissions = true`）で、各行の名前の隣に `drwxr-xr-x` のようなパーミッション列が表示されることを確認する。`ls -l` の同じファイルと見比べて一致することを確認する
-- [ ] シンボリックリンクのパーミッション列が `l` で始まることを確認する
-- [ ] `show_permissions = false` を設定すると、パーミッション列が表示されず名前列がその分広くなることを確認する
-- [ ] ターミナル幅を大きく狭めていくと、名前列が極端に潰れる前にパーミッション列が自動的に非表示になることを確認する（`show_permissions = true` のままでも）
+- [ ] Confirm directory rows are shown in cyan (excluding the cursor row)
+- [ ] Confirm hidden files and hidden directories are shown in red
+- [ ] Confirm executable files (`chmod +x`'d files) are shown in yellow. Confirm a directory's execute bit (the "searchable" attribute) is ignored, and directories stay in their directory color (cyan) regardless
+- [ ] Confirm a hidden directory (e.g. `.git`) is shown in red (hidden takes priority) rather than cyan (priority order: hidden > executable > directory)
+- [ ] Confirm a marked row that is an executable file stays in the mark color (yellow), and check whether it's hard to visually distinguish from executable-file yellow (both being yellow means they blend together — report if this is an issue)
+- [ ] In the inactive pane, confirm the type-based colors (cyan, red, yellow) appear combined with the dimming (colors dim rather than disappearing entirely)
+- [ ] Change `directory`/`hidden`/`executable` in `[colors]` to different colors and confirm each is applied
+- [ ] By default (`show_permissions = true`), confirm a permissions column like `drwxr-xr-x` is shown next to the name on each row. Confirm it matches `ls -l`'s output for the same file
+- [ ] Confirm a symbolic link's permissions column starts with `l`
+- [ ] Set `show_permissions = false` and confirm the permissions column is hidden and the name column widens accordingly
+- [ ] Narrow the terminal width significantly and confirm the permissions column is automatically hidden before the name column gets crushed too much (even while `show_permissions = true`)
 
-## 15. マウス操作（新規）
+## 15. Mouse Operations (new)
 
-この項目は自動テストの対象外です。マウス対応ターミナル（`tmux` 推奨）で必ず確認してください。
+This item is not covered by automated tests. Be sure to check it in a mouse-capable terminal (`tmux` recommended).
 
-- [ ] 左ペインのエントリ行をクリックすると、そのペインへフォーカスが移り、カーソルがそのエントリへ移動することを確認する（右ペインでも同様）
-- [ ] ペインのヘッダー（枠線のタイトル部分）やエントリのない余白をクリックすると、フォーカスだけ移りカーソル位置は変わらないことを確認する
-- [ ] 非アクティブ側ペインの上でホイールを回すと、フォーカスは移らずそのペインのカーソルだけが3行ずつ動くことを確認する（アクティブ側は変わらないまま）
-- [ ] アクティブ側ペインの上でホイールを回しても同様に3行ずつカーソルが動くことを確認する
-- [ ] エントリ行から左ボタンでドラッグすると、ドラッグ開始位置（起点）から現在位置までの範囲の行がマークされる（未マークの行がマークされる）ことを確認する
-- [ ] マーク済みの範囲をドラッグで覆うと、その行がまとめて解除されることを確認する（ドラッグでの選択解除。ドラッグ開始時点のマーク状態が基準になる）
-- [ ] 範囲を広げたあと、ポインタを戻して範囲を狭める（後退する）と、範囲から外れた行が「ドラッグ開始前の状態」に自動的に戻ることを確認する（一度トグルしたら固定ではなく、範囲に入っている間だけトグルされているライブなラバーバンド選択であること）
-- [ ] 起点を挟んで逆方向にドラッグ（行き過ぎて反対側まで戻す）すると、範囲外に出た行は元に戻り、新たに範囲に入った行がトグルされることを確認する
-- [ ] ドラッグ開始前から既にマークされていた行を範囲でなぞると、その行がいったん解除され、範囲から外れると再びマーク状態に戻ることを確認する
-- [ ] 片方のペインでドラッグを開始し、ポインタをもう片方のペインまで動かしても、もう片方のペインでは何もトグルされず、フォーカスも移動しないことを確認する（ドラッグ中はドラッグ開始ペインに固定）
-- [ ] ドラッグを離した（マウスアップした）あと、通常のクリック・キー操作に問題なく戻ることを確認する
-- [ ] ディレクトリの行をダブルクリックすると、そのディレクトリへ移動することを確認する（`open` と同じ挙動）
-- [ ] ファイルの行をダブルクリックすると、組み込みビューアが開くことを確認する
-- [ ] ビューア・ログビューア・ヘルプ画面を開くと、マウスキャプチャが自動的に解除されることを確認する（`mouse = true` の状態で、通常のファイラー画面ではクリックでカーソルが動くのに、これら3画面ではクリック/ドラッグが ozzel に反応しなくなる）
-- [ ] ビューアで複数行にまたがる範囲をマウスでドラッグして選択し、OS のコピー操作（ターミナルのメニューやショートカット）でコピー → 別アプリに貼り付けると、選択した本文だけが入っており、枠線の記号やタイトル・フッター行が混ざっていないことを確認する（paste-check）。ログビューア・ヘルプ画面でも同様に確認する
-- [ ] ビューア・ログビューア・ヘルプ画面のいずれも、画面のどこにも罫線（枠線）が表示されていないことを目視で確認する（タイトル/スクロール位置はフッター行にのみ表示される）
-- [ ] ビューア・ログビューア・ヘルプ画面の表示中にホイールを回しても ozzel 側は反応せず（スクロールしない）、ターミナル本来のスクロールバック操作になることを確認する。`↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` などキーボードでのスクロールは引き続き機能することを確認する
-- [ ] ビューア・ログビューア・ヘルプ画面を `q`/`Esc` で閉じてファイラーに戻ると、マウスキャプチャが自動的に再開し、クリックでのカーソル移動やドラッグでのマーク操作が再び効くことを確認する
-- [ ] コマンドパレット（`F`）を開いている間はマウスキャプチャが解除されない（維持される）ことを確認する
-- [ ] `mouse = false` の状態でビューア・ログビューア・ヘルプ画面を開いても（元々キャプチャが無効なので）特に問題が起きないことを確認する
-- [ ] プロンプト・確認ダイアログ・ブックマーク/履歴メニューなど、ビューア/ログ/ヘルプ以外のモーダル表示中はマウス操作が無視され、クリックでは閉じない（`Esc` などキー操作でのみ閉じる）ことを確認する
-- [ ] `: vim <ファイル>` などで TUI を退避 → 復帰したあとも、マウス操作（クリック・ホイール）が引き続き効くことを確認する（退避中の vim 側でもマウスが正常に機能していること）
-- [ ] `mouse = false` を設定して起動すると、クリック・ドラッグ・ホイールが ozzel には反応せず、ターミナル本来のネイティブなテキスト選択（マウスドラッグでの選択・コピー）が使えることを確認する
-- [ ] `mouse = true`（デフォルト）の状態で、Shift キーを押しながらドラッグすると、ozzel を介さずターミナルのネイティブなテキスト選択ができることを確認する（環境によって挙動が異なる場合はその旨を報告）
+- [ ] Clicking an entry row in the left pane moves focus to that pane and moves the cursor to that entry (same for the right pane)
+- [ ] Clicking a pane's header (the title part of the border) or empty space with no entry only moves focus, without changing the cursor position
+- [ ] Confirm scrolling the wheel over the inactive pane does not move focus, and only moves that pane's cursor by 3 lines at a time (the active side remains unchanged)
+- [ ] Confirm scrolling the wheel over the active pane likewise moves the cursor by 3 lines at a time
+- [ ] Dragging with the left button from an entry row marks the rows in the range from the drag start position (the anchor) to the current position (unmarked rows get marked)
+- [ ] Dragging over an already-marked range unmarks those rows (deselection via drag; the mark state at drag start is the baseline)
+- [ ] After extending the range and then pulling the pointer back to shrink it (retreating), confirm rows that fall out of the range automatically revert to their "before drag started" state (this is a live, rubber-band selection where toggling isn't fixed once applied — it only stays toggled while inside the range)
+- [ ] Dragging in the reverse direction past the anchor (overshooting to the other side and back) causes rows that exit the range to revert, while newly entered rows get toggled
+- [ ] Dragging over a row that was already marked before the drag started causes it to unmark temporarily, then return to marked once it leaves the range
+- [ ] Starting a drag in one pane and moving the pointer into the other pane does not toggle anything there, nor does focus move (the drag stays locked to the pane it started in)
+- [ ] After releasing the drag (mouse up), confirm normal clicks/key operations work fine again
+- [ ] Double-clicking a directory row moves into that directory (same behavior as `open`)
+- [ ] Double-clicking a file row opens the built-in viewer
+- [ ] Confirm mouse capture is automatically released when opening the viewer, log viewer, or help screen (with `mouse = true`, clicking normally moves the cursor in the filer screen, but clicks/drags stop reaching ozzel on these three screens)
+- [ ] In the viewer, drag-select a range spanning multiple lines with the mouse, then copy it via the OS (the terminal's menu or shortcut) and paste into another app. Confirm only the selected body text is included, with no border characters, title, or footer line mixed in (paste-check). Confirm the same for the log viewer and help screen
+- [ ] Visually confirm that none of the viewer, log viewer, or help screen show any border lines anywhere on screen (the title/scroll position only appear on the footer line)
+- [ ] Confirm scrolling the wheel while the viewer, log viewer, or help screen is displayed has no effect on ozzel (no scrolling), and instead becomes the terminal's native scrollback. Confirm keyboard scrolling (`↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End`, etc.) still works
+- [ ] Closing the viewer, log viewer, or help screen with `q`/`Esc` and returning to the filer automatically resumes mouse capture, and clicking to move the cursor / dragging to mark works again
+- [ ] Confirm mouse capture is not released (stays active) while the command palette (`F`) is open
+- [ ] Confirm opening the viewer, log viewer, or help screen with `mouse = false` causes no particular issue (since capture was already disabled)
+- [ ] Confirm mouse operations are ignored during modals other than the viewer/log/help — prompts, confirmation dialogs, bookmark/history menus, etc. — and clicking does not close them (only key operations such as `Esc` close them)
+- [ ] Confirm mouse operations (clicking, wheel) keep working after suspending/resuming the TUI via e.g. `: vim <file>` (also confirm the mouse works normally within vim during the suspension)
+- [ ] Launch with `mouse = false` and confirm clicking, dragging, and the wheel have no effect on ozzel, and the terminal's native text selection (drag-select/copy) works instead
+- [ ] With `mouse = true` (default), confirm holding Shift while dragging performs the terminal's native text selection, bypassing ozzel (behavior may vary by environment — report if so)
 
-## 16. 複製・パスコピー（`c`/`y`、新規）
+## 16. Duplicate & Path-Copy (`c`/`y`, new)
 
-- [ ] ファイルの上で `c` を押すと、現在の名前が入力済みの状態で複製先の名前を尋ねるプロンプトが開く
-- [ ] 別の名前を入力して確定すると、同じディレクトリ内にその名前でコピーが作成される（非同期タスクとしてログ・ゲージに表示される）
-- [ ] 何も変えずに（同じ名前のまま）確定すると、エラーがログに表示され、複製が行われないことを確認する
-- [ ] 既に存在する名前を入力すると、エラーがログに表示され、上書きされないことを確認する
-- [ ] ディレクトリの上で `c` を押し、ネストしたディレクトリごと再帰的に複製できることを確認する
-- [ ] `y` を押すと「copied: /path/to/file」のようにログに表示される
-- [ ] OSC 52 対応ターミナル（tmux + 対応設定、または対応ターミナル単体）で `y` を押し、実際にシステムのクリップボードにそのファイルの絶対パスが入っていることを確認する（別アプリに `Cmd+V`/`Ctrl+V` で貼り付けて確認）
+- [ ] Pressing `c` on a file opens a prompt for the duplicate's name, pre-filled with the current name
+- [ ] Entering a different name and confirming creates a copy with that name in the same directory (shown in the log/gauge as an async task)
+- [ ] Confirming without changing anything (same name) shows an error in the log, and no duplicate is made
+- [ ] Entering a name that already exists shows an error in the log, and nothing is overwritten
+- [ ] Pressing `c` on a directory recursively duplicates it, including nested directories
+- [ ] Pressing `y` logs something like "copied: /path/to/file"
+- [ ] On an OSC 52-capable terminal (tmux with supporting config, or a supporting terminal alone), press `y` and confirm the file's absolute path actually ends up in the system clipboard (verify by pasting with `Cmd+V`/`Ctrl+V` into another app)
 
-## 17. ペインヘッダーの2行折り返し（新規）
+## 17. Two-Line Wrapping of Pane Headers (new)
 
-- [ ] 深くネストした長いディレクトリパスへ移動し、ペインの枠線タイトルが1行に収まる場合はそのまま1行で表示されることを確認する
-- [ ] ターミナル幅を狭めるなどして1行に収まらない長さのパスへ移動すると、ヘッダーが自動的に2行に折り返され、エントリ一覧の表示行数が1行減ることを確認する
-- [ ] 絞込中（`[flt: ...]` タグ付き）でヘッダーが長くなった場合も、2行折り返しが正しく機能することを確認する
-- [ ] 2行に折り返しても収まらないほど極端に幅を狭めた場合、左側が `…` で省略されることを確認する
-- [ ] 日本語ディレクトリ名を含むパスでヘッダーが2行に折り返される際、全角文字が半分に割れないことを確認する
+- [ ] Move to a deeply nested, long directory path and confirm that when the border title fits on one line, it stays on one line
+- [ ] Narrow the terminal width so the path no longer fits on one line, and confirm the header automatically wraps to two lines, reducing the entry list's displayed row count by one
+- [ ] Confirm two-line wrapping also works correctly when the header is long while filtering is active (with the `[flt: ...]` tag)
+- [ ] Confirm that when the width is narrowed so extremely that even two lines don't fit, the left side is truncated with `…`
+- [ ] Confirm full-width characters are not split in half when a header with a Japanese directory name wraps to two lines
 
-## 18. Virtual Directory（zip をディレクトリのように閲覧、新規）
+## 18. Virtual Directory (Browsing a zip Like a Directory, new)
 
-- [ ] ネストしたディレクトリと複数ファイルを含む `.zip` を用意し、カーソルを合わせて `Enter`/`o` を押すと、ビューアではなくその場でアーカイブの中身が一覧表示されることを確認する（ペインのヘッダーが `archive.zip:/` になる）
-- [ ] アーカイブ内のサブディレクトリへ `Enter` で descend でき、ヘッダーが `archive.zip:/サブディレクトリ名` のように更新されることを確認する
-- [ ] アーカイブ作成ツールが明示的なディレクトリエントリを書き込んでいなくても（ファイルエントリのパスだけから）、中間ディレクトリが正しく一覧に合成されて表示されることを確認する
-- [ ] `Backspace` でアーカイブ内の1階層上に戻れることを確認する
-- [ ] アーカイブのルートで `Backspace` を押すと Virtual Directory を抜けて実ディレクトリに戻り、カーソルが元の `.zip` ファイルの位置に復元されることを確認する
-- [ ] アーカイブ内のテキストファイルで `Enter`/`o` を押すと、（ディスクに展開せず）その場で組み込みビューアが開き、内容が正しく表示されることを確認する（フッターに `archive.zip:/path` 形式のラベルが表示される）
-- [ ] アーカイブ内でマーク（`Space`）してから `C`（コピー）を押すと、「Extract N item(s) -> /dest? (y/n)」の確認が出て、`y` でもう片方のペインの実ディレクトリへ非同期タスクとして展開されることを確認する（進捗ゲージ表示も含む）
-- [ ] ディレクトリをマークして `C` を押すと、そのサブツリーがまるごと（自分の名前のディレクトリとして）展開先に再現されることを確認する
-- [ ] アーカイブ内で `M`（移動）、`D`（削除）、`R`/`r`（リネーム）、`K`（mkdir）、`c`（複製）、`p`（zip 圧縮）、`u`（unzip）、`e`（エディタで開く）、`Shift+Enter`（OS既定アプリで開く）のいずれを押しても、実行されずログに「read-only」の趣旨のエラーが表示されることを確認する
-- [ ] アーカイブ内で `f`/`/`（絞込）と `s`（ソート切替）が問題なく機能することを確認する
-- [ ] アーカイブ内で `:` を押すと、コマンドラインプロンプトのカレントディレクトリがアーカイブを含む実ディレクトリになっていることを確認する（`pwd` などで確認）
-- [ ] アーカイブ内から `~`（ホーム）やブックマーク・履歴メニューで別の実ディレクトリへ移動すると、Virtual Directory を抜けてその実ディレクトリが表示されることを確認する
-- [ ] アーカイブを開いた状態のまま、もう片方のペインで通常のファイル操作（コピー・削除など）が問題なく行えることを確認する（両ペインが独立して動作すること）
-- [ ] 存在しない/壊れた zip、またはパスワード付き zip を開こうとすると、クラッシュせずログにエラーが表示されることを確認する
+- [ ] Prepare a `.zip` containing nested directories and multiple files, put the cursor on it, and press `Enter`/`o`. Confirm the archive's contents are listed in place — not opened in the viewer (the pane header becomes `archive.zip:/`)
+- [ ] Confirm you can descend into a subdirectory inside the archive with `Enter`, and the header updates to something like `archive.zip:/subdirectory-name`
+- [ ] Even if the archive-creation tool did not write explicit directory entries (only file-entry paths), confirm intermediate directories are correctly synthesized and shown in the listing
+- [ ] Confirm `Backspace` goes up one level within the archive
+- [ ] Pressing `Backspace` at the archive root exits the Virtual Directory back to the real directory, with the cursor restored to the position of the original `.zip` file
+- [ ] Pressing `Enter`/`o` on a text file inside the archive opens the built-in viewer in place (without extracting to disk), showing the correct content (the footer shows a label in `archive.zip:/path` format)
+- [ ] Mark entries inside the archive (`Space`) and press `C` (copy). Confirm a "Extract N item(s) -> /dest? (y/n)" confirmation appears, and `y` asynchronously extracts them to the other pane's real directory (including progress gauge display)
+- [ ] Marking a directory and pressing `C` recreates that whole subtree at the destination (as a directory with its own name)
+- [ ] Confirm that pressing any of `M` (move), `D` (delete), `R`/`r` (rename), `K` (mkdir), `c` (duplicate), `p` (zip), `u` (unzip), `e` (open in editor), or `Shift+Enter` (open with OS default app) inside the archive is not executed, and logs a "read-only" style error
+- [ ] Confirm `f`/`/` (filter) and `s` (sort toggle) work fine inside the archive
+- [ ] Confirm that pressing `:` inside the archive opens the command line prompt with its current directory set to the real directory containing the archive (verify with e.g. `pwd`)
+- [ ] Moving from inside the archive to another real directory via `~` (home) or the bookmark/history menu exits the Virtual Directory and shows that real directory
+- [ ] With an archive open, confirm normal file operations (copy, delete, etc.) work fine in the other pane (both panes operate independently)
+- [ ] Attempting to open a nonexistent/corrupt zip, or a password-protected zip, does not crash and logs an error
 
-## 19. 拡張子ごとの外部ビューア（`[viewers]`、新規）
+## 19. Per-Extension External Viewers (`[viewers]`, new)
 
-- [ ] 設定に `[viewers]` セクションを追加し、`md = "less {}"` のようなエントリを設定する。対象拡張子の実ファイルで `Enter`/`o` を押すと、組み込みビューアではなく `less` が起動し、正常に表示・終了できることを確認する（終了後、画面が乱れずファイラーに復帰する）
-- [ ] `{}` を含まないコマンド（例: `md = "less"`）でも、末尾にパスが自動で追加されて正しく起動することを確認する
-- [ ] `[viewers]` に対応するエントリのない拡張子のファイルは、これまでどおり組み込みビューアで開くことを確認する
-- [ ] 拡張子を持たないファイルは、`[viewers]` に何を設定していても組み込みビューアで開くことを確認する
-- [ ] Virtual Directory（zip）内のファイルで、対応する `[viewers]` エントリがあっても外部ビューアは起動せず、組み込みビューアにフォールバックし、ログに「外部ビューアはアーカイブ内では使えません」といった趣旨のメッセージが出ることを確認する
-- [ ] `Shift+Enter`（`open_default`、OS既定アプリで開く）は `[viewers]` の影響を受けず、常に OS既定アプリで開くことを確認する
-- [ ] `,` で設定ファイルを編集して `[viewers]` にエントリを追加/変更し保存すると、アプリを再起動せずに新しい設定がすぐ反映されることを確認する（`config reloaded` のログ後、対象拡張子のファイルを開いて確認）
+- [ ] Add a `[viewers]` section to the config with an entry like `md = "less {}"`. Pressing `Enter`/`o` on a real file with that extension launches `less` instead of the built-in viewer, and it displays and quits normally (after quitting, the display is not corrupted and returns to the filer)
+- [ ] Confirm that even a command without `{}` (e.g. `md = "less"`) launches correctly, with the path automatically appended at the end
+- [ ] Confirm files with extensions that have no corresponding `[viewers]` entry still open in the built-in viewer as before
+- [ ] Confirm files with no extension always open in the built-in viewer, regardless of what's set in `[viewers]`
+- [ ] For a file inside a Virtual Directory (zip) that has a matching `[viewers]` entry, confirm the external viewer does not launch — it falls back to the built-in viewer, and the log shows a message to the effect that external viewers can't be used inside archives
+- [ ] Confirm `Shift+Enter` (`open_default`, open with the OS default app) is unaffected by `[viewers]` and always opens with the OS default app
+- [ ] Edit the config file with `,` to add/change a `[viewers]` entry and save. Confirm the new setting takes effect immediately without restarting the app (after the "config reloaded" log, open a file with the target extension to check)
 
-## 20. プレフィックスジャンプ（`\`、新規）
+## 20. Prefix Jump (`\`, new)
 
-- [ ] `\` を押すとジャンプモードに入り、下部に `Jump: ` の入力欄が表示される
-- [ ] 1文字入力するたびに、入力した文字列（前方一致・大文字小文字を区別しない）に一致する最初のエントリへカーソルが移動する。**一覧自体は絞り込まれず、非表示になるエントリが無い**ことを確認する（`f`/`/` の絞込との違い）
-- [ ] 日本語ファイル名でも、日本語の文字を入力してプレフィックスジャンプできることを確認する
-- [ ] 入力を1文字ずつ増やしていくと、その都度候補が絞り込まれてカーソルが再計算されることを確認する（例: `a` で複数一致 → `ab` でさらに絞り込み）
-- [ ] 一致するエントリが複数ある状態で `Down`（または `Tab`）を押すと、同じ入力に一致する次のエントリへカーソルが移動する。末尾の一致まで進んでからさらに `Down` を押すと、先頭の一致へ折り返すことを確認する
-- [ ] `Up` を押すと前の一致へ移動する。先頭の一致から `Up` を押すと、末尾の一致へ折り返すことを確認する
-- [ ] 入力に一致するエントリが無い場合、カーソルは動かず、入力欄に `(no match)` のような警告表示が出ることを確認する
-- [ ] `Esc` でジャンプモードを終了すると、カーソルがモードを開始した時点の位置に戻ることを確認する
-- [ ] `Enter` でジャンプモードを終了すると、カーソルは検索で移動した現在の位置のまま維持されることを確認する
-- [ ] `..`（親ディレクトリへ戻る行）はどんな入力でも一致対象にならないことを確認する
-- [ ] ヘルプ画面（`h`/`?`）の「絞込」カテゴリに `jump_search` の行が表示されることを確認する
-- [ ] Virtual Directory（`.zip` 内の閲覧）でも `\` によるプレフィックスジャンプが問題なく機能することを確認する
-- [ ] `examples/config.toml` の `[bindings]` セクションに `jump_search = ["\\"]` が含まれており、`cargo test` の `[bindings]` 生成ドリフト検知テストがパスすることを確認する（開発時のチェックリストとして）
+- [ ] Pressing `\` enters jump mode, showing a `Jump: ` input field at the bottom
+- [ ] Confirm that as each character is typed, the cursor moves to the first entry matching the typed string (prefix match, case-insensitive). **Confirm the list itself is not filtered — no entries become hidden** (this is the difference from the `f`/`/` filter)
+- [ ] Confirm prefix jump also works when typing Japanese characters for a Japanese file name
+- [ ] Confirm that as you type more characters, the candidates narrow and the cursor is recomputed each time (e.g. `a` matches several → `ab` narrows further)
+- [ ] With multiple matching entries, pressing `Down` (or `Tab`) moves the cursor to the next entry matching the same input. Confirm that pressing `Down` again past the last match wraps around to the first match
+- [ ] Pressing `Up` moves to the previous match. Confirm pressing `Up` at the first match wraps around to the last match
+- [ ] If no entry matches the input, confirm the cursor doesn't move and the input field shows a warning such as `(no match)`
+- [ ] Confirm that exiting jump mode with `Esc` restores the cursor to the position it was at when the mode started
+- [ ] Confirm that exiting jump mode with `Enter` keeps the cursor at its current position as moved by the search
+- [ ] Confirm the `..` (go-to-parent) row never matches any input
+- [ ] Confirm a `jump_search` row is shown in the "Filtering" category of the help screen (`h`/`?`)
+- [ ] Confirm prefix jump with `\` also works fine in a Virtual Directory (browsing inside a `.zip`)
+- [ ] Confirm `examples/config.toml`'s `[bindings]` section includes `jump_search = ["\\"]`, and that `cargo test`'s `[bindings]` generation drift-detection test passes (as a development-time checklist item)
 
-## 21. `update` サブコマンド（新規）
+## 21. `update` Subcommand (new)
 
-- [ ] `ozzel update` を実行すると、まず `現在のバージョン: 0.1.0` のように現在のバージョンが表示されることを確認する
-- [ ] GitHub 上にリポジトリがまだ公開されていない現状では、続けて「リモートのバージョン確認に失敗。そのまま再インストールする。」と表示され、その後 `cargo install --git ...` の実行が試みられ、リポジトリが見つからない旨のエラーで失敗して終了することを確認する（クラッシュしない、パニックしないこと）
-- [ ] `ozzel update --force` でも同様に動作し、`--force` によって挙動が変わるのはリモートバージョンが現在と一致していた場合のみ（その場合のみ再インストールを強制する）であることを確認する（現状はリモート確認自体が失敗するため、`--force` の有無で見た目の差はほぼ無いはずだが、クラッシュしないことは確認する）
-- [ ] `cargo` が存在しないと仮定できる場合（あるいは一時的に `PATH` から外して）実行すると、「cargo を実行できない」旨の分かりやすいエラーが表示されることを確認する（環境によっては省略可）
-- [ ] `ozzel`（引数なし）がこれまでどおり TUI を起動することを確認する（`update` サブコマンドの追加で通常起動が壊れていないこと）
-- [ ] `ozzel . ..` のように2つの位置引数を渡した通常起動も、これまでどおり動作することを確認する
-- [ ] `ozzel --cwd-file <path>` を位置引数なしで指定した起動も、これまでどおり動作することを確認する
-- [ ] カレントディレクトリに実際に `update` という名前のディレクトリを作成し、`ozzel update` を実行すると（ディレクトリを開くのではなく）更新サブコマンドとして解釈されることを確認する。同じディレクトリを開きたい場合は `ozzel ./update` で明示的に開けることを確認する
-- [ ] `ozzel --help` の出力に `update` サブコマンドが一覧表示され、`ozzel update --help` で `--force` フラグの説明が表示されることを確認する
+- [ ] Running `ozzel update` first shows the current version, e.g. `current version: 0.1.0`
+- [ ] Since the repository is not yet public on GitHub at this stage, confirm it then shows something like "could not determine the remote version. Reinstalling anyway.", after which it attempts to run `cargo install --git ...`, which fails because the repository can't be found (no crash, no panic)
+- [ ] Confirm `ozzel update --force` behaves the same way, and that `--force` only changes behavior when the remote version matches the current one (in which case only it forces a reinstall) (since the remote check itself currently fails, there should be little visible difference with/without `--force`, but confirm there is no crash)
+- [ ] If you can assume `cargo` is not present (or temporarily remove it from `PATH`) and run it, confirm a clear error to the effect that cargo could not be run is shown (can be skipped depending on environment)
+- [ ] Confirm `ozzel` (no arguments) still launches the TUI as before (confirming normal launch is not broken by adding the `update` subcommand)
+- [ ] Confirm normal launches with two positional arguments, like `ozzel . ..`, still work as before
+- [ ] Confirm launching with `ozzel --cwd-file <path>` and no positional arguments still works as before
+- [ ] Actually create a directory named `update` in the current directory and run `ozzel update`; confirm it's interpreted as the update subcommand (rather than opening the directory). Confirm you can still explicitly open that same directory with `ozzel ./update`
+- [ ] Confirm `ozzel --help`'s output lists the `update` subcommand, and `ozzel update --help` shows a description of the `--force` flag
 
-## 22. ビューアの `less` 互換検索（`/`・`?`・`n`・`N`、新規）
+## 22. `less`-Compatible Search in the Viewer (`/`, `?`, `n`, `N`, new)
 
-- [ ] 大きめの Rust ソースファイルなど（何箇所か一致する単語がある方が確認しやすい）をビューアで開き、`/` を押すと画面下部に `/` の入力欄が開くことを確認する（`f`/絞込の入力欄と同じ見た目）
-- [ ] 検索語を入力して `Enter` を押すと、現在の最上段行以降で最初に一致する行までジャンプすることを確認する
-- [ ] 一致した箇所が画面内に複数あれば、それぞれ反転表示でハイライトされることを確認する
-- [ ] フッターに検索文字列と `現在位置/一致件数`（例: `/needle  3/17`）が表示されることを確認する
-- [ ] `n` を押すたびに次の一致箇所へ、ファイル末尾まで到達すると先頭へ折り返してジャンプし、折り返した回はフッターに `(search wrapped)` の表示が出ることを確認する
-- [ ] `N`（Shift+n）を押すと `n` と逆向きに移動することを確認する
-- [ ] `?` を押すと後方検索の入力欄（`?` プレフィックス）が開き、`Enter` で現在の最上段行以前で一致する行へジャンプすることを確認する。`?` で開始した検索での `n` は上方向、`N` は下方向に移動することを確認する
-- [ ] 正規表現として不正な文字列（例: `foo(bar` のような閉じ括弧のない文字列）で検索しても、通常の部分一致検索として扱われ、クラッシュしないことを確認する
-- [ ] 有効な正規表現（例: `TODO|FIXME`）で検索すると、複数パターンの一致がまとめてハイライトされることを確認する
-- [ ] 一致しない文字列で検索すると、カーソル・スクロール位置が変わらず、ログにエラーメッセージが記録されることを確認する
-- [ ] 検索入力中に `Esc` を押すと入力が取り消され、直前に有効だった検索状態（あれば、そのハイライトも）がそのまま復元されることを確認する
-- [ ] 検索がアクティブな状態（入力中ではない）で `Esc` を押すと、ハイライトだけが消えビューアは閉じたままにならないことを確認する。続けてもう一度 `Esc` を押すとビューアが閉じてファイラーに戻ることを確認する
-- [ ] `Tab` で16進ダンプ表示に切り替えてから `/` で16進表記の値（例: `48 65`）を検索すると、対応するバイトを含む行へジャンプすることを確認する
-- [ ] 日本語を含む行に対して日本語の検索語で検索でき、正しい範囲がハイライトされる（文字化けしない、途中で切れない）ことを確認する
-- [ ] 横スクロール（`←`/`→`）で画面外に出ている一致箇所も、`n`/`N` でのカウント・ジャンプ対象になっており、スクロールを戻すとハイライトが正しく表示されることを確認する
-- [ ] ヘルプ画面（`h`/`?`... ではなくビューア外の `h`）は今回の変更と無関係に引き続き動作することを確認する（`?` はビューア内では後方検索、ファイラー画面では従来どおりヘルプを開くことの確認）
+- [ ] Open a fairly large Rust source file or similar in the viewer (one with several matches for some word makes it easier to check), press `/`, and confirm an input field opens at the bottom of the screen (same look as the `f`/filter input field)
+- [ ] Type a search term and press `Enter`; confirm it jumps to the first line matching at or after the current top row
+- [ ] If multiple matches are visible on screen, confirm each is highlighted in reverse video
+- [ ] Confirm the footer shows the search string and `current-position/match-count` (e.g. `/needle  3/17`)
+- [ ] Confirm pressing `n` repeatedly moves to the next match each time, wrapping to the first match after reaching the end of the file, and that the footer shows `(search wrapped)` on the wrap-around
+- [ ] Confirm pressing `N` (Shift+n) moves in the opposite direction from `n`
+- [ ] Confirm `?` opens a backward-search input field (prefixed with `?`), and `Enter` jumps to a match at or before the current top row. Confirm that for a search started with `?`, `n` moves upward and `N` moves downward
+- [ ] Confirm that searching with a string that is invalid as a regex (e.g. an unclosed parenthesis like `foo(bar`) is treated as a plain substring search, and does not crash
+- [ ] Confirm that a valid regex (e.g. `TODO|FIXME`) highlights all matches for either pattern together
+- [ ] Confirm that searching for a string with no matches leaves the cursor/scroll position unchanged and logs an error message
+- [ ] Confirm pressing `Esc` while typing a search cancels the input and restores whatever search state (and its highlighting, if any) was active before
+- [ ] With an active search (not currently typing), confirm pressing `Esc` clears only the highlighting and the viewer stays open. Confirm pressing `Esc` again closes the viewer and returns to the filer
+- [ ] Switch to hex dump display with `Tab`, then search for a hex value (e.g. `48 65`) with `/`, and confirm it jumps to the line containing the corresponding bytes
+- [ ] Confirm you can search with a Japanese search term against a line containing Japanese text, and the correct range is highlighted (no garbling, no truncation)
+- [ ] Confirm matches that are off-screen due to horizontal scrolling (`←`/`→`) still count toward `n`/`N` navigation, and that the highlight displays correctly once you scroll back
+- [ ] Confirm the help screen (`h`/`?`... though not the `?` inside the viewer) continues to work independent of this change (confirming `?` means backward search inside the viewer, but still opens help as before on the filer screen)
 
-## 23. シンボリックリンク（ディレクトリ扱い + 安全な操作、新規）
+## 23. Symbolic Links (Treated as Directories + Safe Operations, new)
 
-準備（実際の `ln -s` で作成する）:
+Setup (create with real `ln -s`):
 
 ```sh
 mkdir real_dir && echo hi > real_dir/inside.txt
@@ -386,24 +386,24 @@ ln -s target.txt link_to_file.txt
 ln -s does_not_exist dangling_link
 ```
 
-- [ ] `link_to_dir` の行がディレクトリと同じ色（水色）で表示され、サイズ列が `<DIR>` になっていることを確認する。名前の末尾に `@` が付いていることを確認する（シンボリックリンクである印）
-- [ ] `link_to_dir` は一覧のソート順でも `real_dir` などの実ディレクトリと同じグループ（ディレクトリ側)にまとまることを確認する（ソートキーを `s` で切り替えても崩れない）
-- [ ] カーソルを `link_to_dir` に合わせて `Enter`（または `o`）を押すと中へ入り、`inside.txt` が表示されることを確認する（`fs::read_dir` がリンクを自動的に辿るため一覧は正しく出る）
-- [ ] `link_to_dir` へ入った直後、ペインのヘッダー（カレントディレクトリ表示）が `.../link_to_dir` になっている（`real_dir` に正規化されていない）ことを確認する
-- [ ] その状態で `Backspace` を押すと、`link_to_dir` があった元のディレクトリへ戻り、カーソルが `link_to_dir` 自身の上に復元されることを確認する
-- [ ] `link_to_file.txt` にカーソルを合わせて `Enter`（または `o`）を押すと、組み込みビューアが開き `target.txt` の内容（`hello`）が表示されることを確認する
-- [ ] `target.txt` を実行可能にした状態（`chmod +x`）で、`link_to_file.txt` の行が実行可能ファイルの色（黄色）で表示されることを確認する（リンク自身のパーミッションではなくリンク先のモードで判定されることの確認）
-- [ ] `dangling_link`（リンク切れ）にカーソルを合わせて `Enter` を押すと、移動もビューアも開かず、ログに `No such file or directory` 等のエラーが記録されることを確認する（クラッシュしないこと）
-- [ ] `dangling_link` の行はディレクトリ色にはならず（`<DIR>` 表示にもならず）、通常のファイルと同じ見た目であることを確認する
-- [ ] `link_to_dir` を `C`（コピー）でもう片方のペインへコピーすると、コピー先も**シンボリックリンク**として作成されることを確認する（`ls -la` で確認。コピー先が実体を持つディレクトリツリーになっていないこと）
-- [ ] `link_to_dir` を `D`（削除）で削除すると、リンク自体だけが消え、リンク先だった `real_dir` とその中身（`inside.txt`）はそのまま残っていることを確認する
-- [ ] `link_to_dir` を `c`（複製）すると、複製先も実体のコピーではなくシンボリックリンクとして作成されることを確認する
-- [ ] `\`（プレフィックスジャンプ）・`f`（絞込）・`Space`（マーク）が `link_to_dir`/`link_to_file.txt` に対しても通常のエントリと同じように機能することを確認する
-- [ ] `[viewers]` に `md = "less {}"` のような設定がある状態で、拡張子のない `link_to_notes`（`notes.md` へのリンク）を開くと、リンク先の拡張子 `md` にフォールバックして `less` が起動することを確認する（環境になければ省略可）
+- [ ] Confirm the `link_to_dir` row is shown in the same color as a directory (cyan) and its size column shows `<DIR>`. Confirm the name ends with a `@` (marking it as a symbolic link)
+- [ ] Confirm `link_to_dir` is grouped with real directories like `real_dir` in the sort order too (this doesn't break even when toggling the sort key with `s`)
+- [ ] Put the cursor on `link_to_dir` and press `Enter` (or `o`) to enter it, confirming `inside.txt` is shown (the listing works correctly because `fs::read_dir` automatically follows the link)
+- [ ] Right after entering `link_to_dir`, confirm the pane header (current directory display) shows `.../link_to_dir` (not normalized to `real_dir`)
+- [ ] In that state, pressing `Backspace` confirms it returns to the original directory that contained `link_to_dir`, with the cursor restored onto `link_to_dir` itself
+- [ ] Put the cursor on `link_to_file.txt` and press `Enter` (or `o`); confirm the built-in viewer opens showing `target.txt`'s content (`hello`)
+- [ ] With `target.txt` made executable (`chmod +x`), confirm the `link_to_file.txt` row is shown in the executable-file color (yellow) (confirming it's judged by the link target's mode, not the link's own permissions)
+- [ ] Put the cursor on `dangling_link` (a broken link) and press `Enter`; confirm neither navigation nor the viewer opens, and an error such as `No such file or directory` is logged (no crash)
+- [ ] Confirm the `dangling_link` row is not shown in the directory color (and does not show `<DIR>`), looking like a normal file
+- [ ] Copy `link_to_dir` to the other pane with `C` (copy) and confirm the destination is also created as a **symbolic link** (check with `ls -la`; the destination must not become a directory tree with real content)
+- [ ] Delete `link_to_dir` with `D` (delete) and confirm only the link itself is removed, while `real_dir` (the link target) and its contents (`inside.txt`) remain intact
+- [ ] Duplicate `link_to_dir` with `c` (duplicate) and confirm the duplicate is also created as a symbolic link, not a real copy
+- [ ] Confirm `\` (prefix jump), `f` (filter), and `Space` (mark) all work normally on `link_to_dir`/`link_to_file.txt` just like regular entries
+- [ ] With a `[viewers]` setting such as `md = "less {}"`, open `link_to_notes` (a link to `notes.md`) which has no extension itself, and confirm it falls back to the link target's extension `md`, launching `less` (can be skipped if unavailable)
 
-## 24. Virtual Directory: tar 系アーカイブ（`.tar`/`.tar.gz`/`.tgz`/`.tar.bz2`/`.tbz2`/`.tar.xz`/`.txz`、新規）
+## 24. Virtual Directory: tar-Family Archives (`.tar`/`.tar.gz`/`.tgz`/`.tar.bz2`/`.tbz2`/`.tar.xz`/`.txz`, new)
 
-準備（システムの `tar` で実際に作る — ozzel は tar の**作成**には対応していないので、展開・閲覧側だけを確認する）:
+Setup (create with the system's real `tar` — ozzel does not support **creating** tar archives, so only check the extraction/browsing side):
 
 ```sh
 mkdir -p project/src/nested
@@ -413,109 +413,108 @@ echo deep > project/src/nested/deep.txt
 tar -cf project.tar project
 tar -czf project.tar.gz project
 cp project.tar.gz project.tgz
-tar -cjf project.tar.bz2 project   # bzip2 (環境に bzip2/tar が無ければ省略可)
-tar -cJf project.tar.xz project    # xz (環境に xz/tar が無ければ省略可)
+tar -cjf project.tar.bz2 project   # bzip2 (skip if bzip2/tar aren't available)
+tar -cJf project.tar.xz project    # xz (skip if xz/tar aren't available)
 ```
 
-- [ ] `project.tar` の上で `Enter`/`o` を押すと、展開せずにその場でディレクトリのように中身（`project/` 以下）が閲覧できることを確認する
-- [ ] `project.tar.gz` と `project.tgz`（同じ内容、拡張子違い）の両方が同じように開けることを確認する（`.tgz` サフィックスの認識確認）
-- [ ] `project.tar.bz2`/`project.tbz2` が開けることを確認する（環境になければ省略可）
-- [ ] `project.tar.xz`/`project.txz` が開けることを確認する（環境になければ省略可）
-- [ ] いずれの形式でも、`src/` のような中間ディレクトリが（tar 側に明示的なディレクトリエントリが無くても）自動的に合成されて表示されることを確認する
-- [ ] `Backspace` でアーカイブ内を1階層ずつ戻れ、ルートで `Backspace` を押すとアーカイブを抜けて実ディレクトリへ戻り、カーソルが元のアーカイブファイルの位置に復元されることを確認する
-- [ ] アーカイブ内のファイル（例: `readme.txt`）で `Enter`/`o` を押すと、組み込みビューアで中身が表示されることを確認する
-- [ ] ペインのヘッダーが `project.tar.gz:/src` のように `アーカイブ名:内部パス` の形式で表示されることを確認する
-- [ ] アーカイブ内で `M`（移動）・`D`（削除）・`R`/`r`（リネーム）・`K`（mkdir）・`c`（複製）・`p`（zip 圧縮）・`e`（エディタ）・`Shift+Enter`（OS既定アプリ）を試すと、いずれもエラーとしてログに表示され実行されない（読み取り専用）ことを確認する
-- [ ] マーク（`Space`）してから `C` を押すと、もう片方のペインの実ディレクトリへ展開されることを確認する（ファイル単体・サブツリーの両方で確認する。展開先の内容が元ファイルと一致することも確認する）
-- [ ] 大きめの `.tar.gz`（数十〜100MB 程度、手元にあれば）を開くと、一覧表示に体感できる時間がかかる場合があることを確認する（クラッシュしないこと。README の「tar 系は逐次読みのため時間がかかることがある」という記載どおりであることの確認 — 環境になければ省略可）
-- [ ] `u`（unzip）キーは `.tar`/`.tar.gz` 等のカーソル上では「selected entry is not a .zip file」等のエラーになり、tar 系の一括展開には対応していないことを確認する（`u` は zip 専用のまま）
-- [ ] `.gz`（`.tar.gz` ではなく単体の gzip ファイル）や、対応していない圧縮方式（zstd 等）の `.tar.*` ファイルは Virtual Directory として認識されず、通常のファイルとして組み込みビューアで開く（バイナリなので16進ダンプ表示）ことを確認する
+- [ ] Pressing `Enter`/`o` on `project.tar` browses its contents (under `project/`) in place, like a directory, without extracting
+- [ ] Confirm both `project.tar.gz` and `project.tgz` (same content, different extension) open the same way (confirming recognition of the `.tgz` suffix)
+- [ ] Confirm `project.tar.bz2`/`project.tbz2` can be opened (skip if unavailable)
+- [ ] Confirm `project.tar.xz`/`project.txz` can be opened (skip if unavailable)
+- [ ] For every format, confirm intermediate directories like `src/` are automatically synthesized and shown, even without an explicit directory entry on the tar side
+- [ ] Confirm `Backspace` goes up one level at a time inside the archive, and pressing it at the root exits the archive back to the real directory, with the cursor restored to the position of the original archive file
+- [ ] Pressing `Enter`/`o` on a file inside the archive (e.g. `readme.txt`) opens its content in the built-in viewer
+- [ ] Confirm the pane header shows `archive-name:internal-path` format, e.g. `project.tar.gz:/src`
+- [ ] Confirm that trying `M` (move), `D` (delete), `R`/`r` (rename), `K` (mkdir), `c` (duplicate), `p` (zip), `e` (editor), or `Shift+Enter` (OS default app) inside the archive all result in a logged error and are not executed (read-only)
+- [ ] Mark entries (`Space`) and press `C`; confirm they extract to the real directory in the other pane (check both a single file and a subtree, and confirm the extracted content matches the original)
+- [ ] Open a fairly large `.tar.gz` (tens of MB to ~100MB, if available) and confirm the listing may take a noticeable amount of time (no crash; confirming the README's note that tar formats are read sequentially and can be slow — skip if unavailable)
+- [ ] Confirm the `u` (unzip) key on a `.tar`/`.tar.gz` etc. results in an error like "selected entry is not a .zip file", confirming bulk extraction of tar-family archives is not supported (`u` remains zip-only)
+- [ ] Confirm that a plain `.gz` file (a standalone gzip file, not `.tar.gz`), or a `.tar.*` file using an unsupported compression method (zstd, etc.), is not recognized as a Virtual Directory and opens as a normal file in the built-in viewer (hex dump display, since it's binary)
 
-## 25. 操作対象パスの全件ログ記録（コピー・移動・削除・複製・zip・unzip・extract、新規）
+## 25. Full Logging of Operation Target Paths (Copy, Move, Delete, Duplicate, Zip, Unzip, Extract, new)
 
-- [ ] 3つのファイルをマークして `C`（コピー）を実行すると、実行開始時点でログに `copy: /絶対パス/元 -> /絶対パス/先` の形式の行が対象ファイルの数だけ（3行）記録されることを確認する（`L` でログビューアを開いて確認するとよい）
-- [ ] 同様に `M`（移動）でも `move: ... -> ...` の形式で全件ログに記録されることを確認する
-- [ ] 3つのファイルをマークして `D`（削除）すると、`delete: /絶対パス` の形式で対象ファイルの数だけログに記録されることを確認する
-- [ ] `c`（複製）を実行すると、`duplicate: /絶対パス/元 -> /絶対パス/先` がログに記録されることを確認する
-- [ ] `p`（zip 圧縮）でマークした複数ファイルを圧縮すると、`zip: /絶対パス` が対象の数だけログに記録されることを確認する
-- [ ] `u`（unzip）を実行すると、`unzip: /絶対パス/アーカイブ.zip -> /絶対パス/展開先` がログに記録されることを確認する
-- [ ] Virtual Directory 内でマークして `C`（extract）を実行すると、`extract: アーカイブ名:/内部パス -> /絶対パス/展開先` の形式でログに記録されることを確認する
-- [ ] 大量（10件以上）のファイルをマークして削除・コピーすると、ログにその件数分の行が一気に追加されクラッシュしないことを確認する。ステータスバーの通常表示が乱れないこと、`L` でログビューアを開くと全件スクロールして確認できることを確認する
+- [ ] Mark 3 files and run `C` (copy). Confirm that at the moment execution starts, the log records one line per target file (3 lines) in the format `copy: /absolute/path/source -> /absolute/path/dest` (opening the log viewer with `L` is a good way to check)
+- [ ] Similarly, confirm `M` (move) logs each one in `move: ... -> ...` format
+- [ ] Mark 3 files and run `D` (delete); confirm it logs one line per target file in `delete: /absolute/path` format
+- [ ] Running `c` (duplicate) logs `duplicate: /absolute/path/source -> /absolute/path/dest`
+- [ ] Compressing several marked files with `p` (zip) logs `zip: /absolute/path` once per target
+- [ ] Running `u` (unzip) logs `unzip: /absolute/path/archive.zip -> /absolute/path/destination`
+- [ ] Marking entries inside a Virtual Directory and running `C` (extract) logs `extract: archive-name:/internal-path -> /absolute/path/destination` format
+- [ ] Mark a large number (10+) of files and delete/copy them; confirm the log gets that many lines added at once without crashing. Confirm the normal status bar display is not disrupted, and that opening the log viewer with `L` lets you scroll through and check every entry
 
-## 26. プロンプトの中央ポップアップ表示（新規）
+## 26. Centered Popup Display for Prompts (new)
 
-- [ ] `R`/`r`（リネーム）を押すと、画面下部の1行入力ではなく画面中央のポップアップ枠が表示され、タイトルが「Rename」、入力欄に現在の名前が入力済みであることを確認する
-- [ ] `K`（mkdir）で同様にタイトル「New directory」のポップアップが中央に表示されることを確認する
-- [ ] `c`（複製）で同様にタイトル「Duplicate as」のポップアップが中央に表示され、現在の名前が入力済みであることを確認する
-- [ ] `p`（zip 圧縮）で同様にタイトル「Zip as」のポップアップが中央に表示されることを確認する
-- [ ] `:`（コマンドライン）で同様にタイトル「Command」のポップアップが中央に表示されることを確認する
-- [ ] いずれのポップアップでも、下部に `Enter: OK   Esc: Cancel` のヒント行が表示されることを確認する
-- [ ] ポップアップ表示中も、その下の通常のステータスバー（カレントディレクトリ表示など）が引き続き表示されていることを確認する（ポップアップの背後に隠れている部分以外）
-- [ ] ポップアップの入力欄より長い文字列を入力すると、カーソル位置に応じて枠内で横スクロールし、入力中の文字がちゃんと見えることを確認する
-- [ ] `Enter` で確定・`Esc` でキャンセルが、これまでどおり正しく動作することを確認する（キャンセル時は何も作成・変更されないこと）
-- [ ] 一方、`f`/`/`（絞込）・`\`（プレフィックスジャンプ）・ビューア内の `/`/`?`（検索）は、引き続き画面**下部**の1行入力として表示され、中央ポップアップにはならないことを確認する（一覧・本文が隠れずに見えたまま入力できること）
+- [ ] Pressing `R`/`r` (rename) shows a popup box centered on screen, rather than a single line at the bottom, with the title "Rename" and the input field pre-filled with the current name
+- [ ] Confirm `K` (mkdir) similarly shows a centered popup titled "New directory"
+- [ ] Confirm `c` (duplicate) similarly shows a centered popup titled "Duplicate as", with the input field pre-filled with the current name
+- [ ] Confirm `p` (zip) similarly shows a centered popup titled "Zip as"
+- [ ] Confirm `:` (command line) similarly shows a centered popup titled "Command"
+- [ ] Confirm every popup shows a hint line at the bottom reading `Enter: OK   Esc: Cancel`
+- [ ] Confirm the normal status bar below (e.g. the current directory display) remains visible while a popup is shown (aside from the part hidden behind the popup)
+- [ ] Typing a string longer than the popup's input field scrolls it horizontally according to the cursor position, keeping the text being typed visible
+- [ ] Confirm `Enter` to confirm / `Esc` to cancel still work correctly as before (canceling creates/changes nothing)
+- [ ] On the other hand, confirm `f`/`/` (filter), `\` (prefix jump), and the viewer's `/`/`?` (search) still display as a single line at the **bottom** of the screen, not as a centered popup (so the list/body text remains visible without being hidden while typing)
 
-## 27. 設定画面（`S`、新規）
+## 27. Settings Screen (`S`, new)
 
-- [ ] `S`（Shift+s）で設定画面が開き、カテゴリ一覧（動作・色・起動/連携・拡張子ビューア・キーバインド）が表示されることを確認する。コマンドパレット（`F`）で `settings` を検索しても同じ画面が開くことを確認する
-- [ ] 「動作」を選び `mouse` の行で `Enter` を押すと即座に `ON`/`OFF` がトグルされ、設定ファイル（`,` で開けるもの）に `mouse = false`（または `true`）が書き込まれていることを確認する。書き込み後、設定が即座に反映されること（例: `mouse = false` にした直後、マウスクリックでのカーソル移動が効かなくなること）を確認する
-- [ ] `delete_behavior` の行で `Enter` を押すと `trash`/`permanent` の2択リストが表示され、`↓`→`Enter` で `permanent` に切り替わり、設定ファイルにも反映されることを確認する
-- [ ] `Esc` を押すと項目一覧→カテゴリ一覧→ファイラーの順に1階層ずつ戻ることを確認する
-- [ ] 「色」カテゴリで `directory` を選び、名前付きカラーパレット（色見本つき）から `magenta` を選んで `Enter` を押すと、設定画面を閉じた直後にファイラーのディレクトリ行の色が実際に変わっていることを確認する（**色変更が即座に画面に反映されること**が今回のポイント）
-- [ ] 同じ色の項目でリスト末尾の「custom hex」を選び `112233` のように6桁16進数を入力して `Enter` を押すと、`#112233` として保存・適用されることを確認する
-- [ ] 「起動/連携」カテゴリで `editor` の値を入力・`Enter` で確定し、`,`（設定編集）で開くエディタが実際に変わることを確認する。値を全部削除して空で確定すると「未設定」（`$EDITOR` にフォールバック）に戻ることを確認する
-- [ ] 「拡張子ビューア」カテゴリで「+ add new」から拡張子 `md`・コマンド `glow {}` を追加し（`Tab` で拡張子欄とコマンド欄を切替）、`.md` ファイルを開くと実際に `glow` 経由で開かれることを確認する。同じ項目を選んで `d` を押すと一覧から削除され、以後 `.md` は組み込みビューアで開かれることを確認する
-- [ ] 「キーバインド」カテゴリで任意のアクション（例: `mkdir`）を選び、`a` を押して未使用のキー（例: `z`）を押すと、捕捉したキーの確認画面（`Bind "z" to mkdir?`）が表示され、`y`/`Enter` で確定するとそのキーで実際に mkdir が起動することを確認する
-- [ ] 同様に、既に別アクションが使っているキー（例: `r`。デフォルトで `rename`）を捕捉すると、「〇〇から奪って良いか」という警告つきの確認画面が出ることを確認する。`y`/`Enter` で確定すると、以後そのキーは新しいアクションに割り当てられ、元のアクション（`rename`）からは外れることを確認する（`n`/`Esc` でキャンセルした場合は何も変わらないこと）
-- [ ] 上記のキーバインド変更後、設定ファイルを確認し、奪われた側が `[keys]` に `"none"` として、奪った側が `[bindings]` に追加されていることを確認する
-- [ ] キーバインド一覧で `d` を押すとカーソル位置のコンボが削除され、そのキーが効かなくなることを確認する
-- [ ] **コメント保持の確認**: 設定ファイルにあらかじめ手動でコメント（`# ...`）を書いておき、設定画面から何か1項目だけ変更したあと、ファイルを直接開いて元のコメントがすべてそのまま残っていることを確認する（`toml_edit` による差分反映が壊れていないことの確認）
-- [ ] 設定画面が全画面表示になっており、その間はペイン・ログ欄・ステータスバーが見えなくなっていることを確認する
+- [ ] Pressing `S` (Shift+s) opens the settings screen, showing a category list (Behavior, Colors, Startup/Integration, Extension Viewers, Key Bindings). Confirm searching `settings` in the command palette (`F`) opens the same screen
+- [ ] Select "Behavior" and press `Enter` on the `mouse` row; confirm `ON`/`OFF` toggles immediately, and that `mouse = false` (or `true`) is written to the config file (the one openable with `,`). Confirm the setting takes effect right after writing (e.g. right after setting `mouse = false`, clicking no longer moves the cursor)
+- [ ] Press `Enter` on the `delete_behavior` row; confirm a two-choice list of `trash`/`permanent` appears, and `↓`→`Enter` switches it to `permanent`, which is also reflected in the config file
+- [ ] Confirm `Esc` steps back one level at a time: item list → category list → filer
+- [ ] In the "Colors" category, select `directory`, choose `magenta` from the named color palette (with swatches), and press `Enter`; confirm that right after closing the settings screen, the filer's directory rows have actually changed color (**the key point here is that the color change takes effect immediately on screen**)
+- [ ] For the same color item, select "custom hex" at the end of the list, enter a 6-digit hex value like `112233`, and press `Enter`; confirm it's saved and applied as `#112233`
+- [ ] In the "Startup/Integration" category, enter a value for `editor` and confirm with `Enter`; confirm the editor that opens with `,` (edit config) actually changes. Confirm that deleting the value entirely and confirming with it empty reverts to "unset" (falling back to `$EDITOR`)
+- [ ] In the "Extension Viewers" category, use "+ add new" to add extension `md` and command `glow {}` (use `Tab` to switch between the extension field and command field), then confirm opening a `.md` file actually opens it via `glow`. Confirm selecting the same entry and pressing `d` removes it from the list, after which `.md` opens in the built-in viewer again
+- [ ] In the "Key Bindings" category, select any action (e.g. `mkdir`), press `a`, and press an unused key (e.g. `z`); confirm a capture confirmation screen appears (`Bind "z" to mkdir?`), and confirm that `y`/`Enter` applies it, making that key actually trigger mkdir
+- [ ] Similarly, capturing a key already used by another action (e.g. `r`, bound to `rename` by default) shows a confirmation screen with a warning about taking it away from that action. Confirm that `y`/`Enter` reassigns the key to the new action, removing it from the original action (`rename`) (confirm nothing changes if canceled with `n`/`Esc`)
+- [ ] After the key binding change above, check the config file and confirm the key taken away is recorded as `"none"` in `[keys]`, and the one it was assigned to is added to `[bindings]`
+- [ ] In the key bindings list, pressing `d` deletes the combo at the cursor position, and confirm that key no longer works
+- [ ] **Comment preservation check**: write a manual comment (`# ...`) into the config file beforehand, change just one item from the settings screen, then open the file directly and confirm the original comment is still fully intact (confirming `toml_edit`-based diff application isn't broken)
+- [ ] Confirm the settings screen is full-screen, with the panes, log area, and status bar not visible while it's open
 
-## 28. ヘルプ画面・ログビューアの `less` 互換スクロール/検索（新規）
+## 28. `less`-Compatible Scroll/Search in the Help Screen & Log Viewer (new)
 
-- [ ] `h`（または `?`）でヘルプ画面を開き、`j`/`k` で1行ずつ、`Space`/`f`/`PageDown` でページ送り、`b`/`PageUp` でページ戻り、`d`/`u` で半ページ送り/戻り、`g`/`Home` で先頭、`G`/`End` で末尾へ移動できることを確認する
-- [ ] ヘルプ画面で `/` を押すと画面下部に検索入力欄が開き、`rename` のように既知のアクション名を入力して `Enter` を押すと、そのキーバインド行へジャンプし反転表示でハイライトされることを確認する
-- [ ] `n`/`N` で次/前の一致箇所へ移動できることを確認する（一致が1件しかない場合は同じ行への「折り返し」として `(search wrapped)` がフッターに表示されることを確認する）
-- [ ] ヘルプ画面で検索がアクティブな状態で `Esc` を押すとハイライトだけが消えて画面は開いたままであることを確認する。もう一度 `Esc`（または `q`/`h`）を押すとヘルプ画面が閉じることを確認する
-- [ ] `L`（Shift+l）でログビューアを開き、同様に `j`/`k`/`Space`/`f`/`b`/`d`/`u`/`g`/`G` がすべて動作することを確認する（`↑`/`k` が下寄り＝最新側から離れる方向、`↓`/`j` が最新側へ近づく方向であること — ビューア/ヘルプとは上下の意味が逆になる点に注意）
-- [ ] 日本語を含むメッセージ（例: 日本語ファイル名を含む操作ログや、日本語ファイル名を作成したときのログ）が記録された状態でログビューアを開き、`/` でその日本語文字列を検索すると正しくヒットしハイライトされることを確認する（**Japanese search hit** の確認）
-- [ ] ログビューアで検索がアクティブな状態で `Esc` を押すとハイライトだけが消え、もう一度 `Esc`（または `q`）で閉じることを確認する
-- [ ] 回帰確認: テキストビューア（`o`/`Enter`）の `/`・`?`・`n`・`N` 検索が、これまでどおり正しく動作することを確認する（ハイライト・折り返し通知・フッターの位置表示を含む）
+- [ ] Open the help screen with `h` (or `?`) and confirm you can move 1 line at a time with `j`/`k`, page forward with `Space`/`f`/`PageDown`, page back with `b`/`PageUp`, half-page forward/back with `d`/`u`, and jump to the top/bottom with `g`/`Home` and `G`/`End`
+- [ ] Pressing `/` in the help screen opens a search input field at the bottom; typing a known action name like `rename` and pressing `Enter` jumps to that key-binding row and highlights it in reverse video
+- [ ] Confirm `n`/`N` move to the next/previous match (if there's only one match, confirm pressing it again shows `(search wrapped)` in the footer, as a "wrap" to the same line)
+- [ ] With an active search in the help screen, confirm pressing `Esc` clears only the highlight, leaving the screen open. Confirm pressing `Esc` again (or `q`/`h`) closes the help screen
+- [ ] Open the log viewer with `L` (Shift+l) and confirm `j`/`k`/`Space`/`f`/`b`/`d`/`u`/`g`/`G` all work the same way (note that `↑`/`k` moves away from the latest side (downward in log order) and `↓`/`j` moves toward the latest side — the up/down meaning here is reversed compared to the viewer/help screen)
+- [ ] With a log entry containing Japanese text present (e.g. a log from an operation involving a Japanese file name, or from creating a file with a Japanese name), open the log viewer, search for that Japanese string with `/`, and confirm it's correctly matched and highlighted (**Japanese search hit** check)
+- [ ] With an active search in the log viewer, confirm pressing `Esc` clears only the highlight, and pressing `Esc` again (or `q`) closes it
+- [ ] Regression check: confirm the text viewer's (`o`/`Enter`) `/`, `?`, `n`, `N` search still works correctly as before (including highlighting, wrap notification, and the footer position display)
 
-## 29. `home` 設定の `~` 展開（新規）
+## 29. `~` Expansion in the `home` Setting (new)
 
-- [ ] 設定ファイルの `home` に `~/work`（自分の実際のホームディレクトリ配下の既存ディレクトリ）を指定して `ozzel` を起動し、`~` キーを押すと（`GoHome`）そのディレクトリへ実際に移動することを確認する（以前は `not a directory: ~/work` というエラーになっていた不具合の確認）
-- [ ] `home` に指定したディレクトリがシンボリックリンクの場合（例: `~/work` が実体は別の場所を指すリンク）でも、リンク先の実ディレクトリへ正しく移動できることを確認する
-- [ ] `home = "~"` （`~` 単体）を指定した場合、OS のホームディレクトリそのものへ移動することを確認する
-- [ ] `home` に絶対パス（例: `/tmp/somewhere`）を指定した場合は、これまでどおり変化なくそのまま使われることを確認する
+- [ ] Set `home` in the config file to `~/work` (an existing directory under your actual home directory) and launch `ozzel`; confirm pressing `~` (`GoHome`) actually moves there (previously this was a bug that produced an error like `not a directory: ~/work`)
+- [ ] Even when the directory specified in `home` is a symbolic link (e.g. `~/work` is actually a link pointing elsewhere), confirm it correctly moves to the real target directory
+- [ ] Confirm that specifying `home = "~"` (`~` alone) moves to the OS home directory itself
+- [ ] Confirm that specifying an absolute path in `home` (e.g. `/tmp/somewhere`) is used as-is, unchanged, as before
 
-## 30. ファイル名検索（`g`、新規）
+## 30. File Name Search (`g`, new)
 
-- [ ] サブディレクトリを含むディレクトリで `g` を押すと、中央にポップアップが開き、配下の全エントリ（ファイル・ディレクトリ両方。ディレクトリは末尾 `/` 付き）がルートからの相対パスで一覧表示されることを確認する
-- [ ] 文字を入力する度に結果が絞り込まれること（インクリメンタル、デフォルト設定）と、タイトルのヒット件数表示が追従することを確認する
-- [ ] 大文字小文字を区別しない部分一致であることを確認する（例: `readme` で `README.md` にヒット）
-- [ ] `re:` から始めると大文字小文字を区別する正規表現になることを確認する（例: `re:\.rs$`）
-- [ ] 不正な正規表現（例: `re:[`）を入力すると入力欄の下に赤いエラーメッセージが表示され、クラッシュせず0件になることを確認する。1文字削除して正しいパターンに戻すとエラーが消えることも確認する
-- [ ] `Up`/`Down` で結果一覧のカーソルが動き、`Enter` でそのエントリの親ディレクトリへ移動してカーソルがそのエントリに合うことを確認する（深い階層のファイルで確認）
-- [ ] ディレクトリを選択して `Enter` した場合も同様に親ディレクトリへ移動し、カーソルがそのディレクトリに合うこと（もう一度 `Enter` で中に入れること）を確認する
-- [ ] `Esc` でポップアップが閉じ、ペインの表示ディレクトリ・カーソルが一切動かないことを確認する
-- [ ] 隠しファイル非表示（デフォルト）のとき、dotfile と隠しディレクトリ配下が結果に出ないこと、`.` で表示を切り替えてから `g` を押し直すと出ることを確認する
-- [ ] 設定画面（`S` → 動作）またはコンフィグの `file_search_incremental = false` にすると、入力中は結果が更新されず（タイトルに `[Enter to search]` 表示）、`Enter` の1回目で検索実行、2回目で移動になることを確認する
-- [ ] Virtual Directory（`.zip` の中を閲覧中）で `g` を押すとポップアップは開かず、ログに read-only の旨のエラーが出ることを確認する
-- [ ] 巨大なツリー（例: ホームディレクトリ直下など 10 万エントリ超）で開くとタイトルに `[truncated]` が表示されることを確認する
+- [ ] In a directory with subdirectories, pressing `g` opens a centered popup listing all entries underneath (both files and directories; directories have a trailing `/`) as paths relative to the root
+- [ ] Confirm results narrow incrementally as each character is typed (default setting), and the title's hit count updates accordingly
+- [ ] Confirm it's a case-insensitive partial match (e.g. `readme` matches `README.md`)
+- [ ] Confirm starting with `re:` switches to a case-sensitive regular expression (e.g. `re:\.rs$`)
+- [ ] Confirm entering an invalid regex (e.g. `re:[`) shows a red error message below the input field, without crashing, and yields 0 results. Confirm deleting one character back to a valid pattern makes the error disappear
+- [ ] Confirm `Up`/`Down` move the cursor in the results list, and `Enter` moves to that entry's parent directory with the cursor placed on that entry (check with a deeply nested file)
+- [ ] Confirm that selecting a directory and pressing `Enter` likewise moves to its parent directory with the cursor placed on that directory (and that pressing `Enter` again enters it)
+- [ ] Confirm `Esc` closes the popup without moving the pane's displayed directory or cursor at all
+- [ ] With hidden files not shown (default), confirm dotfiles and contents under hidden directories don't appear in results, and confirm they do appear if you toggle display with `.` and press `g` again
+- [ ] In the settings screen (`S` → Behavior) or the config, set `file_search_incremental = false`; confirm results don't update while typing (the title shows `[Enter to search]`), the first `Enter` runs the search, and the second `Enter` navigates
+- [ ] Confirm pressing `g` while inside a Virtual Directory (browsing inside a `.zip`) does not open the popup, and logs a read-only error instead
+- [ ] Confirm the title shows `[truncated]` when opened on a huge tree (e.g. over 100,000 entries, such as directly under the home directory)
 
-## 31. `:` コマンドの対話シェルモード（`command_line_interactive`、新規）
+## 31. Interactive Shell Mode for the `:` Command (`command_line_interactive`, new)
 
-- [ ] デフォルト（`command_line_interactive = false`）で `:` から `.zshrc` に定義した alias を実行すると `command not found` になることを確認する（従来どおりの挙動）
-- [ ] `command_line_interactive = true`（コンフィグまたは設定画面 `S` → 動作）にして同じ alias を実行すると成功することを確認する。`.zshrc` に定義したシェル関数も同様に確認する
-- [ ] `true` の状態でも通常のコマンド（`ls -la` など）がこれまでどおり実行でき、終了後の "press any key" 待機 → ファイラー復帰が変わらないことを確認する
-- [ ] `true` の状態で `e`（エディタ）と `[viewers]` のコマンドが従来どおり動作することを確認する（この設定の影響を受けないこと）
-- [ ] 実行中の子プロセスで Ctrl+C を押しても `ozzel` 自体は生存することを確認する（対話モードでのシグナル周りの回帰確認）
+- [ ] By default (`command_line_interactive = false`), confirm running an alias defined in `.zshrc` via `:` results in "command not found" (the same behavior as before)
+- [ ] With `command_line_interactive = true` (via config or the settings screen `S` → Behavior), confirm running the same alias succeeds. Confirm the same for a shell function defined in `.zshrc`
+- [ ] With it `true`, confirm normal commands (e.g. `ls -la`) still run as before, and the "press any key" wait → return to the filer after completion is unchanged
+- [ ] With it `true`, confirm `e` (editor) and `[viewers]` commands still work as before (unaffected by this setting)
+- [ ] Confirm `ozzel` itself survives if you press Ctrl+C on a running child process (a regression check around signal handling in interactive mode)
 
-## 32. 回帰確認（総合）
+## 32. Regression Check (Overall)
 
 
-
-- [ ] `open`（`Enter`/`o`）、コピー（`C`）、移動（`M`）、削除（`D`）、絞込（`f`）、ビューア（`o`）、`:vim` の退避・復帰、`,` での設定 live reload が、今回の変更後もすべて問題なく動作することを確認する
-- [ ] `cargo build` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` / `cargo test` がすべてクリーンであることを確認する（開発時のチェックリストとして）
+- [ ] Confirm `open` (`Enter`/`o`), copy (`C`), move (`M`), delete (`D`), filter (`f`), the viewer (`o`), `:vim` suspend/resume, and live reload of config via `,` all still work without issue after this change
+- [ ] Confirm `cargo build` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` / `cargo test` are all clean (as a development-time checklist item)
