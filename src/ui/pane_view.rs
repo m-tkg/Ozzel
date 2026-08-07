@@ -62,9 +62,10 @@ fn min_width_for_perms_col(fmt: SizeFormat) -> usize {
     MARK_COL_WIDTH + size_col_width(fmt) + MTIME_COL_WIDTH + PERMS_COL_WIDTH + 3 + 4
 }
 
-/// The git status column: one marker char + one space, drawn to the left
-/// of the mark column as its own `Span` (the marker is the only colored
-/// fragment in a row, so the rest of the row can stay one styled string).
+/// The git status column: one space + one marker char, drawn between the
+/// name column and the permissions column as its own `Span` (the marker
+/// is the only colored fragment in a row, so the rest of the row stays
+/// two plain styled strings — see `format_row_parts`' split point).
 const GIT_COL_WIDTH: usize = 2;
 
 /// Same narrow-pane policy as the permissions column: below this width
@@ -263,7 +264,7 @@ pub fn render(
                 }
                 _ => None,
             };
-            let text = format_row(
+            let (left, right) = format_row_parts(
                 item,
                 row_width,
                 marked,
@@ -279,7 +280,7 @@ pub fn render(
             };
             let style = row_style(idx == cursor, marked, dim, cursor_color, type_color);
             if !show_git_col {
-                return ListItem::new(Line::styled(text, style));
+                return ListItem::new(Line::styled(format!("{left}{right}"), style));
             }
             let marker = match item {
                 VisibleItem::Entry(e) => pane
@@ -289,17 +290,19 @@ pub fn render(
                     .copied(),
                 VisibleItem::Parent => None,
             };
-            // The marker span keeps the row's own style (bg on the cursor
-            // row, DIM when the pane is dimmed) and only overrides the fg
-            // with the status color, so the two spans always read as one
-            // row.
+            // The marker sits between the name column and the info
+            // columns (just left of permissions). Its span keeps the
+            // row's own style (bg on the cursor row, DIM when the pane
+            // is dimmed) and only overrides the fg with the status
+            // color, so the three spans always read as one row.
             let (marker_text, marker_style) = match marker {
-                Some(m) => (format!("{} ", m.ch()), style.fg(git_marker_color(m))),
+                Some(m) => (format!(" {}", m.ch()), style.fg(git_marker_color(m))),
                 None => ("  ".to_string(), style),
             };
             ListItem::new(Line::from(vec![
+                ratatui::text::Span::styled(left, style),
                 ratatui::text::Span::styled(marker_text, marker_style),
-                ratatui::text::Span::styled(text, style),
+                ratatui::text::Span::styled(right, style),
             ]))
         })
         .collect();
@@ -522,11 +525,12 @@ fn scroll_offset(cursor: usize, len: usize, viewport_height: usize) -> usize {
         .min(max_start)
 }
 
-/// `show_perms_col` is decided once per frame by the caller (`render`, from
-/// the pane's actual width — see `MIN_WIDTH_FOR_PERMS_COL`) so every row in
-/// a frame agrees on whether the column exists at all; when it does, `..`
-/// gets a blank column of the same width rather than omitting it, so every
-/// row's other columns stay aligned.
+/// `format_row_parts`, joined — the plain single-string row for callers
+/// (and tests) that don't need the git-marker split point.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the joined form is exercised from tests")
+)]
 fn format_row(
     item: &VisibleItem<'_>,
     width: usize,
@@ -535,6 +539,29 @@ fn format_row(
     size_format: SizeFormat,
     dir_size: Option<u64>,
 ) -> String {
+    let (left, right) =
+        format_row_parts(item, width, marked, show_perms_col, size_format, dir_size);
+    format!("{left}{right}")
+}
+
+/// `show_perms_col` is decided once per frame by the caller (`render`, from
+/// the pane's actual width — see `MIN_WIDTH_FOR_PERMS_COL`) so every row in
+/// a frame agrees on whether the column exists at all; when it does, `..`
+/// gets a blank column of the same width rather than omitting it, so every
+/// row's other columns stay aligned.
+///
+/// Returned as two halves split where the git marker column goes —
+/// `(mark + name, info columns)` — so `render` can insert the colored
+/// marker span between them (to the left of the permissions column)
+/// without re-deriving any column math.
+fn format_row_parts(
+    item: &VisibleItem<'_>,
+    width: usize,
+    marked: bool,
+    show_perms_col: bool,
+    size_format: SizeFormat,
+    dir_size: Option<u64>,
+) -> (String, String) {
     let (name, size_text, mtime_text, perms_text) = match item {
         VisibleItem::Parent => (
             "..".to_string(),
@@ -584,11 +611,13 @@ fn format_row(
     let size_col = text::pad_left(&size_text, size_width);
     let mtime_col = text::pad_left(&mtime_text, MTIME_COL_WIDTH);
 
-    if show_perms_col {
-        format!("{mark_col}{name_col} {perms_text} {size_col} {mtime_col}")
+    let left = format!("{mark_col}{name_col}");
+    let right = if show_perms_col {
+        format!(" {perms_text} {size_col} {mtime_col}")
     } else {
-        format!("{mark_col}{name_col} {size_col} {mtime_col}")
-    }
+        format!(" {size_col} {mtime_col}")
+    };
+    (left, right)
 }
 
 /// Renders `bytes` per the configured `SizeFormat` — the single dispatch
