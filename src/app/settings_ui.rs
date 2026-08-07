@@ -253,6 +253,7 @@ impl App {
                     "cursor_wrap" => self.config.cursor_wrap,
                     "show_permissions" => self.config.show_permissions,
                     "show_git_status" => self.config.show_git_status,
+                    "auto_refresh" => self.config.auto_refresh,
                     "dim_inactive" => self.config.colors.dim_inactive,
                     _ => unreachable!("unknown bool key {:?}", item.key),
                 };

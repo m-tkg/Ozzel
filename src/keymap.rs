@@ -168,9 +168,11 @@ impl Keymap {
     /// rename/mkdir commands (`r`/`d` are this keymap's showcase of
     /// binding more than one combo to the same action — `R`/`D` still
     /// work too, they're the same key with Shift implied), `w` swaps
-    /// panes, `f`/`/` start an incremental filter (Esc clears one that's
-    /// active), `p` zips the marked-or-cursor selection, `u` unzips the
-    /// file under the cursor, `h`/`?` open the keybinding help screen,
+    /// panes, `_` points the *other* pane at this one's directory (a real
+    /// cd on that pane — nothing on disk is touched, unlike `W`),
+    /// `f`/`/` start an incremental filter (Esc clears one that's
+    /// active), `p` zips the marked-or-cursor selection, `u` extracts the
+    /// archive under the cursor into a new directory in the other pane, `h`/`?` open the keybinding help screen,
     /// `S-h` (capital `H`) opens the history jump menu (moved off plain
     /// `h` to make room for help), `b` opens the bookmark jump menu, `B`
     /// adds a bookmark, `~` jumps to home (no longer also on `S-h`/`H`,
@@ -231,6 +233,7 @@ impl Keymap {
             ("z", CalcDirSize),
             (".", ToggleHidden),
             ("w", SwapPanes),
+            ("_", MatchOtherPane),
             ("C-r", Refresh),
             ("space", Mark),
             ("a", MarkAll),

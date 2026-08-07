@@ -7,6 +7,7 @@
 //! Split out of `app/mod.rs` (Phase 6, Step 5's "if there's room" bullet).
 
 use super::*;
+use crate::virtual_dir::ArchiveKind;
 
 impl App {
     pub(super) fn begin_mkdir(&mut self) {
@@ -558,8 +559,18 @@ impl App {
         });
     }
 
-    /// The cursor entry must be a `.zip` file; extracts into the other
-    /// pane's cwd, confirming first if any top-level entry would collide.
+    /// `u`: extracts the archive under the cursor into the other pane.
+    /// Accepts every format `virtual_dir::detect_archive_kind` recognizes
+    /// (zip, the tar family, and bare `.gz`/`.bz2`), routed through the
+    /// same per-format workers the Virtual Directory `C` extraction uses.
+    ///
+    /// Multi-file archives (zip + tar family) always land in a *newly
+    /// created* subdirectory of the other pane's cwd, named after the
+    /// archive's stem (`project.tar.gz` -> `project`) and uniquified with
+    /// a `-1`/`-2`/... suffix when that name is taken — see
+    /// `continue_unzip`. That's what replaced the old top-level-collision
+    /// check and overwrite confirm: `u` can no longer overwrite anything,
+    /// so there is nothing left to confirm.
     pub(super) fn begin_unzip(&mut self) {
         if self.reject_if_virtual("unzip") {
             return;
@@ -568,62 +579,113 @@ impl App {
             self.log_error("no entry selected to unzip");
             return;
         };
-        if !name.to_lowercase().ends_with(".zip") {
-            self.log_error("selected entry is not a .zip file");
+        let archive_path = self.active_pane().cwd.join(&name);
+        // `detect_archive_kind` classifies by name alone, so a *directory*
+        // called `foo.zip` would pass it — reject that before opening
+        // anything.
+        if !archive_path.is_file() {
+            self.log_error(format!("{name}: not a file"));
             return;
         }
-        let archive_path = self.active_pane().cwd.join(&name);
-        let dest_dir = self.other_pane().cwd.clone();
-
-        // An encrypted archive needs the password *before* anything is
-        // spawned — collected via the masked prompt, verified there, and
-        // carried through the overwrite confirm (see
-        // `commit_archive_password`, which re-enters `continue_unzip`).
-        match virtual_dir::zip_has_encrypted_entries(&archive_path) {
-            Ok(true) => {
-                self.mode = Mode::Prompt {
-                    kind: PromptKind::ArchivePassword {
-                        pending: PasswordPending::Unzip {
-                            archive_path,
-                            dest_dir,
-                        },
-                    },
-                    input: LineEditor::new(),
-                };
-            }
-            Ok(false) => self.continue_unzip(archive_path, dest_dir, None),
-            Err(err) => self.log_error(err.to_string()),
+        let Some(kind) = virtual_dir::detect_archive_kind(&archive_path) else {
+            self.log_error(format!("{name}: not a supported archive format"));
+            return;
+        };
+        if self.other_pane().is_virtual() {
+            self.log_error("cannot extract into a virtual directory (archive) pane");
+            return;
         }
+        let dest_root = self.other_pane().cwd.clone();
+
+        // Only a zip can be encrypted, and `zip_has_encrypted_entries`
+        // opens its argument *as a zip* — probing a tar with it (which the
+        // old `.zip`-only gate made impossible) would fail with an opaque
+        // "not a valid zip archive" before extraction was ever attempted.
+        // Same guard `begin_extract` below already uses.
+        //
+        // An encrypted archive needs the password *before* anything is
+        // spawned — collected via the masked prompt and verified there
+        // (see `commit_archive_password`, which re-enters
+        // `continue_unzip` once, with an already-valid password).
+        if matches!(kind, ArchiveKind::Zip) {
+            match virtual_dir::zip_has_encrypted_entries(&archive_path) {
+                Ok(true) => {
+                    self.mode = Mode::Prompt {
+                        kind: PromptKind::ArchivePassword {
+                            pending: PasswordPending::Unzip {
+                                archive_path,
+                                dest_root,
+                            },
+                        },
+                        input: LineEditor::new(),
+                    };
+                    return;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    self.log_error(err.to_string());
+                    return;
+                }
+            }
+        }
+        self.continue_unzip(archive_path, dest_root, None);
     }
 
-    /// The unzip flow after any needed password is in hand: the same
-    /// collision-check/confirm/spawn sequence `begin_unzip` always had.
+    /// The `u` flow after any needed password is in hand. `dest_root` is
+    /// the other pane's cwd; the actual destination is derived from it
+    /// here — a freshly created stem-named subdirectory for zip/tar, or
+    /// `dest_root` itself for a single-payload `.gz`/`.bz2`, which has no
+    /// container worth wrapping — and the task spawns immediately, with no
+    /// collision check left to make.
+    ///
+    /// The directory is created here rather than in `begin_unzip` so that
+    /// cancelling the password prompt with Esc doesn't leave a stray empty
+    /// directory behind. A *failed* or `C-k`-cancelled extraction still
+    /// does leave its (possibly partial) directory, matching how a
+    /// cancelled copy leaves partial files.
     pub(super) fn continue_unzip(
         &mut self,
         archive_path: PathBuf,
-        dest_dir: PathBuf,
+        dest_root: PathBuf,
         password: Option<String>,
     ) {
-        match archive::top_level_collisions(&archive_path, &dest_dir) {
-            Ok(collisions) if !collisions.is_empty() => {
-                let message = format!("Overwrite {} existing item(s)? (y/n)", collisions.len());
-                self.confirm(
-                    message,
-                    PendingOp::UnzipOverwrite {
-                        archive_path,
-                        dest_dir,
-                        password,
-                    },
-                );
+        // Re-derived rather than threaded through `PasswordPending`:
+        // `detect_archive_kind` is a pure filename match, so this is free.
+        let Some(kind) = virtual_dir::detect_archive_kind(&archive_path) else {
+            self.log_error(format!(
+                "{}: not a supported archive format",
+                archive_path.display()
+            ));
+            return;
+        };
+        let dest_dir = match kind {
+            ArchiveKind::Single(_) => {
+                let payload = virtual_dir::single_payload_name(&archive_path);
+                if dest_root.join(&payload).exists() {
+                    self.log_error(format!("already exists: {payload}"));
+                    return;
+                }
+                dest_root
             }
-            Ok(_) => self.spawn_unzip(archive_path, dest_dir, password),
-            Err(err) => self.log_error(err.to_string()),
-        }
+            _ => {
+                let stem = virtual_dir::archive_stem(&archive_path);
+                match ops::create_unique_dir(&dest_root, &stem) {
+                    Ok(dir) => dir,
+                    Err(err) => {
+                        self.log_error(err.to_string());
+                        return;
+                    }
+                }
+            }
+        };
+        self.spawn_unzip(archive_path, dest_dir, password);
     }
 
     /// Hands the actual extraction off to a background task (see
-    /// `tasks::archive::run_unzip`); see `spawn_transfer` for the
-    /// completion story.
+    /// `tasks::archive::run_extract`); see `spawn_transfer` for the
+    /// completion story. `dest_dir` here is the *final* destination the
+    /// files land in — the freshly created subdirectory, for everything
+    /// but a single-payload archive — so the log line names it.
     fn spawn_unzip(&mut self, archive_path: PathBuf, dest_dir: PathBuf, password: Option<String>) {
         self.log_info(format!(
             "unzip: {} -> {}",
@@ -632,7 +694,15 @@ impl App {
         ));
         let desc = format!("unzip {} to {}", archive_path.display(), dest_dir.display());
         self.tasks.spawn(desc, move |id, tx, cancel| {
-            archive::run_unzip(id, tx, cancel, archive_path, dest_dir, password);
+            archive::run_extract(
+                id,
+                tx,
+                cancel,
+                archive_path,
+                archive::ExtractSelection::All,
+                dest_dir,
+                password,
+            );
         });
     }
 
@@ -758,7 +828,7 @@ impl App {
                 tx,
                 cancel,
                 archive_path,
-                inner_targets,
+                archive::ExtractSelection::Targets(inner_targets),
                 dest_dir,
                 password,
             );
@@ -1212,11 +1282,6 @@ impl App {
                 targets,
                 archive_path,
             } => self.spawn_zip(targets, archive_path),
-            PendingOp::UnzipOverwrite {
-                archive_path,
-                dest_dir,
-                password,
-            } => self.spawn_unzip(archive_path, dest_dir, password),
             PendingOp::Extract {
                 archive_path,
                 inner_targets,

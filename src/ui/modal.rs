@@ -642,7 +642,7 @@ mod tests {
             PromptKind::ArchivePassword {
                 pending: crate::mode::PasswordPending::Unzip {
                     archive_path: std::path::PathBuf::from("/a/secret.zip"),
-                    dest_dir: std::path::PathBuf::from("/b"),
+                    dest_root: std::path::PathBuf::from("/b"),
                 },
             },
             "hunter2",

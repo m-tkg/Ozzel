@@ -173,6 +173,45 @@ fn move_is_rejected_inside_a_virtual_directory() {
 }
 
 #[test]
+fn match_other_pane_is_refused_while_the_active_pane_is_virtual() {
+    // A virtual pane's `cwd` names the real directory *containing* the
+    // archive, so mirroring it would send the other pane somewhere the
+    // user isn't actually looking.
+    let archive_dir = tempfile::tempdir().unwrap();
+    let other_dir = tempfile::tempdir().unwrap();
+    make_test_archive(archive_dir.path());
+    let mut app = test_app(archive_dir.path(), other_dir.path());
+    move_cursor_onto(app.active_pane_mut(), "project.zip");
+    app.dispatch(Action::Open);
+    assert!(app.active_pane().is_virtual(), "precondition");
+
+    app.dispatch(Action::MatchOtherPane);
+
+    assert!(app.log.back().unwrap().is_error);
+    assert_eq!(app.panes[1].cwd, other_dir.path(), "must not have moved");
+}
+
+#[test]
+fn match_other_pane_pulls_a_virtual_other_pane_out_of_its_archive() {
+    // Both panes' `cwd` are equal here (a virtual pane keeps pointing at
+    // the real containing directory), so this is exactly the case the
+    // same-directory guard has to let through.
+    let dir = tempfile::tempdir().unwrap();
+    make_test_archive(dir.path());
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::SwitchPane);
+    move_cursor_onto(app.active_pane_mut(), "project.zip");
+    app.dispatch(Action::Open);
+    assert!(app.panes[1].is_virtual(), "precondition");
+    app.dispatch(Action::SwitchPane);
+
+    app.dispatch(Action::MatchOtherPane);
+
+    assert!(!app.panes[1].is_virtual(), "must leave the archive");
+    assert_eq!(app.panes[1].cwd, dir.path());
+}
+
+#[test]
 fn mutating_actions_are_all_rejected_inside_a_virtual_directory() {
     let dir = tempfile::tempdir().unwrap();
     make_test_archive(dir.path());

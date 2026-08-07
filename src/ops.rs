@@ -22,6 +22,54 @@ pub fn mkdir(parent: &Path, name: &str) -> Result<()> {
         .with_context(|| format!("failed to create directory: {}", target.display()))
 }
 
+/// How many `-1`/`-2`/... candidates [`create_unique_dir`] tries before
+/// giving up, rather than spinning forever against a pathological
+/// destination. Far above any plausible real count.
+const UNIQUE_DIR_LIMIT: u32 = 10_000;
+
+/// Creates `parent/<base>` — or, when that name is taken, the first of
+/// `parent/<base>-1`, `parent/<base>-2`, ... that isn't — and returns the
+/// path it actually created.
+///
+/// The "extract into a guaranteed-fresh directory" primitive behind `u`
+/// (see `App::continue_unzip`): unlike [`mkdir`] it never fails on an
+/// existing target, and unlike an overwrite flow it never *reuses* one, so
+/// nothing already on disk can be written into or clobbered.
+///
+/// Uses `fs::create_dir`'s own `AlreadyExists` error as the "taken" test
+/// rather than an `exists()` check followed by a create: `create_dir` is
+/// atomic, so two extractions racing for the same base name (or anything
+/// else creating that name in between) can never both win a candidate —
+/// the loser just advances to the next suffix. A plain
+/// `while candidate.exists() { n += 1 }` loop would be TOCTOU-racy here.
+/// `create_dir` rather than `create_dir_all` is likewise deliberate:
+/// `parent` is a pane's cwd and must already exist, so a missing one is a
+/// real error rather than something to silently conjure.
+pub fn create_unique_dir(parent: &Path, base: &str) -> Result<PathBuf> {
+    validate_component(base)?;
+    for n in 0..UNIQUE_DIR_LIMIT {
+        let name = if n == 0 {
+            base.to_string()
+        } else {
+            format!("{base}-{n}")
+        };
+        let candidate = parent.join(&name);
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to create directory: {}", candidate.display())
+                });
+            }
+        }
+    }
+    bail!(
+        "too many directories named {base}-N in {}",
+        parent.display()
+    )
+}
+
 /// Renames `parent/from` to `parent/to`, rejecting an empty/unchanged name
 /// or one containing a path separator (renaming should never move an entry
 /// to a different directory).
@@ -116,6 +164,41 @@ fn validate_component(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn create_unique_dir_uses_the_base_name_when_it_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let created = create_unique_dir(dir.path(), "project").unwrap();
+        assert_eq!(created, dir.path().join("project"));
+        assert!(created.is_dir());
+    }
+
+    #[test]
+    fn create_unique_dir_appends_a_numeric_suffix_when_the_name_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("project")).unwrap();
+        fs::write(dir.path().join("project/keep.txt"), b"sentinel").unwrap();
+        fs::create_dir(dir.path().join("project-1")).unwrap();
+
+        let created = create_unique_dir(dir.path(), "project").unwrap();
+
+        assert_eq!(created, dir.path().join("project-2"));
+        assert_eq!(
+            fs::read(dir.path().join("project/keep.txt")).unwrap(),
+            b"sentinel",
+            "an existing directory must never be reused or written into"
+        );
+    }
+
+    #[test]
+    fn create_unique_dir_does_not_reuse_an_existing_file_of_the_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("project"), b"a file, not a directory").unwrap();
+
+        let created = create_unique_dir(dir.path(), "project").unwrap();
+
+        assert_eq!(created, dir.path().join("project-1"));
+    }
 
     #[test]
     fn mkdir_creates_directory_and_rejects_duplicate() {

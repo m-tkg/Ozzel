@@ -52,6 +52,10 @@ fn main() -> anyhow::Result<()> {
     app.bookmarks = bookmarks;
     app.sort_prefs = sort_prefs;
     app.apply_startup_sort_prefs();
+    // Opt this (real, non-test) `App` into filesystem watching, so panes
+    // pick up changes made outside ozzel — see
+    // `App::enable_directory_watching`, which honors `auto_refresh`.
+    app.enable_directory_watching();
     if let Some(msg) = history_warning {
         app.log_error(msg);
     }
@@ -160,6 +164,11 @@ fn run(
         // terminal poll, so a running copy/move/delete's gauge and log
         // lines update promptly instead of waiting behind a keystroke.
         app.drain_tasks();
+
+        // Externally-made changes (Finder, another shell) land here, and
+        // are applied straight away so the next redraw — at the top of the
+        // very next iteration — already shows them.
+        app.drain_fs_events();
 
         // A running task's gauge (elapsed time, done/total) needs to keep
         // refreshing every iteration even on an iteration where no new

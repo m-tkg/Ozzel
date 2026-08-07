@@ -1,12 +1,14 @@
-//! Background zip create/extract workers. Runs on its own thread (spawned
-//! by `TaskManager::spawn`); reports per-file progress, throttled like the
-//! copy/move worker. `run_extract` (Virtual Directory marks/`C`
-//! extraction) also handles the tar family and bare `.gz`/`.bz2`
-//! (`ArchiveKind::Single`) via `virtual_dir`'s streaming primitives, and
-//! decrypts password-protected zip entries when a (pre-verified) password
-//! is passed along — zip creation (`run_zip`) and the separate
-//! whole-archive `u`/`Unzip` action (`run_unzip`/`top_level_collisions`)
-//! stay zip-only; extending those to the tar family isn't in scope here.
+//! Background archive create/extract workers. Runs on its own thread
+//! (spawned by `TaskManager::spawn`); reports per-file progress, throttled
+//! like the copy/move worker.
+//!
+//! Both extraction entry points — the Virtual Directory marks/`C`
+//! extraction and the whole-archive `u`/`Unzip` action — go through
+//! `run_extract`, distinguished only by `ExtractSelection`, and so both
+//! cover zip, the tar family and bare `.gz`/`.bz2` (`ArchiveKind::Single`)
+//! via `virtual_dir`'s streaming primitives, decrypting
+//! password-protected zip entries when a (pre-verified) password is passed
+//! along. Archive *creation* (`run_zip`) stays zip-only.
 
 use std::collections::HashSet;
 use std::fs;
@@ -210,170 +212,19 @@ fn entry_name(base_parent: &Path, path: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------
-// Extract
+// Extract (Virtual Directory `C` partial extraction, and whole-archive `u`)
 // ---------------------------------------------------------------------
-
-/// Top-level destination paths that already exist, for a pre-extract
-/// Confirm. Coarse by design (only checks each entry's *first* path
-/// component, deduplicated) — matching the plan's "coarse check is fine".
-pub fn top_level_collisions(archive_path: &Path, dest_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let file = fs::File::open(archive_path)?;
-    let mut archive = ZipArchive::new(file)?;
-
-    let mut seen = HashSet::new();
-    let mut collisions = Vec::new();
-    for i in 0..archive.len() {
-        // `by_index_raw` (metadata only): a name check needs no
-        // decompression, and — the actual bug this fixes — no decryption
-        // either, so the collision check works on a password-protected
-        // zip instead of failing before the password was ever asked for.
-        let entry = archive.by_index_raw(i)?;
-        let Some(relative) = entry.enclosed_name() else {
-            continue;
-        };
-        let Some(top) = relative.components().next() else {
-            continue;
-        };
-        let top_path = dest_dir.join(top.as_os_str());
-        if seen.insert(top_path.clone()) && top_path.exists() {
-            collisions.push(top_path);
-        }
-    }
-    Ok(collisions)
-}
-
-/// Worker entry point for an unzip task; matches the `TaskManager::spawn`
-/// closure signature.
-pub fn run_unzip(
-    id: TaskId,
-    tx: Sender<TaskEvent>,
-    cancel: Arc<AtomicBool>,
-    archive_path: PathBuf,
-    dest_dir: PathBuf,
-    password: Option<String>,
-) {
-    let result = run_unzip_inner(
-        id,
-        &tx,
-        &cancel,
-        &archive_path,
-        &dest_dir,
-        password.as_deref(),
-    );
-    let outcome = match result {
-        Ok(count) => Ok(format!(
-            "extracted {count} file(s) to {}",
-            dest_dir.display()
-        )),
-        Err(err) => Err(err.to_string()),
-    };
-    let _ = tx.send(TaskEvent::Finished {
-        id,
-        result: outcome,
-    });
-}
-
-fn run_unzip_inner(
-    id: TaskId,
-    tx: &Sender<TaskEvent>,
-    cancel: &Arc<AtomicBool>,
-    archive_path: &Path,
-    dest_dir: &Path,
-    password: Option<&str>,
-) -> anyhow::Result<usize> {
-    let file = fs::File::open(archive_path)?;
-    let mut archive = ZipArchive::new(file)?;
-    let total = archive.len() as u64;
-
-    let mut throttle = Throttle::new(PROGRESS_MIN_INTERVAL);
-    let mut extracted = 0usize;
-
-    for i in 0..archive.len() {
-        if cancel.load(Ordering::Relaxed) {
-            anyhow::bail!("cancelled");
-        }
-
-        let mut entry = virtual_dir::zip_entry_reader(&mut archive, i, password)?;
-        let display_name = entry.name().to_string();
-
-        if !is_valid_utf8_name(entry.name_raw()) {
-            send_log(
-                tx,
-                id,
-                format!("{display_name}: non-UTF-8 name, extracted best-effort"),
-            );
-        }
-
-        // Zip-slip protection: `enclosed_name()` returns `None` for any
-        // entry whose path is absolute or normalizes to something outside
-        // the archive root (e.g. `../../etc/passwd`).
-        let Some(relative) = entry.enclosed_name() else {
-            send_log(
-                tx,
-                id,
-                format!("{display_name}: unsafe path in archive, skipped"),
-            );
-            continue;
-        };
-        let dest_path = dest_dir.join(&relative);
-
-        if entry.is_dir() {
-            fs::create_dir_all(&dest_path)?;
-        } else if entry.is_symlink() {
-            // MVP: symlink entries aren't restored as symlinks (a
-            // maliciously crafted symlink target could itself point
-            // outside `dest_dir`, a second class of zip-slip distinct from
-            // the path check above). Logged and skipped rather than
-            // silently ignored.
-            send_log(
-                tx,
-                id,
-                format!("{display_name}: symlink entries are not extracted, skipped"),
-            );
-        } else {
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut out = fs::File::create(&dest_path)?;
-            let mut buf = vec![0u8; CHUNK_SIZE];
-            loop {
-                let n = entry.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buf[..n])?;
-            }
-            extracted += 1;
-        }
-
-        let done = (i + 1) as u64;
-        if throttle.allow(Instant::now()) {
-            let _ = tx.send(TaskEvent::Progress {
-                id,
-                done,
-                total,
-                detail: display_name,
-            });
-        }
-    }
-
-    Ok(extracted)
-}
 
 fn is_valid_utf8_name(name_raw: &[u8]) -> bool {
     std::str::from_utf8(name_raw).is_ok()
 }
 
-// ---------------------------------------------------------------------
-// Extract (Virtual Directory partial extraction — `C` inside a `.zip`)
-// ---------------------------------------------------------------------
-
 /// Top-level destination-name collisions for a Virtual Directory
-/// extraction, for a pre-extract Confirm — pure and archive-I/O-free
-/// (unlike `top_level_collisions`, which has to open the archive to learn
-/// each entry's own top component): `inner_targets` already *are* each
-/// target's own top-level name (its `file_name()`), since extraction
-/// always lands each target directly under `dest_dir` by that name.
+/// extraction, for a pre-extract Confirm — pure and archive-I/O-free:
+/// `inner_targets` already *are* each target's own top-level name (its
+/// `file_name()`), since extraction always lands each target directly
+/// under `dest_dir` by that name. Only the `C` flow needs this; `u`
+/// extracts into a freshly created directory, so it can't collide at all.
 pub fn extract_collisions(inner_targets: &[PathBuf], dest_dir: &Path) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut collisions = Vec::new();
@@ -389,18 +240,31 @@ pub fn extract_collisions(inner_targets: &[PathBuf], dest_dir: &Path) -> Vec<Pat
     collisions
 }
 
-/// Worker entry point for a Virtual Directory extraction; matches the
-/// `TaskManager::spawn` closure signature. `inner_targets` are
-/// archive-internal paths (from the virtual pane's marks-or-cursor) —
-/// each one lands under `dest_dir` by its own `file_name()`, a file
-/// extracted directly or a directory extracted as the whole subtree
-/// under it.
+/// Which entries of an archive one extraction run covers.
+pub enum ExtractSelection {
+    /// Virtual Directory `C`: only these archive-internal paths (from the
+    /// virtual pane's marks-or-cursor), each landing under `dest_dir` by
+    /// its own `file_name()` — a file extracted directly, a directory
+    /// extracted as the whole subtree under it. A target matching nothing
+    /// is reported as a "not found in archive, skipped" log line.
+    Targets(Vec<PathBuf>),
+    /// Whole-archive `u`: every entry, laid out under `dest_dir` at its
+    /// own archive-relative path. `dest_dir` is always a freshly created,
+    /// guaranteed-empty directory (`ops::create_unique_dir`, from
+    /// `App::continue_unzip`) — which is exactly why this path needs
+    /// neither a collision check nor an overwrite confirm.
+    All,
+}
+
+/// Worker entry point for both extraction flows; matches the
+/// `TaskManager::spawn` closure signature. See `ExtractSelection` for what
+/// `selection` picks out of the archive.
 pub fn run_extract(
     id: TaskId,
     tx: Sender<TaskEvent>,
     cancel: Arc<AtomicBool>,
     archive_path: PathBuf,
-    inner_targets: Vec<PathBuf>,
+    selection: ExtractSelection,
     dest_dir: PathBuf,
     password: Option<String>,
 ) {
@@ -409,7 +273,7 @@ pub fn run_extract(
         tx: &tx,
         cancel: &cancel,
         archive_path: &archive_path,
-        inner_targets: &inner_targets,
+        selection: &selection,
         dest_dir: &dest_dir,
         password: password.as_deref(),
     };
@@ -440,18 +304,19 @@ pub fn run_extract(
     });
 }
 
-/// Parameters shared by the zip and tar-family "Virtual Directory extract"
-/// inner workers (`run_extract_inner`/`run_tar_extract_inner`) — every one
-/// of `run_extract`'s own arguments except the tar-only `compression`,
-/// bundled so neither inner function has to re-thread six-plus separate
-/// parameters (which, for `run_tar_extract_inner` plus its own
-/// `compression`, previously tripped clippy's `too_many_arguments`).
+/// Parameters shared by the zip, tar-family and single-file extract inner
+/// workers (`run_extract_inner`/`run_tar_extract_inner`/
+/// `run_single_extract_inner`) — every one of `run_extract`'s own
+/// arguments except the format-specific `compression`, bundled so no inner
+/// function has to re-thread six-plus separate parameters (which, for
+/// `run_tar_extract_inner` plus its own `compression`, previously tripped
+/// clippy's `too_many_arguments`).
 struct ExtractCtx<'a> {
     id: TaskId,
     tx: &'a Sender<TaskEvent>,
     cancel: &'a Arc<AtomicBool>,
     archive_path: &'a Path,
-    inner_targets: &'a [PathBuf],
+    selection: &'a ExtractSelection,
     dest_dir: &'a Path,
     /// zip only (`Some` decrypts encrypted entries with it); the tar
     /// family and Single archives ignore it.
@@ -460,11 +325,13 @@ struct ExtractCtx<'a> {
 
 /// One planned extraction step: which archive entry (`index`) lands at
 /// which real `dest` path, and whether it's a directory (just needs
-/// creating) or a file (needs its content copied out).
+/// creating), a symlink (logged and skipped — see `run_extract_inner`) or
+/// a file (needs its content copied out).
 struct ExtractPlan {
     index: usize,
     dest: PathBuf,
     is_dir: bool,
+    is_symlink: bool,
 }
 
 fn run_extract_inner(ctx: &ExtractCtx) -> anyhow::Result<usize> {
@@ -478,51 +345,96 @@ fn run_extract_inner(ctx: &ExtractCtx) -> anyhow::Result<usize> {
     // decryption — only the later per-file `by_index` read does, and that's
     // exactly where a "password required" error should surface).
     let mut safe_entries: Vec<(PathBuf, usize)> = Vec::new();
+    let mut unsafe_names: Vec<String> = Vec::new();
     for i in 0..archive.len() {
         let raw = archive.by_index_raw(i)?;
-        if let Some(name) = raw.enclosed_name() {
-            safe_entries.push((name, i));
+        match raw.enclosed_name() {
+            Some(name) => safe_entries.push((name, i)),
+            // Zip-slip protection: `enclosed_name()` returns `None` for
+            // any entry whose path is absolute or normalizes to something
+            // outside the archive root (`../../etc/passwd`). Reported
+            // rather than silently dropped — collected here and logged
+            // below, since `raw` holds a borrow of `archive`.
+            None => unsafe_names.push(raw.name().to_string()),
         }
+    }
+    for name in unsafe_names {
+        send_log(
+            ctx.tx,
+            ctx.id,
+            format!("{name}: unsafe path in archive, skipped"),
+        );
     }
 
     let mut plan: Vec<ExtractPlan> = Vec::new();
-    for target in ctx.inner_targets {
-        let dest_name = target
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| target.clone());
-        let mut matched_any = false;
-
-        for (name, index) in &safe_entries {
-            let dest = if name == target {
-                ctx.dest_dir.join(&dest_name)
-            } else if let Ok(rel) = name.strip_prefix(target) {
-                if rel.as_os_str().is_empty() {
-                    continue; // same entry as the `name == target` case above
+    match ctx.selection {
+        // Whole archive: every safely-named entry, at its own
+        // archive-relative path under `dest_dir`.
+        ExtractSelection::All => {
+            for (name, index) in &safe_entries {
+                let raw = archive.by_index_raw(*index)?;
+                let (is_dir, is_symlink) = (raw.is_dir(), raw.is_symlink());
+                // `enclosed_name` already lossily decoded the path this
+                // lands at; the log just says so rather than pretending
+                // the name round-tripped.
+                let non_utf8_name =
+                    (!is_valid_utf8_name(raw.name_raw())).then(|| raw.name().to_string());
+                if let Some(display_name) = non_utf8_name {
+                    send_log(
+                        ctx.tx,
+                        ctx.id,
+                        format!("{display_name}: non-UTF-8 name, extracted best-effort"),
+                    );
                 }
-                ctx.dest_dir.join(&dest_name).join(rel)
-            } else {
-                continue;
-            };
-            matched_any = true;
-            let is_dir = archive.by_index_raw(*index)?.is_dir();
-            plan.push(ExtractPlan {
-                index: *index,
-                dest,
-                is_dir,
-            });
+                plan.push(ExtractPlan {
+                    index: *index,
+                    dest: ctx.dest_dir.join(name),
+                    is_dir,
+                    is_symlink,
+                });
+            }
         }
+        ExtractSelection::Targets(targets) => {
+            for target in targets {
+                let dest_name = target
+                    .file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| target.clone());
+                let mut matched_any = false;
 
-        if !matched_any {
-            send_log(
-                ctx.tx,
-                ctx.id,
-                format!("{}: not found in archive, skipped", target.display()),
-            );
+                for (name, index) in &safe_entries {
+                    let dest = if name == target {
+                        ctx.dest_dir.join(&dest_name)
+                    } else if let Ok(rel) = name.strip_prefix(target) {
+                        if rel.as_os_str().is_empty() {
+                            continue; // same entry as the `name == target` case above
+                        }
+                        ctx.dest_dir.join(&dest_name).join(rel)
+                    } else {
+                        continue;
+                    };
+                    matched_any = true;
+                    let raw = archive.by_index_raw(*index)?;
+                    plan.push(ExtractPlan {
+                        index: *index,
+                        dest,
+                        is_dir: raw.is_dir(),
+                        is_symlink: raw.is_symlink(),
+                    });
+                }
+
+                if !matched_any {
+                    send_log(
+                        ctx.tx,
+                        ctx.id,
+                        format!("{}: not found in archive, skipped", target.display()),
+                    );
+                }
+            }
         }
     }
 
-    let total = plan.iter().filter(|p| !p.is_dir).count() as u64;
+    let total = plan.iter().filter(|p| !p.is_dir && !p.is_symlink).count() as u64;
     let mut throttle = Throttle::new(PROGRESS_MIN_INTERVAL);
     let mut done = 0u64;
     let mut extracted = 0usize;
@@ -534,6 +446,22 @@ fn run_extract_inner(ctx: &ExtractCtx) -> anyhow::Result<usize> {
 
         if p.is_dir {
             fs::create_dir_all(&p.dest)?;
+            continue;
+        }
+        if p.is_symlink {
+            // Symlink entries aren't restored as symlinks: a maliciously
+            // crafted link target could itself point outside `dest_dir`, a
+            // second class of zip-slip distinct from the `enclosed_name`
+            // path check above. Logged and skipped rather than written out
+            // as a regular file containing the target string.
+            send_log(
+                ctx.tx,
+                ctx.id,
+                format!(
+                    "{}: symlink entries are not extracted, skipped",
+                    p.dest.display()
+                ),
+            );
             continue;
         }
         if let Some(parent) = p.dest.parent() {
@@ -627,26 +555,32 @@ fn run_tar_extract_inner(
 
         // Every requested target this entry falls under — usually zero or
         // one, but see the doc comment above for why it can legitimately
-        // be more than one.
+        // be more than one. Whole-archive extraction always has exactly
+        // one destination: the entry's own path under `dest_dir`.
         let mut dests: Vec<PathBuf> = Vec::new();
-        for (ti, target) in ctx.inner_targets.iter().enumerate() {
-            let dest_name = target
-                .file_name()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| target.clone());
-            let matched = if path == *target {
-                Some(ctx.dest_dir.join(&dest_name))
-            } else {
-                match path.strip_prefix(target) {
-                    Ok(rel) if !rel.as_os_str().is_empty() => {
-                        Some(ctx.dest_dir.join(&dest_name).join(rel))
+        match ctx.selection {
+            ExtractSelection::All => dests.push(ctx.dest_dir.join(&path)),
+            ExtractSelection::Targets(targets) => {
+                for (ti, target) in targets.iter().enumerate() {
+                    let dest_name = target
+                        .file_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| target.clone());
+                    let matched = if path == *target {
+                        Some(ctx.dest_dir.join(&dest_name))
+                    } else {
+                        match path.strip_prefix(target) {
+                            Ok(rel) if !rel.as_os_str().is_empty() => {
+                                Some(ctx.dest_dir.join(&dest_name).join(rel))
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(dest) = matched {
+                        matched_targets.insert(ti);
+                        dests.push(dest);
                     }
-                    _ => None,
                 }
-            };
-            if let Some(dest) = matched {
-                matched_targets.insert(ti);
-                dests.push(dest);
             }
         }
         if dests.is_empty() {
@@ -702,13 +636,17 @@ fn run_tar_extract_inner(
         }
     }
 
-    for (ti, target) in ctx.inner_targets.iter().enumerate() {
-        if !matched_targets.contains(&ti) {
-            send_log(
-                ctx.tx,
-                ctx.id,
-                format!("{}: not found in archive, skipped", target.display()),
-            );
+    // Only a target list can go unmatched; whole-archive extraction has
+    // nothing to report as missing.
+    if let ExtractSelection::Targets(targets) = ctx.selection {
+        for (ti, target) in targets.iter().enumerate() {
+            if !matched_targets.contains(&ti) {
+                send_log(
+                    ctx.tx,
+                    ctx.id,
+                    format!("{}: not found in archive, skipped", target.display()),
+                );
+            }
         }
     }
 
@@ -728,7 +666,16 @@ fn run_single_extract_inner(
     let payload = virtual_dir::single_payload_name(ctx.archive_path);
     let mut extracted = 0usize;
 
-    for target in ctx.inner_targets {
+    // A `Single` archive holds exactly one payload, so whole-archive
+    // extraction is the same single step as a target list naming it —
+    // modelled as a one-element list so the streaming body below stays a
+    // single loop.
+    let targets: Vec<PathBuf> = match ctx.selection {
+        ExtractSelection::All => vec![PathBuf::from(&payload)],
+        ExtractSelection::Targets(targets) => targets.clone(),
+    };
+
+    for target in &targets {
         if target != Path::new(&payload) {
             send_log(
                 ctx.tx,
@@ -824,7 +771,7 @@ mod tests {
             tx,
             Arc::new(AtomicBool::new(false)),
             archive_path,
-            vec![PathBuf::from("notes.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("notes.txt")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -840,37 +787,18 @@ mod tests {
     }
 
     #[test]
-    fn top_level_collisions_works_on_an_encrypted_zip() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest_dir = tempfile::tempdir().unwrap();
-        let archive_path = make_encrypted_zip(dir.path());
-
-        // No collision yet — and, the regression under test, no error
-        // either (the metadata-only scan must not require a password).
-        assert!(
-            top_level_collisions(&archive_path, dest_dir.path())
-                .unwrap()
-                .is_empty()
-        );
-        fs::create_dir(dest_dir.path().join("inner")).unwrap();
-        assert_eq!(
-            top_level_collisions(&archive_path, dest_dir.path()).unwrap(),
-            vec![dest_dir.path().join("inner")]
-        );
-    }
-
-    #[test]
-    fn run_unzip_extracts_an_encrypted_zip_with_the_password() {
+    fn run_extract_all_extracts_an_encrypted_zip_with_the_password() {
         let dir = tempfile::tempdir().unwrap();
         let dest_dir = tempfile::tempdir().unwrap();
         let archive_path = make_encrypted_zip(dir.path());
 
         let (tx, rx) = mpsc::channel();
-        run_unzip(
+        run_extract(
             TaskId::next(),
             tx,
             Arc::new(AtomicBool::new(false)),
             archive_path,
+            ExtractSelection::All,
             dest_dir.path().to_path_buf(),
             Some("hunter2".to_string()),
         );
@@ -886,17 +814,18 @@ mod tests {
     }
 
     #[test]
-    fn run_unzip_without_a_password_fails_cleanly_on_an_encrypted_zip() {
+    fn run_extract_all_without_a_password_fails_cleanly_on_an_encrypted_zip() {
         let dir = tempfile::tempdir().unwrap();
         let dest_dir = tempfile::tempdir().unwrap();
         let archive_path = make_encrypted_zip(dir.path());
 
         let (tx, rx) = mpsc::channel();
-        run_unzip(
+        run_extract(
             TaskId::next(),
             tx,
             Arc::new(AtomicBool::new(false)),
             archive_path,
+            ExtractSelection::All,
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -921,7 +850,7 @@ mod tests {
             tx,
             Arc::new(AtomicBool::new(false)),
             archive_path,
-            vec![PathBuf::from("inner/secret.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("inner/secret.txt")]),
             dest_dir.path().to_path_buf(),
             Some("hunter2".to_string()),
         );
@@ -983,11 +912,12 @@ mod tests {
         let (tx2, rx2) = mpsc::channel();
         let cancel2 = Arc::new(AtomicBool::new(false));
         let id2 = TaskId::next();
-        run_unzip(
+        run_extract(
             id2,
             tx2,
             cancel2,
             archive_path,
+            ExtractSelection::All,
             extract_dir.path().to_path_buf(),
             None,
         );
@@ -1031,11 +961,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let id = TaskId::next();
-        run_unzip(
+        run_extract(
             id,
             tx,
             cancel,
             archive_path,
+            ExtractSelection::All,
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1058,28 +989,6 @@ mod tests {
             !dest_dir.path().parent().unwrap().join("evil.txt").exists(),
             "malicious entry must not escape dest_dir"
         );
-    }
-
-    #[test]
-    fn top_level_collisions_reports_existing_names_only() {
-        let src_dir = tempfile::tempdir().unwrap();
-        let archive_path = src_dir.path().join("a.zip");
-        {
-            let file = fs::File::create(&archive_path).unwrap();
-            let mut writer = ZipWriter::new(file);
-            let options = SimpleFileOptions::default();
-            writer.start_file("existing.txt", options).unwrap();
-            writer.write_all(b"x").unwrap();
-            writer.start_file("fresh.txt", options).unwrap();
-            writer.write_all(b"y").unwrap();
-            writer.finish().unwrap();
-        }
-
-        let dest_dir = tempfile::tempdir().unwrap();
-        fs::write(dest_dir.path().join("existing.txt"), b"already here").unwrap();
-
-        let collisions = top_level_collisions(&archive_path, dest_dir.path()).unwrap();
-        assert_eq!(collisions, vec![dest_dir.path().join("existing.txt")]);
     }
 
     #[test]
@@ -1148,7 +1057,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("readme.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("readme.txt")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1176,7 +1085,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("src")],
+            ExtractSelection::Targets(vec![PathBuf::from("src")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1208,7 +1117,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("nope.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("nope.txt")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1244,7 +1153,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("safe")],
+            ExtractSelection::Targets(vec![PathBuf::from("safe")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1297,7 +1206,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("readme.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("readme.txt")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1325,7 +1234,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("src")],
+            ExtractSelection::Targets(vec![PathBuf::from("src")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1357,7 +1266,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("nope.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("nope.txt")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1393,7 +1302,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("readme.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("readme.txt")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1438,7 +1347,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("safe")],
+            ExtractSelection::Targets(vec![PathBuf::from("safe")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1479,7 +1388,7 @@ mod tests {
             tx,
             cancel,
             archive_path,
-            vec![PathBuf::from("link.txt")],
+            ExtractSelection::Targets(vec![PathBuf::from("link.txt")]),
             dest_dir.path().to_path_buf(),
             None,
         );
@@ -1492,5 +1401,127 @@ mod tests {
             "events: {events:?}"
         );
         assert!(!dest_dir.path().join("link.txt").exists());
+    }
+
+    #[test]
+    fn run_extract_all_extracts_a_whole_tar_at_its_own_relative_paths() {
+        let (_dir, archive_path) = make_virtual_test_tar_archive();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        run_extract(
+            TaskId::next(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            archive_path,
+            ExtractSelection::All,
+            dest_dir.path().to_path_buf(),
+            None,
+        );
+
+        assert!(matches!(
+            drain(&rx).last(),
+            Some(TaskEvent::Finished { result: Ok(_), .. })
+        ));
+        assert_eq!(
+            fs::read(dest_dir.path().join("readme.txt")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            fs::read(dest_dir.path().join("src/main.rs")).unwrap(),
+            b"fn main() {}"
+        );
+        assert_eq!(
+            fs::read(dest_dir.path().join("src/nested/deep.txt")).unwrap(),
+            b"deep"
+        );
+    }
+
+    #[test]
+    fn run_extract_all_rejects_a_tar_slip_entry() {
+        // The tar counterpart of `zip_slip_entries_are_rejected_...`:
+        // proves `enclosed_tar_path` still gates every entry under `All`.
+        //
+        // `tar::Builder::append_data` refuses a `..`-containing path
+        // outright, so — like `virtual_dir`'s own tar-slip fixture — this
+        // pokes the raw header bytes to produce one.
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("evil.tar");
+        let bytes = {
+            let mut builder = tar::Builder::new(Vec::new());
+            let data = b"pwned".as_slice();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            let name = b"../evil.txt";
+            header.as_old_mut().name[..name.len()].copy_from_slice(name);
+            header.set_cksum();
+            builder.append(&header, data).unwrap();
+            builder.into_inner().unwrap()
+        };
+        fs::write(&archive_path, bytes).unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        run_extract(
+            TaskId::next(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            archive_path,
+            ExtractSelection::All,
+            dest_dir.path().to_path_buf(),
+            None,
+        );
+
+        let events = drain(&rx);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TaskEvent::Log { line, .. } if line.contains("unsafe path"))),
+            "events: {events:?}"
+        );
+        assert!(fs::read_dir(dest_dir.path()).unwrap().next().is_none());
+        assert!(!dest_dir.path().parent().unwrap().join("evil.txt").exists());
+    }
+
+    #[test]
+    fn run_extract_all_skips_zip_symlink_entries() {
+        // Without the symlink arm, `All` would write the link's *target
+        // string* out as a regular file.
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("links.zip");
+        {
+            let file = fs::File::create(&archive_path).unwrap();
+            let mut writer = ZipWriter::new(file);
+            let options = SimpleFileOptions::default();
+            writer
+                .add_symlink("link.txt", "/etc/passwd", options)
+                .unwrap();
+            writer.start_file("real.txt", options).unwrap();
+            writer.write_all(b"ok").unwrap();
+            writer.finish().unwrap();
+        }
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        run_extract(
+            TaskId::next(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            archive_path,
+            ExtractSelection::All,
+            dest_dir.path().to_path_buf(),
+            None,
+        );
+
+        let events = drain(&rx);
+        assert!(
+            events.iter().any(
+                |e| matches!(e, TaskEvent::Log { line, .. } if line.contains("symlink entries are not extracted"))
+            ),
+            "events: {events:?}"
+        );
+        assert!(!dest_dir.path().join("link.txt").exists());
+        assert_eq!(fs::read(dest_dir.path().join("real.txt")).unwrap(), b"ok");
     }
 }

@@ -131,6 +131,17 @@ show_permissions = true
 # nothing is shown. Set to false to disable the probes entirely.
 show_git_status = true
 
+# --- Auto-refresh -------------------------------------------------------------
+# Default true: each pane watches its directory through the OS (inotify on
+# Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows) and reloads
+# itself when something outside ozzel — Finder, another shell — adds,
+# changes or removes a file there. A pane browsing an archive picks up the
+# archive being rewritten the same way. The reload keeps the cursor on the
+# same entry and keeps marks, and is deferred while a prompt or dialog is
+# open. Set to false to register no watch at all, leaving Ctrl+R as the
+# only way to reload.
+auto_refresh = true
+
 # --- External viewer per extension ------------------------------------------
 # You can specify, per extension, an external command to use instead of
 # the built-in viewer when opening with `open` (Enter/o). Keys are
@@ -207,7 +218,8 @@ executable = "yellow"
 # authoritative list if this comment ever falls behind):
 # cursor_up, cursor_down, focus_left, focus_right, page_up, page_down,
 # top, bottom, switch_pane, open, parent, cycle_sort, sort_dialog,
-# toggle_size_format, calc_dir_size, toggle_hidden, swap_panes, refresh,
+# toggle_size_format, calc_dir_size, toggle_hidden, swap_panes, match_other_pane,
+# refresh,
 # mark, mark_all, rename, rename_marks, mkdir, delete, copy, move,
 # duplicate, copy_path, copy_dir_path, filter, clear_filter, jump_search,
 # file_search, zip_marked, unzip, cancel_tasks, symlink, chmod, touch,
@@ -234,7 +246,7 @@ executable = "yellow"
 # "none" in the [keys] section above (e.g. "q" = "none").
 [bindings]
 # cursor_up/cursor_down also drive the select-style modals: the
-# history/bookmark menu, the sort dialog (t), the sync dialog (Y), the
+# history/bookmark menu, the sort dialog (t), the sync dialog (W), the
 # overwrite dialog, and the command palette (F). Each of those handles its
 # own keys first, so a modal key is never shadowed by a rebind (and in the
 # palette, letter keys go into the filter rather than moving the highlight).
@@ -255,6 +267,7 @@ toggle_size_format = ["v"]
 calc_dir_size = ["z"]
 toggle_hidden = ["."]
 swap_panes = ["w"]
+match_other_pane = ["_"]
 refresh = ["C-r"]
 mark = ["Space"]
 mark_all = ["a"]

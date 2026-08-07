@@ -205,6 +205,52 @@ pub(super) fn make_test_archive(dir: &Path) -> PathBuf {
     archive_path
 }
 
+/// A `.tar.gz` with the same layout `make_test_archive` gives its zip —
+/// the non-zip counterpart the extension-aware `u` needs. Named
+/// `project.tar.gz` specifically so a test can tell `archive_stem`
+/// (`project`) apart from `Path::file_stem` (`project.tar`).
+pub(super) fn make_test_tar_gz(dir: &Path) -> PathBuf {
+    use std::io::Write;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, body) in [
+        ("readme.txt", &b"hello from inside the tar"[..]),
+        ("src/main.rs", &b"fn main() {}"[..]),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, name, body).unwrap();
+    }
+    let tar_bytes = builder.into_inner().unwrap();
+
+    let archive_path = dir.join("project.tar.gz");
+    let mut encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&archive_path).unwrap(),
+        flate2::Compression::default(),
+    );
+    encoder.write_all(&tar_bytes).unwrap();
+    encoder.finish().unwrap();
+    archive_path
+}
+
+/// A bare `.gz` holding a single `notes.txt` payload — an
+/// `ArchiveKind::Single` archive, which `u` extracts without a wrapper
+/// directory.
+pub(super) fn make_test_gz(dir: &Path, payload: &[u8]) -> PathBuf {
+    use std::io::Write;
+
+    let archive_path = dir.join("notes.txt.gz");
+    let mut encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&archive_path).unwrap(),
+        flate2::Compression::default(),
+    );
+    encoder.write_all(payload).unwrap();
+    encoder.finish().unwrap();
+    archive_path
+}
+
 /// Moves the cursor onto the visible entry named `name`, panicking if
 /// it isn't currently visible — used throughout these tests instead of
 /// hardcoding row indices, which would silently break if sort order

@@ -111,7 +111,7 @@ pub enum ItemKind {
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 13] = [
+pub const BEHAVIOR_ITEMS: [Item; 14] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations (confirm before copy/move)",
@@ -178,6 +178,11 @@ pub const BEHAVIOR_ITEMS: [Item; 13] = [
     Item {
         key: "show_git_status",
         label: "show_git_status (git status column + branch tag)",
+        kind: ItemKind::Bool,
+    },
+    Item {
+        key: "auto_refresh",
+        label: "auto_refresh (reload a pane when its directory changes externally)",
         kind: ItemKind::Bool,
     },
 ];
@@ -314,6 +319,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "cursor_wrap" => config.cursor_wrap,
                 "show_permissions" => config.show_permissions,
                 "show_git_status" => config.show_git_status,
+                "auto_refresh" => config.auto_refresh,
                 "dim_inactive" => config.colors.dim_inactive,
                 _ => unreachable!("bool item key {:?}", item.key),
             };

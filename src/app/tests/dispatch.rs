@@ -264,6 +264,100 @@ fn swap_panes_swaps_cwd() {
 }
 
 #[test]
+fn match_other_pane_moves_the_inactive_pane_and_leaves_focus_alone() {
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(left_dir.path(), right_dir.path());
+
+    app.dispatch(Action::MatchOtherPane);
+
+    assert_eq!(app.panes[1].cwd, left_dir.path(), "the other pane moved");
+    assert_eq!(app.panes[0].cwd, left_dir.path(), "the active pane stayed");
+    assert_eq!(app.active, ActivePane::Left, "focus stayed");
+}
+
+#[test]
+fn match_other_pane_records_the_move_in_the_other_panes_own_history() {
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(left_dir.path(), right_dir.path());
+
+    app.dispatch(Action::MatchOtherPane);
+
+    assert_eq!(
+        app.history.ring(Side::Right).first(),
+        Some(&left_dir.path().to_path_buf()),
+        "the right pane's own ring records the jump"
+    );
+    assert!(
+        app.history.ring(Side::Left).is_empty(),
+        "the active pane didn't move, so nothing goes on its ring"
+    );
+    assert_eq!(app.panes[1].back, vec![right_dir.path().to_path_buf()]);
+    assert!(app.panes[1].forward.is_empty());
+}
+
+#[test]
+fn match_other_pane_then_history_back_returns_the_other_pane() {
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(left_dir.path(), right_dir.path());
+
+    app.dispatch(Action::MatchOtherPane);
+    app.dispatch(Action::SwitchPane);
+    app.dispatch(Action::HistoryBack);
+
+    assert_eq!(app.panes[1].cwd, right_dir.path());
+}
+
+#[test]
+fn match_other_pane_applies_the_destinations_sort_preference() {
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(left_dir.path(), right_dir.path());
+    app.sort_prefs
+        .record(left_dir.path().to_path_buf(), "size", false);
+
+    app.dispatch(Action::MatchOtherPane);
+
+    assert_eq!(app.panes[1].sort, crate::pane::SortKey::Size);
+    assert!(!app.panes[1].ascending);
+}
+
+#[test]
+fn match_other_pane_on_the_same_directory_logs_and_leaves_the_pane_untouched() {
+    // The guard exists because `Pane::jump_to` is not free on an unchanged
+    // cwd — it would clear the other pane's marks, filter and cursor.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.panes[1].reload().unwrap();
+    let marked = dir.path().join("a.txt");
+    app.panes[1].marks.insert(marked.clone());
+
+    app.dispatch(Action::MatchOtherPane);
+
+    assert!(app.log.back().unwrap().is_error);
+    assert!(
+        app.log.back().unwrap().message.contains("same directory"),
+        "log: {}",
+        app.log.back().unwrap().message
+    );
+    assert!(app.panes[1].marks.contains(&marked), "marks must survive");
+}
+
+#[test]
+fn keymap_resolves_underscore_to_match_other_pane() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(dir.path(), dir.path());
+    assert_eq!(
+        app.keymap.resolve(KeyCode::Char('_'), KeyModifiers::NONE),
+        Some(Action::MatchOtherPane),
+        "`_` arrives as a bare char, not Shift+`-`"
+    );
+}
+
+#[test]
 fn keymap_resolves_q_and_ctrl_c_to_quit() {
     let dir = tempfile::tempdir().unwrap();
     let app = test_app(dir.path(), dir.path());
