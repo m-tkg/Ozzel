@@ -325,6 +325,40 @@ fn copy_action_confirms_by_default_then_spawns_a_background_task() {
 }
 
 #[test]
+fn confirm_ignores_unrelated_keys_and_cancels_on_esc() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("keep.txt"), b"hi").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "keep.txt");
+
+    app.dispatch(Action::Delete);
+    assert!(matches!(app.mode, Mode::Confirm { .. }));
+
+    // Stray keys — navigation, space, a random letter — must neither
+    // execute nor dismiss the dialog.
+    for code in [
+        KeyCode::Char('x'),
+        KeyCode::Char(' '),
+        KeyCode::Enter,
+        KeyCode::Down,
+        KeyCode::Backspace,
+    ] {
+        app.handle_event(AppEvent::Input(code, KeyModifiers::NONE));
+        assert!(
+            matches!(app.mode, Mode::Confirm { .. }),
+            "{code:?} must leave the confirm dialog open"
+        );
+    }
+
+    // Esc cancels like n/N.
+    app.handle_event(AppEvent::Input(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(dir.path().join("keep.txt").exists());
+    assert!(app.tasks.running.is_empty());
+}
+
+#[test]
 fn copy_confirm_declined_does_not_spawn_or_copy() {
     let left = tempfile::tempdir().unwrap();
     let right = tempfile::tempdir().unwrap();

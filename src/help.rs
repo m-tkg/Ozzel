@@ -60,7 +60,7 @@ pub fn build_display_lines(keymap: &Keymap) -> Vec<String> {
 /// consult the `Keymap` and so have no other way to show up here.
 const FIXED_KEY_LINES: &[&str] = &[
     "Prompt (rename/mkdir/zip name/touch time/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
-    "Confirm dialogs: y/Y proceed, any other key (including Esc) cancels",
+    "Confirm dialogs: y/Y proceed, n/N/Esc cancel, any other key is ignored",
     "Chmod dialog: arrows move over the rwx grid, Space toggles, 0-7 set the highlighted row, Enter applies, Esc cancels",
     "Sync dialog (Y): Up/Down choose update copy vs mirror, Enter confirms (mirror always re-confirms its deletions), Esc cancels",
     "File info: Esc/Enter/q close",
