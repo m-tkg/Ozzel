@@ -122,6 +122,15 @@ pub enum MenuNav {
     Down,
 }
 
+/// The page turn a paged modal takes from the keymap — the horizontal
+/// counterpart of `MenuNav`, resolved from the pane-focus keys (Left/Right
+/// by default). See `Keymap::menu_page`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuPage {
+    Prev,
+    Next,
+}
+
 /// Source for `Keymap::generation` — global rather than per-`Keymap` because
 /// what needs a unique id is each *instance* (see `generation`'s doc
 /// comment), not each mutation of one.
@@ -345,6 +354,22 @@ impl Keymap {
         match self.resolve(code, modifiers) {
             Some(Action::CursorUp) => Some(MenuNav::Up),
             Some(Action::CursorDown) => Some(MenuNav::Down),
+            _ => None,
+        }
+    }
+
+    /// Resolves a keypress to a *page* turn in a paged modal — the same
+    /// deliberately-narrow deal as `menu_nav`, but for the two pane-focus
+    /// actions (`left`/`right`, plus `j`/`l` in the ijkl layout). Focusing
+    /// the other pane is meaningless while a modal owns the screen, so the
+    /// bookmark menu reuses those keys to turn its pages, and a user who
+    /// has remapped pane focus gets the page turn on their own keys.
+    ///
+    /// Consulted last, like `menu_nav`, so the modal's own keys win.
+    pub fn menu_page(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<MenuPage> {
+        match self.resolve(code, modifiers) {
+            Some(Action::FocusLeft) => Some(MenuPage::Prev),
+            Some(Action::FocusRight) => Some(MenuPage::Next),
             _ => None,
         }
     }

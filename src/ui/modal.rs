@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::mode::{LineEditor, Mode, PromptKind};
+use crate::mode::{LineEditor, Mode, PromptKind, select_pagination};
 use crate::ui::text::slice_display_cols;
 
 /// Narrowest a `render_prompt_box` popup is ever allowed to shrink to,
@@ -187,44 +187,91 @@ pub(super) fn render_prefixed_input_line(
     frame.set_cursor_position((col, area.y));
 }
 
+/// The gutter each paged row carries in front of its label: the row's
+/// `1`..`9` shortcut digit plus one space (see `App::select_pick_row`).
+const SELECT_ROW_PREFIX_WIDTH: usize = 2;
+
 /// Draws the centered `Select` jump menu (history/bookmarks) on top of
 /// `area` (normally the whole frame). No-op if `mode` is not `Select`.
+///
+/// The bookmark menu is paged (`SelectKind::page_size`): only the page the
+/// cursor sits on is drawn, each row prefixed with the `1`..`9` digit that
+/// picks it, and a right-aligned `{page}/{count}` indicator (zero-padded
+/// to two digits, e.g. `02/09`) rides the top border opposite the title.
+/// The history menu is unpaged and draws exactly as it always has — no
+/// digits, no indicator.
 pub fn render_select(frame: &mut Frame, area: Rect, mode: &Mode) {
     let Mode::Select {
+        kind,
         title,
         items,
         cursor,
-        ..
     } = mode
     else {
         return;
     };
 
-    let inner_width = items
+    // `visible` is the slice actually drawn, and `offset` maps a row back
+    // to its index in `items` (0 for the unpaged history menu, where the
+    // slice is the whole list).
+    let (offset, visible, page_indicator) = match kind.page_size() {
+        Some(page_size) => {
+            let (page, pages) = select_pagination(items.len(), *cursor, page_size);
+            let offset = page * page_size;
+            let end = (offset + page_size).min(items.len());
+            (
+                offset,
+                &items[offset..end],
+                Some(format!("{:02}/{:02}", page + 1, pages)),
+            )
+        }
+        None => (0, &items[..], None),
+    };
+    let prefix_width = if page_indicator.is_some() {
+        SELECT_ROW_PREFIX_WIDTH
+    } else {
+        0
+    };
+
+    // The top border has to fit the title, the indicator, and a space
+    // between them; the rows have to fit the widest label plus its gutter.
+    let title_width = UnicodeWidthStr::width(title.as_str())
+        + page_indicator
+            .as_ref()
+            .map_or(0, |ind| UnicodeWidthStr::width(ind.as_str()) + 1);
+    let inner_width = visible
         .iter()
-        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()) + prefix_width)
         .max()
         .unwrap_or(0)
-        .max(UnicodeWidthStr::width(title.as_str()));
+        .max(title_width);
     let width = (inner_width as u16 + 4).clamp(1, area.width);
-    let height = (items.len() as u16 + 2).clamp(1, area.height);
+    let height = (visible.len() as u16 + 2).clamp(1, area.height);
     let popup = centered_rect(area, width, height);
 
     frame.render_widget(Clear, popup);
-    let block = Block::default().title(title.as_str()).borders(Borders::ALL);
+    let mut block = Block::default().title(title.as_str()).borders(Borders::ALL);
+    if let Some(indicator) = page_indicator {
+        block = block.title_top(Line::from(indicator).right_aligned());
+    }
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let rows: Vec<ListItem> = items
+    let rows: Vec<ListItem> = visible
         .iter()
         .enumerate()
-        .map(|(idx, (label, _))| {
-            let style = if idx == *cursor {
+        .map(|(row, (label, _))| {
+            let style = if offset + row == *cursor {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
             };
-            ListItem::new(Line::styled(label.clone(), style))
+            let text = if prefix_width > 0 {
+                format!("{} {label}", row + 1)
+            } else {
+                label.clone()
+            };
+            ListItem::new(Line::styled(text, style))
         })
         .collect();
     frame.render_widget(List::new(rows), inner);
@@ -700,6 +747,87 @@ mod tests {
             cursor_x >= popup_x && cursor_x < popup_x + popup_width,
             "cursor_x {cursor_x} must stay within the popup's own [{popup_x}, {}) bounds",
             popup_x + popup_width
+        );
+    }
+
+    /// Renders a `Select` menu of `count` entries named `bm00`.. with the
+    /// highlight on `cursor`, and returns the screen as text.
+    fn render_select_screen(kind: crate::mode::SelectKind, count: usize, cursor: usize) -> String {
+        let items = (0..count)
+            .map(|i| {
+                (
+                    format!("bm{i:02}"),
+                    std::path::PathBuf::from(format!("/bm{i:02}")),
+                )
+            })
+            .collect();
+        let mode = Mode::Select {
+            kind,
+            title: "Bookmarks".to_string(),
+            items,
+            cursor,
+        };
+        let (width, height) = (40u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_select(frame, frame.area(), &mode))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut rows = Vec::new();
+        for y in 0..height {
+            let mut row = String::new();
+            for x in 0..width {
+                row.push_str(buffer[(x, y)].symbol());
+            }
+            rows.push(row.trim_end().to_string());
+        }
+        rows.join("\n")
+    }
+
+    #[test]
+    fn bookmark_menu_draws_one_numbered_page_with_a_page_indicator() {
+        let screen = render_select_screen(crate::mode::SelectKind::Bookmark, 20, 0);
+        assert!(screen.contains("01/03"), "screen: {screen}");
+        assert!(screen.contains("1 bm00"), "screen: {screen}");
+        assert!(screen.contains("9 bm08"), "screen: {screen}");
+        assert!(
+            !screen.contains("bm09"),
+            "the 10th entry belongs to page 2: {screen}"
+        );
+    }
+
+    #[test]
+    fn bookmark_menu_page_follows_the_cursor() {
+        // Cursor on the 11th entry (index 10) => page 2, row 2.
+        let screen = render_select_screen(crate::mode::SelectKind::Bookmark, 20, 10);
+        assert!(screen.contains("02/03"), "screen: {screen}");
+        assert!(screen.contains("1 bm09"), "screen: {screen}");
+        assert!(screen.contains("9 bm17"), "screen: {screen}");
+        assert!(
+            !screen.contains("bm08") && !screen.contains("bm18"),
+            "neighbouring pages must not leak in: {screen}"
+        );
+    }
+
+    #[test]
+    fn bookmark_menu_last_page_is_short_and_still_indexed_from_one() {
+        // 20 entries => page 3 holds just the last two.
+        let screen = render_select_screen(crate::mode::SelectKind::Bookmark, 20, 19);
+        assert!(screen.contains("03/03"), "screen: {screen}");
+        assert!(screen.contains("1 bm18"), "screen: {screen}");
+        assert!(screen.contains("2 bm19"), "screen: {screen}");
+        assert!(!screen.contains("3 "), "no third row exists: {screen}");
+    }
+
+    #[test]
+    fn history_menu_stays_unpaged_and_unnumbered() {
+        let screen = render_select_screen(crate::mode::SelectKind::History, 12, 0);
+        assert!(!screen.contains("01/"), "no page indicator: {screen}");
+        assert!(!screen.contains("1 bm00"), "no row digits: {screen}");
+        assert!(
+            screen.contains("bm00") && screen.contains("bm11"),
+            "every entry must be drawn: {screen}"
         );
     }
 }

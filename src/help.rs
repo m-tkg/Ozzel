@@ -59,8 +59,9 @@ pub fn build_display_lines(keymap: &Keymap) -> Vec<String> {
 /// The keys of every other mode, which the `Keymap` has no entries for and
 /// so have no other way to show up here. All fixed, except that the menus
 /// and dialogs additionally accept whatever `cursor_up`/`cursor_down` are
-/// bound to (see `Keymap::menu_nav`) — noted per line, and in the header
-/// `build_lines` puts above them.
+/// bound to (see `Keymap::menu_nav`), and the paged bookmark menu whatever
+/// `focus_left`/`focus_right` are (see `Keymap::menu_page`) — noted per
+/// line, and in the header `build_lines` puts above them.
 const FIXED_KEY_LINES: &[&str] = &[
     "Prompt (rename/mkdir/zip name/touch time/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
     "Confirm dialogs: y/Y proceed, n/N/Esc cancel, any other key is ignored",
@@ -68,7 +69,7 @@ const FIXED_KEY_LINES: &[&str] = &[
     "Sync dialog (W): Up/Down (or your cursor_up/cursor_down keys) choose update copy vs mirror, Enter confirms (mirror always re-confirms its deletions), Esc cancels",
     "Overwrite dialog: Up/Down (or your cursor_up/cursor_down keys) choose, Enter answers for this file, Esc cancels the whole transfer",
     "File info: Esc/Enter/q close",
-    "Select menu (history/bookmarks): Up/Down (or your cursor_up/cursor_down keys) move, Enter select, Esc cancel; bookmarks only: d delete, Shift+Up/Shift+Down reorder (saved immediately)",
+    "Select menu (history/bookmarks): Up/Down (or your cursor_up/cursor_down keys) move, Enter select, Esc cancel; bookmarks only: 9 per page with 1-9 jumping straight to a row, Left/Right (or your focus_left/focus_right keys) turn the page, d delete, Shift+Up/Shift+Down reorder (saved immediately)",
     "Command palette (F): type to filter, Up/Down move (letter keys type instead, so only modifier combos bound to cursor_up/cursor_down move here), Enter run, Esc cancel",
     "Viewer: Up/Down/j/k, Space/f/PageDown, b/PageUp, d/u (half page), g/Home top, G/End bottom, Left/Right scroll horizontally (text mode), Tab toggle text/hex, /,? search, n/N next/prev match, Esc clears a search then closes, q closes",
     "This help screen: same less-style scrolling and /,?,n/N search as the viewer, q/Esc/h close (Esc clears a search first)",
