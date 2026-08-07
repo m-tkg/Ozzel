@@ -34,6 +34,10 @@ directories = "6.0.0"
 # backends, no C zlib) — declared directly too since virtual_dir.rs's
 # tar.gz support uses it on its own, outside of anything `zip` does.
 flate2 = "1.1.9"
+# Cross-platform free-disk-space lookup (statvfs / GetDiskFreeSpaceExW
+# behind one call) — used only for the pane header's "NN GB Free" cell.
+# Pure Rust over the platform APIs, no C toolchain.
+fs4 = "0.13"
 # Pure-Rust LZMA/LZMA2/XZ codec (`#![forbid(unsafe_code)]`) — used only
 # for decoding (`.tar.xz`/`.txz`), never encoding. See virtual_dir.rs.
 lzma-rs = "0.3.0"

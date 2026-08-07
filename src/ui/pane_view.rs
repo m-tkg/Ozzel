@@ -22,8 +22,6 @@ use crate::pane::{Pane, SortKey, VisibleItem};
 use crate::ui::layout::PaneLayout;
 use crate::ui::text;
 use crate::virtual_dir;
-#[cfg(test)]
-use unicode_segmentation::UnicodeSegmentation;
 
 /// How much the inactive pane's cursor row background darkens toward
 /// black when the pane is dimmed (`dim_inactive`, default on) — see
@@ -146,53 +144,56 @@ pub fn render(
         Style::default()
     };
 
-    // The header (cwd + `[flt: ...]` tag) normally rides the border's own
-    // title line for free — that's the `header_lines.len() == 1` case, and
-    // costs the entry list nothing. Only when it doesn't fit in one line
-    // does a second, real content row get carved out of `inner` for it
-    // (see `wrap_header_lines`'s doc comment for the full policy,
-    // including the last-resort left-truncation case).
+    // The header is a fixed two-row area (DYNA-style — the list below
+    // never shifts as state changes):
+    //   row 1 (the border's own title line): the full path (or the
+    //     archive label while virtual) plus the [flt:]/[s:] tags, the
+    //     path middle-truncated (`/Users/me/…/project`) when it doesn't
+    //     fit — never wrapped onto a second line;
+    //   row 2 (a reserved content row): the git branch on the left and
+    //     the filesystem's free space on the right.
     let title_budget = (area.width.saturating_sub(2) as usize).max(1); // account for the two border corners
-    let mut title_source = match &pane.virtual_dir {
+    let path_text = match &pane.virtual_dir {
         Some(vd) => virtual_dir::header_label(vd),
         None => pane.cwd.display().to_string(),
     };
-    if let Some(git) = &pane.git {
-        title_source.push_str(&format!(" [⎇ {}]", git.branch));
-    }
+    let mut tags = String::new();
     if let Some(filter) = &pane.filter {
-        title_source.push_str(&format!(" [flt: {}]", filter.raw));
+        tags.push_str(&format!(" [flt: {}]", filter.raw));
     }
     // A sort tag only when the pane deviates from the (Name, ascending)
     // default — the common case stays visually quiet.
     if (pane.sort, pane.ascending) != (SortKey::Name, true) {
         let arrow = if pane.ascending { "↑" } else { "↓" };
-        title_source.push_str(&format!(" [s:{}{arrow}]", pane.sort.as_str()));
+        tags.push_str(&format!(" [s:{}{arrow}]", pane.sort.as_str()));
     }
-    let header_lines = wrap_header_lines(&title_source, title_budget);
+    // The tags always survive whole; the path absorbs the squeeze. If
+    // even the tags alone overflow (pathological filter text), the final
+    // right-truncation below cuts the tag tail rather than panicking.
+    let path_budget = title_budget.saturating_sub(UnicodeWidthStr::width(tags.as_str()));
+    let title = text::truncate_right(
+        &format!("{}{tags}", text::truncate_middle(&path_text, path_budget)),
+        title_budget,
+    );
 
     let block = Block::default()
-        .title(header_lines[0].clone())
+        .title(title)
         .borders(Borders::ALL)
         .border_style(border_style);
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let Some(second_line) = header_lines.get(1)
-        && inner.height > 0
-    {
+    if inner.height > 0 {
         let header_row = Rect {
             x: inner.x,
             y: inner.y,
             width: inner.width,
             height: 1,
         };
-        let style = if dim {
-            Style::default().add_modifier(Modifier::DIM)
-        } else {
-            Style::default()
-        };
-        frame.render_widget(Paragraph::new(second_line.clone()).style(style), header_row);
+        frame.render_widget(
+            header_info_line(pane, inner.width as usize, dim),
+            header_row,
+        );
         inner = Rect {
             x: inner.x,
             y: inner.y + 1,
@@ -430,33 +431,64 @@ fn windows_permission_string(kind: EntryKind, readonly: bool) -> String {
     format!("{rw}{marker}")
 }
 
-/// Wraps a pane header (`cwd` + optional `[flt: ...]` tag) into at most 2
-/// display lines that fit within `width` columns each: fits in one line ->
-/// that one line (the common case — rendered on the border's title, no
-/// extra row spent); doesn't fit but 2 plain-wrapped lines would hold the
-/// whole thing -> exactly that, greedily filling line 1 first, no
-/// characters lost; still doesn't fit even across 2 lines -> falls back to
-/// `truncate_left` (keep the meaningful tail, ellipsis at the very front)
-/// on the *whole* 2-line budget, then re-wraps that already-fitting result
-/// across the same 2 lines. Grapheme/width-safe throughout (never splits a
-/// wide character).
-fn wrap_header_lines(source: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
+/// The header's fixed second row: git branch on the left (green — it's
+/// the "current state" cell), free disk space on the right, DYNA-style.
+/// The free-space cell always survives whole; a long branch name is
+/// right-truncated around it. Dimmed along with the rest of an inactive
+/// pane.
+fn header_info_line(pane: &Pane, width: usize, dim: bool) -> Paragraph<'static> {
+    let branch = pane
+        .git
+        .as_ref()
+        .map(|g| format!("⎇ {}", g.branch))
+        .unwrap_or_default();
+    let free = pane.free_bytes.map(format_free_space).unwrap_or_default();
+
+    let free_w = UnicodeWidthStr::width(free.as_str());
+    let branch_budget = width.saturating_sub(free_w + if free_w > 0 { 1 } else { 0 });
+    let branch = if UnicodeWidthStr::width(branch.as_str()) > branch_budget {
+        text::truncate_right(&branch, branch_budget)
+    } else {
+        branch
+    };
+    let pad = width
+        .saturating_sub(UnicodeWidthStr::width(branch.as_str()))
+        .saturating_sub(free_w);
+
+    let mut branch_style = Style::default().fg(Color::Green);
+    let mut free_style = Style::default();
+    if dim {
+        branch_style = branch_style.add_modifier(Modifier::DIM);
+        free_style = free_style.add_modifier(Modifier::DIM);
     }
-    if UnicodeWidthStr::width(source) <= width {
-        return vec![source.to_string()];
+    Paragraph::new(Line::from(vec![
+        ratatui::text::Span::styled(branch, branch_style),
+        ratatui::text::Span::raw(" ".repeat(pad)),
+        ratatui::text::Span::styled(free, free_style),
+    ]))
+}
+
+/// Formats free disk space the way DYNA's header cell does: three-ish
+/// significant figures and a unit, e.g. `2.79 GB Free` / `122.4 MB Free`
+/// (1024-based despite the SI-looking unit names, matching the size
+/// column's `human_size`).
+fn format_free_space(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B Free");
     }
-    let (line1, rest) = text::take_display_prefix(source, width);
-    if UnicodeWidthStr::width(rest.as_str()) <= width {
-        return vec![line1, rest];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
     }
-    // Even 2 rows of plain wrapping can't hold it: fall back to truncating
-    // the whole thing from the left (keeping the tail) to fit exactly a
-    // 2-row budget, then re-wrap that shorter, now-fitting string.
-    let truncated = text::truncate_left(source, width * 2);
-    let (line1, line2) = text::take_display_prefix(&truncated, width);
-    vec![line1, line2]
+    let value = if size < 10.0 {
+        format!("{size:.2}")
+    } else {
+        format!("{size:.1}")
+    };
+    format!("{value} {} Free", UNITS[unit])
 }
 
 /// Where the viewport should start so that `cursor` is always visible.
@@ -744,45 +776,66 @@ mod tests {
     }
 
     #[test]
-    fn wrap_header_lines_returns_one_line_when_it_fits() {
-        assert_eq!(wrap_header_lines("/short/path", 40), vec!["/short/path"]);
+    fn format_free_space_matches_dyna_style_significant_figures() {
+        assert_eq!(format_free_space(512), "512 B Free");
+        assert_eq!(format_free_space(2 * 1024 * 1024), "2.00 MB Free");
+        // 122.4 MB-class: two digits before the point -> one decimal.
+        assert_eq!(format_free_space(128_349_798), "122.4 MB Free");
+        // 2.79 GB-class: one digit before the point -> two decimals.
+        assert_eq!(format_free_space(2_995_739_688), "2.79 GB Free");
+        // Hundreds keep one decimal too ("122.4 MB"-style).
+        assert_eq!(format_free_space(500 * 1024 * 1024 * 1024), "500.0 GB Free");
     }
 
     #[test]
-    fn wrap_header_lines_splits_into_two_when_it_fits_across_two() {
-        let source = "a".repeat(30);
-        let lines = wrap_header_lines(&source, 20);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].len() + lines[1].len(), 30);
-        assert_eq!(lines[0], "a".repeat(20));
-        assert_eq!(lines[1], "a".repeat(10));
+    fn header_info_line_puts_branch_left_and_free_space_right() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        pane.git = Some(crate::git::GitDirStatus {
+            branch: "main".to_string(),
+            statuses: std::collections::HashMap::new(),
+        });
+        pane.free_bytes = Some(2_995_739_688);
+
+        let paragraph = header_info_line(&pane, 40, false);
+        let backend = ratatui::backend::TestBackend::new(40, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(paragraph.clone(), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..40)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(row.starts_with("⎇ main"), "row: {row:?}");
+        assert!(row.trim_end().ends_with("2.79 GB Free"), "row: {row:?}");
     }
 
     #[test]
-    fn wrap_header_lines_truncates_from_the_left_when_even_two_lines_are_not_enough() {
-        let source = "a".repeat(100);
-        let lines = wrap_header_lines(&source, 10);
-        assert_eq!(lines.len(), 2);
-        for line in &lines {
-            assert!(UnicodeWidthStr::width(line.as_str()) <= 10);
-        }
-        // The very first character of the whole 2-row budget must be the
-        // ellipsis — "only truncating (left, with …) if even 2 rows can't
-        // fit".
-        assert!(lines[0].starts_with('…'));
-    }
+    fn header_info_line_keeps_the_free_cell_when_the_branch_is_too_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        pane.git = Some(crate::git::GitDirStatus {
+            branch: "feature/an-extremely-long-branch-name-that-cannot-fit".to_string(),
+            statuses: std::collections::HashMap::new(),
+        });
+        pane.free_bytes = Some(2_995_739_688);
 
-    #[test]
-    fn wrap_header_lines_never_splits_a_japanese_grapheme() {
-        let source = "日本語".repeat(10); // 30 graphemes, width 60
-        let lines = wrap_header_lines(&source, 20);
-        for line in &lines {
-            assert!(UnicodeWidthStr::width(line.as_str()) <= 20);
-        }
-        let joined: String = lines.join("");
-        for g in joined.trim_start_matches('…').graphemes(true) {
-            assert!(source.contains(g));
-        }
+        let paragraph = header_info_line(&pane, 30, false);
+        let backend = ratatui::backend::TestBackend::new(30, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(paragraph.clone(), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..30)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            row.trim_end().ends_with("2.79 GB Free"),
+            "the free cell must survive whole: {row:?}"
+        );
+        assert!(row.contains('…'), "the branch must be truncated: {row:?}");
     }
 
     #[test]
@@ -1078,11 +1131,6 @@ mod tests {
         };
 
         let render_cursor_bg = |active: bool| {
-            // Wide enough that the header (cwd path) never needs the
-            // second-line wrap (see `wrap_header_lines`) regardless of how
-            // long the tempdir's own path happens to be on this machine —
-            // otherwise the cursor row wouldn't reliably be at a fixed
-            // row index.
             let backend = TestBackend::new(200, 6);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
@@ -1098,9 +1146,10 @@ mod tests {
                     );
                 })
                 .unwrap();
-            // Row 0 is the top border; the cursor (".." ) row is the first
-            // content row, row 1. Column 1 is just inside the left border.
-            terminal.backend().buffer()[(1, 1)].bg
+            // Row 0 is the top border, row 1 the fixed branch/free-space
+            // header row; the cursor (`..`) row is the first list row,
+            // row 2. Column 1 is just inside the left border.
+            terminal.backend().buffer()[(1, 2)].bg
         };
 
         let active_bg = render_cursor_bg(true);
