@@ -106,7 +106,7 @@ These are the default key bindings. They can be freely redefined in the `[keys]`
 
 `i`/`k`/`j`/`l` are additional cursor-movement/pane-focus keys usable alongside the arrow keys (the arrow keys themselves still work as-is). Since lowercase `k` is already assigned to cursor movement, mkdir is bound only to uppercase `K` (Shift+k).
 
-A pane's header (current directory path + filter tag) fits on a single line inside the border if the path is short, but a long path automatically wraps onto up to two lines (wrapping accounts for grapheme/display width). Only if it still doesn't fit after wrapping to two lines is the left side truncated with `…`. Whenever a second line is needed, the entry list's visible row count shrinks by one.
+A pane's header is a fixed two-row area (DYNA-style — the entry list below never shifts as state changes). Row 1 shows the full current path plus the `[flt:]`/`[s:]` tags; a path too long for the pane is shortened in the middle with `…` (`/Users/me/…/project` — the tail, the part you're actually in, keeps the larger share; grapheme/display-width safe). Row 2 shows the git branch (`⎇ main`, green — empty outside a work tree) on the left and the filesystem's free space on the right (`2.79 GB Free`, refreshed on every reload/directory change; while browsing an archive it keeps reporting the real directory holding the archive, which is also where an extraction would land).
 
 `Shift+←`/`Shift+→` form a temporary per-pane history (a back/forward stack). Each time you navigate to a different directory, the previous location is pushed onto the "back" stack, and the "forward" stack (for `Shift+→`) is cleared whenever you move to a new location. If there is nowhere to go back/forward to, nothing happens and a note is logged. The `H` (Shift+h) history menu described later is a separate, persistent, cross-pane list of recently visited locations.
 
@@ -167,7 +167,7 @@ Copy, move, and delete run as async tasks, with a progress gauge shown in the lo
 Inside a git work tree, each pane shows the current directory's git state, refreshed by a background `git status` run (via the `git` CLI on `PATH` — never a bundled library) on every directory change, `Ctrl+R`, and after every file operation:
 
 - **A per-row marker column** (to the left of the mark column): `U` conflict, `M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked. A directory row aggregates everything under it, showing the highest-priority state (`U` > `M` > `A` > `D` > `R` > `?`). In a huge repository only the pane's own subtree is scanned.
-- **A `[⎇ branch]` tag in the pane header** (the short commit hash when HEAD is detached).
+- **A `⎇ branch` cell in the pane header's second row** (the short commit hash when HEAD is detached).
 
 Outside a work tree — or on a machine with no `git` at all — nothing is shown and nothing changes. The probes run detached from the task system: they never appear as running tasks, never gate quitting, and are not touched by `Ctrl+K`. When the pane is too narrow, the marker column is dropped before the name column gets squeezed (same policy as the permissions column). Set `show_git_status = false` in the config (also on the settings screen) to disable the probes entirely.
 
@@ -556,7 +556,7 @@ mouse = true
 # hidden before the name column gets squeezed.
 show_permissions = true
 
-# Whether to show the git status marker column and the [⎇ branch] header tag inside
+# Whether to show the git status marker column and the ⎇ branch header cell inside
 # a git work tree, refreshed by a background `git status` run. Default is true.
 # Outside a work tree nothing is shown either way; false disables the probes entirely.
 show_git_status = true

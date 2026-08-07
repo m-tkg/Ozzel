@@ -134,6 +134,13 @@ pub struct Pane {
     /// re-applies the map onto the fresh entries so a background task's
     /// completion reload doesn't wipe the numbers off screen.
     pub dir_size_overrides: HashMap<PathBuf, u64>,
+    /// Free space on the filesystem holding `cwd`, refreshed by every
+    /// `reload()` (a cheap statvfs-class syscall) — `None` only when the
+    /// lookup itself failed. Shown in the pane header's second row
+    /// (`ui::pane_view`); while browsing an archive it keeps reporting
+    /// the real directory holding the archive, which is also what an
+    /// extraction would land on.
+    pub free_bytes: Option<u64>,
     /// This directory's git status (branch + per-child markers), stamped
     /// here by `App::handle_task_event` when a background `git status`
     /// run for the *current* `cwd` finishes; `None` outside a git work
@@ -204,6 +211,7 @@ impl Pane {
             back: Vec::new(),
             forward: Vec::new(),
             dir_size_overrides: HashMap::new(),
+            free_bytes: None,
             git: None,
             virtual_dir: None,
             visible_cache: RefCell::new(None),
@@ -241,6 +249,7 @@ impl Pane {
             Some(vd) => vd.list(&vd.inner)?,
             None => read_dir_entries(&self.cwd)?,
         };
+        self.free_bytes = fs4::available_space(&self.cwd).ok();
         self.apply_dir_size_overrides();
         self.invalidate_visible_cache();
         self.clamp_cursor();

@@ -125,8 +125,8 @@ show_permissions = true
 # --- Git status --------------------------------------------------------------
 # Default true: inside a git work tree, shows a per-row status marker
 # column (U conflict / M modified / A added / D deleted / R renamed /
-# ? untracked; directories aggregate their contents) and a `[⎇ branch]`
-# tag in the pane header, refreshed by a background `git status` run on
+# ? untracked; directories aggregate their contents) and a `⎇ branch`
+# cell in the pane header's second row, refreshed by a background `git status` run on
 # every directory change. Outside a work tree (or with no `git` on PATH)
 # nothing is shown. Set to false to disable the probes entirely.
 show_git_status = true

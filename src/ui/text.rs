@@ -7,10 +7,9 @@
 //!
 //! Previously these were five near-duplicate implementations scattered
 //! across `pane_view`, `settings_view`, `log_view`, and `viewer_view`; this
-//! module is the merge point. `pad_label_min1` and `take_display_prefix`
-//! are kept as distinct functions rather than forced into one shape each —
-//! see their own doc comments for the behavioral differences that make full
-//! unification wrong. `wrap_to_width` — originally here too — now lives in
+//! module is the merge point. `pad_label_min1` is kept distinct from
+//! `pad_right` — see its doc comment for the behavioral difference that
+//! makes unification wrong. `wrap_to_width` — originally here too — now lives in
 //! `crate::logwrap` instead: its only caller is the log-line wrapping this
 //! module must not depend on (see `logwrap`'s own doc comment for why).
 
@@ -43,29 +42,48 @@ pub(crate) fn truncate_right(s: &str, max_width: usize) -> String {
     result
 }
 
-/// Truncates `s` from the left (keeping the end) so its display width fits
-/// within `max_width`; used for the pane header so a deeply nested path
-/// still shows the directory you're actually in.
-pub(crate) fn truncate_left(s: &str, max_width: usize) -> String {
+/// Truncates `s` in the middle (keeping the start and the end, `…` where
+/// the cut is) so its display width fits within `max_width` — the classic
+/// path shortener: `/Users/me/very/deep/tree/project` →
+/// `/Users/me/…/project`. The tail gets the larger share of the budget
+/// (the end of a path is the part you're actually in), split roughly
+/// 1/3 head, 2/3 tail. Grapheme-cluster-safe like everything here.
+pub(crate) fn truncate_middle(s: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(s) <= max_width {
         return s.to_string();
     }
     if max_width == 0 {
         return String::new();
     }
-    let budget = max_width.saturating_sub(1);
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let budget = max_width - 1; // reserve 1 col for the ellipsis
+    let head_budget = budget / 3;
+    let tail_budget = budget - head_budget;
+
     let graphemes: Vec<&str> = s.graphemes(true).collect();
+    let mut head = String::new();
     let mut used = 0;
-    let mut start_idx = graphemes.len();
-    for (i, g) in graphemes.iter().enumerate().rev() {
+    for g in &graphemes {
         let w = UnicodeWidthStr::width(*g);
-        if used + w > budget {
+        if used + w > head_budget {
             break;
         }
+        head.push_str(g);
         used += w;
-        start_idx = i;
     }
-    format!("…{}", graphemes[start_idx..].concat())
+    let mut tail_start = graphemes.len();
+    let mut tail_used = 0;
+    for (i, g) in graphemes.iter().enumerate().rev() {
+        let w = UnicodeWidthStr::width(*g);
+        if tail_used + w > tail_budget {
+            break;
+        }
+        tail_used += w;
+        tail_start = i;
+    }
+    format!("{head}…{}", graphemes[tail_start..].concat())
 }
 
 /// Right-pads `s` with spaces until it's exactly `width` display columns
@@ -102,32 +120,6 @@ pub(crate) fn pad_label_min1(label: &str, width: usize) -> String {
     let mut out = label.to_string();
     out.push_str(&" ".repeat(width.saturating_sub(current).max(1)));
     out
-}
-
-/// Splits `s` into `(first `width`-columns-worth, remainder)` on grapheme
-/// boundaries, never exceeding `width` display columns in the first part.
-/// Unlike `crate::logwrap`'s `wrap_to_width`, this never force-places an
-/// over-width single grapheme into the first part (if the very first
-/// grapheme alone already exceeds `width`, the first part comes back empty)
-/// — fine for its one caller (`pane_view::wrap_header_lines`, which only
-/// ever takes at most two slices off the front of a string), but not a
-/// general-purpose wrapping loop; see that function for that.
-pub(crate) fn take_display_prefix(s: &str, width: usize) -> (String, String) {
-    let graphemes: Vec<&str> = s.graphemes(true).collect();
-    let mut line = String::new();
-    let mut used = 0;
-    let mut i = 0;
-    while i < graphemes.len() {
-        let g = graphemes[i];
-        let w = UnicodeWidthStr::width(g);
-        if used + w > width {
-            break;
-        }
-        line.push_str(g);
-        used += w;
-        i += 1;
-    }
-    (line, graphemes[i..].concat())
 }
 
 /// Returns the substring of `line` covering display columns
@@ -192,15 +184,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_left_keeps_the_tail_of_a_long_path() {
-        let path = "/very/deeply/nested/日本語ディレクトリ/leaf";
-        let truncated = truncate_left(path, 15);
-        assert!(truncated.starts_with('…'));
-        assert!(truncated.ends_with("leaf"));
-        assert!(UnicodeWidthStr::width(truncated.as_str()) <= 15);
-    }
-
-    #[test]
     fn pad_right_accounts_for_wide_characters() {
         let padded = pad_right("日本語", 10);
         assert_eq!(UnicodeWidthStr::width(padded.as_str()), 10);
@@ -223,22 +206,6 @@ mod tests {
         // still appended (never a hard truncation-free exact-width match).
         assert_eq!(pad_label_min1("abcdef", 3), "abcdef ");
         assert_eq!(pad_label_min1("ab", 6), "ab    ");
-    }
-
-    #[test]
-    fn take_display_prefix_splits_on_grapheme_boundaries() {
-        let (first, rest) = take_display_prefix("abcdef", 3);
-        assert_eq!(first, "abc");
-        assert_eq!(rest, "def");
-    }
-
-    #[test]
-    fn take_display_prefix_leaves_first_part_empty_when_first_grapheme_overflows() {
-        // Unlike `wrap_to_width`, an over-width leading grapheme is not
-        // force-placed — the first part comes back empty.
-        let (first, rest) = take_display_prefix("日本語", 1);
-        assert_eq!(first, "");
-        assert_eq!(rest, "日本語");
     }
 
     #[test]
@@ -266,5 +233,45 @@ mod tests {
     #[test]
     fn slice_display_cols_offset_past_end_is_empty() {
         assert_eq!(slice_display_cols("short", 100, 20), "");
+    }
+
+    #[test]
+    fn truncate_middle_returns_short_strings_unchanged() {
+        assert_eq!(truncate_middle("/a/b", 10), "/a/b");
+    }
+
+    #[test]
+    fn truncate_middle_keeps_head_and_tail_with_ellipsis_between() {
+        let out = truncate_middle("/Users/me/very/deep/tree/project", 20);
+        assert!(out.starts_with("/Users"), "out: {out}");
+        assert!(out.ends_with("project"), "out: {out}");
+        assert!(out.contains('…'), "out: {out}");
+        assert!(unicode_width::UnicodeWidthStr::width(out.as_str()) <= 20);
+    }
+
+    #[test]
+    fn truncate_middle_favors_the_tail() {
+        let out = truncate_middle("/aaaa/bbbb/cccc/dddd/eeee/ffff", 16);
+        // The tail share (2/3) must keep more than the head share (1/3).
+        let ellipsis = out.find('…').unwrap();
+        let head = &out[..ellipsis];
+        let tail = &out[ellipsis + '…'.len_utf8()..];
+        assert!(tail.len() > head.len(), "out: {out}");
+    }
+
+    #[test]
+    fn truncate_middle_is_grapheme_safe_for_wide_chars() {
+        let out = truncate_middle("日本語のとても長いディレクトリ名", 10);
+        assert!(
+            unicode_width::UnicodeWidthStr::width(out.as_str()) <= 10,
+            "out: {out}"
+        );
+        assert!(out.contains('…'), "out: {out}");
+    }
+
+    #[test]
+    fn truncate_middle_tiny_budgets_degrade_gracefully() {
+        assert_eq!(truncate_middle("abcdef", 0), "");
+        assert_eq!(truncate_middle("abcdef", 1), "…");
     }
 }
