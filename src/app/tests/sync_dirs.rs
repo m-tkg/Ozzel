@@ -29,6 +29,28 @@ fn sync_opens_the_mode_dialog() {
 }
 
 #[test]
+fn sync_dialog_moves_on_the_keymap_cursor_keys() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        left.path().to_path_buf(),
+        right.path().to_path_buf(),
+        Config {
+            bindings: HashMap::from([("cursor_down".to_string(), vec!["n".to_string()])]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    app.dispatch(Action::SyncDirs);
+    app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+    match &app.mode {
+        Mode::SyncSelect { cursor, .. } => assert_eq!(*cursor, 1, "-> mirror"),
+        other => panic!("expected SyncSelect, got {other:?}"),
+    }
+}
+
+#[test]
 fn mirror_choice_always_confirms_even_with_confirm_operations_off() {
     let left = tempfile::tempdir().unwrap();
     let right = tempfile::tempdir().unwrap();

@@ -187,6 +187,251 @@ fn bookmark_menu_down_then_d_deletes_the_highlighted_entry() {
     }
 }
 
+/// Opens the bookmark menu over three bookmarked tempdirs. The `TempDir`
+/// guards come back with it so the caller keeps them alive for the length
+/// of the test.
+fn bookmark_menu_app() -> (App, Vec<PathBuf>, Vec<tempfile::TempDir>) {
+    let dirs: Vec<tempfile::TempDir> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+    let paths: Vec<PathBuf> = dirs[1..].iter().map(|d| d.path().to_path_buf()).collect();
+    let mut app = test_app(dirs[0].path(), dirs[0].path());
+    for path in &paths {
+        app.bookmarks.add(path.clone());
+    }
+    app.dispatch(Action::BookmarkJump);
+    (app, paths, dirs)
+}
+
+/// The menu's own list and the persisted one are index-for-index the same
+/// list; every reorder assertion checks both, since a bug that desyncs them
+/// would make the highlight point at a different bookmark than it shows.
+fn assert_menu_order(app: &App, expected: &[PathBuf], expected_cursor: usize) {
+    match &app.mode {
+        Mode::Select { items, cursor, .. } => {
+            let shown: Vec<PathBuf> = items.iter().map(|(_, p)| p.clone()).collect();
+            assert_eq!(shown, expected, "menu order");
+            assert_eq!(*cursor, expected_cursor, "cursor must follow the entry");
+        }
+        other => panic!("expected the bookmark menu to stay open, got {other:?}"),
+    }
+    assert_eq!(app.bookmarks.paths, expected, "persisted order");
+}
+
+#[test]
+fn bookmark_menu_shift_down_moves_the_entry_and_carries_the_cursor() {
+    let (mut app, paths, _dirs) = bookmark_menu_app();
+    app.outbox.bookmarks_dirty = false;
+
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::SHIFT));
+
+    assert_menu_order(
+        &app,
+        &[paths[0].clone(), paths[2].clone(), paths[1].clone()],
+        2,
+    );
+    assert!(app.outbox.bookmarks_dirty);
+}
+
+#[test]
+fn bookmark_menu_shift_up_moves_the_entry_back() {
+    let (mut app, paths, _dirs) = bookmark_menu_app();
+
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::SHIFT));
+    app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::SHIFT));
+
+    assert_menu_order(&app, &paths, 1);
+}
+
+#[test]
+fn bookmark_menu_shift_up_at_the_top_is_a_no_op() {
+    let (mut app, paths, _dirs) = bookmark_menu_app();
+    app.outbox.bookmarks_dirty = false;
+
+    app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::SHIFT));
+
+    assert_menu_order(&app, &paths, 0);
+    assert!(
+        !app.outbox.bookmarks_dirty,
+        "a no-op reorder must not schedule a save"
+    );
+}
+
+#[test]
+fn bookmark_menu_shift_down_at_the_bottom_is_a_no_op() {
+    let (mut app, paths, _dirs) = bookmark_menu_app();
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.outbox.bookmarks_dirty = false;
+
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::SHIFT));
+
+    assert_menu_order(&app, &paths, 2);
+    assert!(!app.outbox.bookmarks_dirty);
+}
+
+#[test]
+fn bookmark_menu_reorder_wins_over_shift_up_being_bound_to_top() {
+    // S-Up/S-Down are `top`/`bottom` in the default keymap; inside the
+    // bookmark menu the reorder keys shadow them on purpose.
+    let (mut app, paths, _dirs) = bookmark_menu_app();
+    assert_eq!(
+        app.keymap.resolve(KeyCode::Up, KeyModifiers::SHIFT),
+        Some(Action::Top),
+        "precondition: S-Up is `top` by default"
+    );
+
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Up, KeyModifiers::SHIFT));
+
+    assert_menu_order(
+        &app,
+        &[paths[1].clone(), paths[0].clone(), paths[2].clone()],
+        0,
+    );
+}
+
+#[test]
+fn bookmark_menu_moves_the_cursor_on_a_remapped_cursor_down_key() {
+    let target = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let start = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        start.path().to_path_buf(),
+        start.path().to_path_buf(),
+        Config {
+            bindings: HashMap::from([("cursor_down".to_string(), vec!["n".to_string()])]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    app.bookmarks.add(other.path().to_path_buf());
+    app.bookmarks.add(target.path().to_path_buf());
+
+    app.dispatch(Action::BookmarkJump);
+    app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(app.panes[0].cwd, target.path());
+}
+
+#[test]
+fn bookmark_menu_arrows_still_move_after_the_arrows_are_unbound() {
+    let target = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let start = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        start.path().to_path_buf(),
+        start.path().to_path_buf(),
+        Config {
+            keys: HashMap::from([
+                ("up".to_string(), "none".to_string()),
+                ("down".to_string(), "none".to_string()),
+            ]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        app.keymap.resolve(KeyCode::Down, KeyModifiers::NONE),
+        None,
+        "precondition: the arrows are unbound in Normal mode"
+    );
+    app.bookmarks.add(other.path().to_path_buf());
+    app.bookmarks.add(target.path().to_path_buf());
+
+    app.dispatch(Action::BookmarkJump);
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app.panes[0].cwd,
+        target.path(),
+        "the menu's arrows are fixed, so unbinding them can't strand the user"
+    );
+}
+
+#[test]
+fn bookmark_menu_d_still_deletes_when_d_is_remapped_to_cursor_down() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let start = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        start.path().to_path_buf(),
+        start.path().to_path_buf(),
+        Config {
+            bindings: HashMap::from([("cursor_down".to_string(), vec!["d".to_string()])]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    app.bookmarks.add(a.path().to_path_buf());
+    app.bookmarks.add(b.path().to_path_buf());
+
+    app.dispatch(Action::BookmarkJump);
+    app.handle_event(AppEvent::Input(KeyCode::Char('d'), KeyModifiers::NONE));
+
+    assert_eq!(
+        app.bookmarks.paths,
+        vec![b.path().to_path_buf()],
+        "the menu's own `d` must win over a rebind"
+    );
+}
+
+#[test]
+fn history_menu_shift_down_only_moves_the_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let bookmark = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.bookmarks.add(bookmark.path().to_path_buf());
+    select_entry_named(&mut app, "sub");
+    app.dispatch(Action::Open); // history: [sub]
+    app.dispatch(Action::Parent); // history: [dir, sub]
+    app.outbox.bookmarks_dirty = false;
+
+    app.dispatch(Action::HistoryJump);
+    app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::SHIFT));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(app.panes[0].cwd, sub, "S-Down is plain movement here");
+    assert_eq!(
+        app.bookmarks.paths,
+        vec![bookmark.path().to_path_buf()],
+        "the history menu must never touch the bookmark list"
+    );
+    assert!(!app.outbox.bookmarks_dirty);
+}
+
+#[test]
+fn history_menu_d_remapped_to_cursor_down_moves_the_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut app = App::new(
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        Config {
+            bindings: HashMap::from([("cursor_down".to_string(), vec!["d".to_string()])]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    select_entry_named(&mut app, "sub");
+    app.dispatch(Action::Open);
+    app.dispatch(Action::Parent);
+
+    app.dispatch(Action::HistoryJump);
+    app.handle_event(AppEvent::Input(KeyCode::Char('d'), KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app.panes[0].cwd, sub,
+        "`d` deletes nothing here, so it falls through to the keymap"
+    );
+}
+
 #[test]
 fn history_jump_menu_lists_most_recent_first_and_selects() {
     let dir = tempfile::tempdir().unwrap();
@@ -331,6 +576,49 @@ fn function_list_opens_empty_and_lists_every_action() {
         app.function_list_filtered_actions().len(),
         Action::ALL.len()
     );
+}
+
+#[test]
+fn function_list_typing_i_still_filters_instead_of_moving_the_cursor() {
+    // `i`/`k` are cursor_up/cursor_down in Normal mode, but the palette's
+    // search field claims every printable character first.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    app.dispatch(Action::FunctionList);
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('i'), KeyModifiers::NONE));
+    match &app.mode {
+        Mode::FunctionList { input, cursor } => {
+            assert_eq!(input.value(), "i", "typed, not consumed as a movement");
+            assert_eq!(*cursor, 0);
+        }
+        other => panic!("expected Mode::FunctionList, got {other:?}"),
+    }
+}
+
+#[test]
+fn function_list_moves_on_a_ctrl_remapped_cursor_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        Config {
+            bindings: HashMap::from([("cursor_down".to_string(), vec!["C-n".to_string()])]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    app.dispatch(Action::FunctionList);
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::CONTROL));
+    app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::CONTROL));
+    match &app.mode {
+        Mode::FunctionList { input, cursor } => {
+            assert_eq!(input.value(), "", "C-n is not text");
+            assert_eq!(*cursor, 2);
+        }
+        other => panic!("expected Mode::FunctionList, got {other:?}"),
+    }
 }
 
 #[test]

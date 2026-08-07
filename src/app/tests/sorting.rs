@@ -27,6 +27,38 @@ fn sort_dialog_opens_preselecting_the_current_state() {
 }
 
 #[test]
+fn sort_dialog_moves_on_the_keymap_cursor_keys_and_still_wraps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        Config {
+            bindings: HashMap::from([("cursor_down".to_string(), vec!["n".to_string()])]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    app.dispatch(Action::SortDialog);
+    for _ in 0..3 {
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+    }
+    match &app.mode {
+        Mode::SortSelect { cursor } => assert_eq!(*cursor, 3),
+        other => panic!("expected SortSelect, got {other:?}"),
+    }
+
+    // Past the last row the dialog wraps, exactly as the arrows do.
+    for _ in 3..App::SORT_DIALOG_CHOICES.len() {
+        app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+    }
+    match &app.mode {
+        Mode::SortSelect { cursor } => assert_eq!(*cursor, 0, "keymap nav must wrap too"),
+        other => panic!("expected SortSelect, got {other:?}"),
+    }
+}
+
+#[test]
 fn sort_dialog_enter_applies_and_records_the_pref() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(dir.path(), dir.path());

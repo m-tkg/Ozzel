@@ -21,7 +21,7 @@ use crate::external::{self, ExternalRequest};
 use crate::file_search::{self, MAX_TREE_ENTRIES};
 use crate::filter::FilterSpec;
 use crate::help::HelpLine;
-use crate::keymap::{KeyCombo, Keymap};
+use crate::keymap::{KeyCombo, Keymap, MenuNav};
 use crate::mode::{
     COLLISION_CHOICES, ChmodState, CollisionInfo, CollisionState, LineEditor, Mode,
     PasswordPending, PendingOp, PromptKind, SYNC_CHOICES, SearchDirection, SelectKind,
@@ -750,17 +750,19 @@ impl App {
                 }
                 Mode::Filter { .. } => self.handle_filter_key(code, modifiers),
                 Mode::JumpSearch { .. } => self.handle_jump_search_key(code, modifiers),
-                Mode::Select { .. } => self.handle_select_key(code),
+                Mode::Select { .. } => self.handle_select_key(code, modifiers),
                 Mode::Prompt { .. } => self.handle_prompt_key(code, modifiers),
                 Mode::Confirm { .. } => self.handle_confirm_key(code),
-                Mode::TransferCollision { .. } => self.handle_transfer_collision_key(code),
+                Mode::TransferCollision { .. } => {
+                    self.handle_transfer_collision_key(code, modifiers)
+                }
                 Mode::Viewer { .. } => self.handle_viewer_key(code, modifiers),
                 Mode::Help { .. } => self.handle_help_key(code, modifiers),
                 Mode::Log { .. } => self.handle_log_view_key(code, modifiers),
                 Mode::FunctionList { .. } => self.handle_function_list_key(code, modifiers),
                 Mode::FileSearch { .. } => self.handle_file_search_key(code, modifiers),
-                Mode::SortSelect { .. } => self.handle_sort_select_key(code),
-                Mode::SyncSelect { .. } => self.handle_sync_select_key(code),
+                Mode::SortSelect { .. } => self.handle_sort_select_key(code, modifiers),
+                Mode::SyncSelect { .. } => self.handle_sync_select_key(code, modifiers),
                 Mode::Chmod { .. } => self.handle_chmod_key(code),
                 Mode::FileInfo { .. } => self.handle_file_info_key(code),
                 Mode::Settings { .. } => self.handle_settings_key(code, modifiers),
@@ -1155,7 +1157,10 @@ impl App {
         self.mode = Mode::SortSelect { cursor };
     }
 
-    fn handle_sort_select_key(&mut self, code: KeyCode) {
+    fn handle_sort_select_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Resolved before the `&mut self.mode` borrow below, and as a plain
+        // `Copy` value — see `handle_select_key`.
+        let nav = self.keymap.menu_nav(code, modifiers);
         let Mode::SortSelect { cursor } = &mut self.mode else {
             return;
         };
@@ -1170,7 +1175,11 @@ impl App {
                 self.record_sort_pref();
             }
             KeyCode::Esc => self.mode = Mode::Normal,
-            _ => {}
+            _ => match nav {
+                Some(MenuNav::Up) => *cursor = cursor.checked_sub(1).unwrap_or(len - 1),
+                Some(MenuNav::Down) => *cursor = (*cursor + 1) % len,
+                None => {}
+            },
         }
     }
 
@@ -1504,29 +1513,109 @@ impl App {
         self.jump_active_pane_to(home);
     }
 
-    /// Fixed navigation keys for `Mode::Select`; never consults the
-    /// keymap. Up/Down move the highlight, Enter jumps the active pane
-    /// there, Esc cancels, `d` deletes the highlighted bookmark (a no-op
-    /// outside the bookmark menu).
-    fn handle_select_key(&mut self, code: KeyCode) {
+    /// Keys for `Mode::Select`. The menu's own keys come first — Esc
+    /// cancels, Enter jumps the active pane to the highlight, and in the
+    /// bookmark menu `d` deletes it while Shift+Up/Shift+Down reorder it —
+    /// and only a key the menu didn't claim falls through to the keymap's
+    /// `cursor_up`/`cursor_down` (`Keymap::menu_nav`). That order is what
+    /// keeps a rebind from shadowing a menu key: Shift+Up reorders here
+    /// even though it's `top` in Normal mode, and `d` still deletes even
+    /// if it's been bound to something else.
+    ///
+    /// The bare arrows stay wired up unconditionally, alongside whatever
+    /// the keymap says, so that unbinding them in `[keys]`/`[bindings]`
+    /// can't leave the menu impossible to drive.
+    fn handle_select_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Resolved up front, and into a plain `Copy` value: taking this
+        // borrow of `self.keymap` inside the `match` below would collide
+        // with the `&mut self` the arms need.
+        let nav = self.keymap.menu_nav(code, modifiers);
+        let shift = modifiers.contains(KeyModifiers::SHIFT);
         match code {
             KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Up => {
-                if let Mode::Select { cursor, .. } = &mut self.mode {
-                    *cursor = cursor.saturating_sub(1);
-                }
-            }
-            KeyCode::Down => {
-                if let Mode::Select { cursor, items, .. } = &mut self.mode
-                    && *cursor + 1 < items.len()
-                {
-                    *cursor += 1;
-                }
-            }
             KeyCode::Enter => self.commit_select(),
-            KeyCode::Char('d') => self.delete_selected_bookmark(),
-            _ => {}
+            KeyCode::Char('d') if self.select_is_bookmark() => self.delete_selected_bookmark(),
+            KeyCode::Up if shift && self.select_is_bookmark() => {
+                self.move_selected_bookmark(false);
+            }
+            KeyCode::Down if shift && self.select_is_bookmark() => {
+                self.move_selected_bookmark(true);
+            }
+            KeyCode::Up => self.select_move_cursor(false),
+            KeyCode::Down => self.select_move_cursor(true),
+            _ => match nav {
+                Some(MenuNav::Up) => self.select_move_cursor(false),
+                Some(MenuNav::Down) => self.select_move_cursor(true),
+                None => {}
+            },
         }
+    }
+
+    fn select_is_bookmark(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::Select {
+                kind: SelectKind::Bookmark,
+                ..
+            }
+        )
+    }
+
+    /// Moves the `Mode::Select` highlight one row, clamping at both ends
+    /// (the menu has no wrap-around, unlike the fixed-length sort/sync
+    /// dialogs).
+    fn select_move_cursor(&mut self, down: bool) {
+        let Mode::Select { cursor, items, .. } = &mut self.mode else {
+            return;
+        };
+        if !down {
+            *cursor = cursor.saturating_sub(1);
+        } else if *cursor + 1 < items.len() {
+            *cursor += 1;
+        }
+    }
+
+    /// Moves the highlighted bookmark one slot up/down, carrying the
+    /// cursor with it, in both the open menu and the persisted list.
+    /// Returns whether anything moved: `false` in the history menu, at
+    /// either end, and for an empty list.
+    ///
+    /// Relies on `Mode::Select.items` and `Bookmarks::paths` being
+    /// index-for-index the same list — established by
+    /// `begin_bookmark_jump`, and preserved by this and by
+    /// `delete_selected_bookmark` (which likewise touches both). Nothing
+    /// else can reach `self.bookmarks` while the menu is open.
+    ///
+    /// Deliberately silent: a reorder is cheap and reversible, and
+    /// Shift+Down gets held down, so logging every step would bury the log
+    /// — unlike `delete_selected_bookmark`, where the entry is gone.
+    fn move_selected_bookmark(&mut self, down: bool) -> bool {
+        let Mode::Select {
+            kind: SelectKind::Bookmark,
+            cursor,
+            ..
+        } = &self.mode
+        else {
+            return false;
+        };
+        let from = *cursor;
+        // The persisted list is the gate — it owns the bounds check, so a
+        // move at either end stops here without dirtying anything.
+        let moved = if down {
+            self.bookmarks.move_down(from)
+        } else {
+            self.bookmarks.move_up(from)
+        };
+        if !moved {
+            return false;
+        }
+        let to = if down { from + 1 } else { from - 1 };
+        if let Mode::Select { items, cursor, .. } = &mut self.mode {
+            items.swap(from, to);
+            *cursor = to;
+        }
+        self.outbox.bookmarks_dirty = true;
+        true
     }
 
     fn commit_select(&mut self) {
@@ -1790,13 +1879,21 @@ impl App {
         &self.function_list_cache.as_ref().unwrap().1
     }
 
-    /// Fixed keys for `Mode::FunctionList`; never consults the keymap (the
-    /// palette's whole purpose is to run an action *by name*, key-free).
-    /// `Esc` cancels; `Enter` closes the palette (back to Normal) and then
-    /// dispatches the highlighted action — in that order, so an action
-    /// that itself sets a mode (a Prompt/Confirm/Select) isn't immediately
-    /// clobbered back to Normal afterward.
+    /// Keys for `Mode::FunctionList`. `Esc` cancels; `Enter` closes the
+    /// palette (back to Normal) and then dispatches the highlighted action
+    /// — in that order, so an action that itself sets a mode (a
+    /// Prompt/Confirm/Select) isn't immediately clobbered back to Normal
+    /// afterward.
+    ///
+    /// Everything the search field consumes — printable characters and the
+    /// line-editing keys — is claimed before the keymap is consulted, so
+    /// typing `i` or `k` still filters rather than moving the highlight.
+    /// What's left over does reach `cursor_up`/`cursor_down`, which is how
+    /// a modifier-based rebind (`C-p`/`C-n`) can drive the list here.
     fn handle_function_list_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Resolved before the `&mut self.mode` borrow below, and as a plain
+        // `Copy` value — see `handle_select_key`.
+        let nav = self.keymap.menu_nav(code, modifiers);
         match code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
@@ -1832,9 +1929,13 @@ impl App {
             _ => {}
         }
 
+        // Taken before the `&mut self.mode` borrow, for the keymap-driven
+        // Down below.
+        let len = self.function_list_filtered_actions().len();
         let Mode::FunctionList { input, cursor } = &mut self.mode else {
             return;
         };
+        let mut edited = true;
         match code {
             KeyCode::Backspace => input.backspace(),
             KeyCode::Delete => input.delete(),
@@ -1843,12 +1944,21 @@ impl App {
             KeyCode::Home => input.move_home(),
             KeyCode::End => input.move_end(),
             KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => input.insert(c),
+            _ => edited = false,
+        }
+        if edited {
+            // The filtered list changes on every edit; keep the highlight
+            // in bounds by just resetting to the top rather than trying to
+            // track "the same action" across a re-filter.
+            *cursor = 0;
+            return;
+        }
+        // Only keys the search field didn't want get this far.
+        match nav {
+            Some(MenuNav::Up) => *cursor = cursor.saturating_sub(1),
+            Some(MenuNav::Down) if *cursor + 1 < len => *cursor += 1,
             _ => {}
         }
-        // The filtered list changes on every edit; keep the highlight in
-        // bounds by just resetting to the top rather than trying to track
-        // "the same action" across a re-filter.
-        *cursor = 0;
     }
 
     /// `g`: opens the file-name search popup over a snapshot of the active
