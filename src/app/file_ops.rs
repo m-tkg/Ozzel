@@ -1160,8 +1160,10 @@ impl App {
     }
 
     /// Fixed confirmation keys for `Mode::Confirm`; never consults the
-    /// keymap. `y`/`Y` executes the pending op, anything else (including
-    /// Esc) cancels.
+    /// keymap. `y`/`Y` executes the pending op, `n`/`N`/`Esc` cancels,
+    /// and every other key is ignored — a stray keystroke (a leftover
+    /// navigation key, a typo) must neither trigger nor silently dismiss
+    /// a confirmation.
     pub(super) fn handle_confirm_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('y' | 'Y') => {
@@ -1171,7 +1173,8 @@ impl App {
                     self.execute_pending(on_yes);
                 }
             }
-            _ => self.mode = Mode::Normal,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => self.mode = Mode::Normal,
+            _ => {}
         }
     }
 
