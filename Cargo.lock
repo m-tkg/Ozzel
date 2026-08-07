@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "ozzel"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "bzip2",
