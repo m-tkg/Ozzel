@@ -201,6 +201,26 @@ pub fn render(
             height: inner.height - 1,
         };
     }
+    // A horizontal rule under the header, joined into the pane's own
+    // side borders (├───┤) — drawn across the full `area` width so the
+    // junction characters land exactly on the border columns, in the
+    // same style (bold/dim) as the border itself.
+    if inner.height > 0 && area.width >= 2 {
+        let rule_row = Rect {
+            x: area.x,
+            y: inner.y,
+            width: area.width,
+            height: 1,
+        };
+        let rule = format!("├{}┤", "─".repeat(area.width as usize - 2));
+        frame.render_widget(Paragraph::new(rule).style(border_style), rule_row);
+        inner = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height - 1,
+        };
+    }
 
     let items = pane.visible_entries();
     if items.is_empty() || inner.height == 0 {
@@ -1147,9 +1167,10 @@ mod tests {
                 })
                 .unwrap();
             // Row 0 is the top border, row 1 the fixed branch/free-space
-            // header row; the cursor (`..`) row is the first list row,
-            // row 2. Column 1 is just inside the left border.
-            terminal.backend().buffer()[(1, 2)].bg
+            // header row, row 2 the ├──┤ rule under it; the cursor (`..`)
+            // row is the first list row, row 3. Column 1 is just inside
+            // the left border.
+            terminal.backend().buffer()[(1, 3)].bg
         };
 
         let active_bg = render_cursor_bg(true);
