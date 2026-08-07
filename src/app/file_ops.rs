@@ -265,18 +265,25 @@ impl App {
     /// Key handling for the collision dialog: `↑`/`↓` move over
     /// `COLLISION_CHOICES`, Enter answers for the current entry, Esc
     /// cancels the *whole* transfer (nothing has been spawned yet).
-    pub(super) fn handle_transfer_collision_key(&mut self, code: KeyCode) {
+    pub(super) fn handle_transfer_collision_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Resolved before the `&mut self.mode` borrow below, and as a plain
+        // `Copy` value — see `handle_select_key`.
+        let nav = self.keymap.menu_nav(code, modifiers);
         let Mode::TransferCollision { state } = &mut self.mode else {
             return;
         };
+        let up = |state: &mut CollisionState| {
+            state.cursor = state
+                .cursor
+                .checked_sub(1)
+                .unwrap_or(COLLISION_CHOICES.len() - 1);
+        };
+        let down = |state: &mut CollisionState| {
+            state.cursor = (state.cursor + 1) % COLLISION_CHOICES.len();
+        };
         match code {
-            KeyCode::Up => {
-                state.cursor = state
-                    .cursor
-                    .checked_sub(1)
-                    .unwrap_or(COLLISION_CHOICES.len() - 1);
-            }
-            KeyCode::Down => state.cursor = (state.cursor + 1) % COLLISION_CHOICES.len(),
+            KeyCode::Up => up(state),
+            KeyCode::Down => down(state),
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.log_info("transfer cancelled");
@@ -289,7 +296,11 @@ impl App {
                 };
                 self.answer_collision(state);
             }
-            _ => {}
+            _ => match nav {
+                Some(MenuNav::Up) => up(state),
+                Some(MenuNav::Down) => down(state),
+                None => {}
+            },
         }
     }
 
@@ -850,7 +861,10 @@ impl App {
     /// `SYNC_CHOICES`, Enter picks (update goes through the ordinary
     /// `confirm_operations` gate; mirror *always* confirms, spelling out
     /// the deletions), Esc cancels.
-    pub(super) fn handle_sync_select_key(&mut self, code: KeyCode) {
+    pub(super) fn handle_sync_select_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Resolved before the `&mut self.mode` borrow below, and as a plain
+        // `Copy` value — see `handle_select_key`.
+        let nav = self.keymap.menu_nav(code, modifiers);
         let Mode::SyncSelect { cursor, .. } = &mut self.mode else {
             return;
         };
@@ -884,7 +898,13 @@ impl App {
                     self.spawn_sync(src, dest, mirror);
                 }
             }
-            _ => {}
+            _ => match nav {
+                Some(MenuNav::Up) => {
+                    *cursor = cursor.checked_sub(1).unwrap_or(SYNC_CHOICES.len() - 1)
+                }
+                Some(MenuNav::Down) => *cursor = (*cursor + 1) % SYNC_CHOICES.len(),
+                None => {}
+            },
         }
     }
 

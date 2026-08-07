@@ -56,15 +56,20 @@ pub fn build_display_lines(keymap: &Keymap) -> Vec<String> {
     build_lines(keymap).iter().map(HelpLine::text).collect()
 }
 
-/// The fixed (non-remappable) keys of every other mode, since none of them
-/// consult the `Keymap` and so have no other way to show up here.
+/// The keys of every other mode, which the `Keymap` has no entries for and
+/// so have no other way to show up here. All fixed, except that the menus
+/// and dialogs additionally accept whatever `cursor_up`/`cursor_down` are
+/// bound to (see `Keymap::menu_nav`) — noted per line, and in the header
+/// `build_lines` puts above them.
 const FIXED_KEY_LINES: &[&str] = &[
     "Prompt (rename/mkdir/zip name/touch time/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
     "Confirm dialogs: y/Y proceed, n/N/Esc cancel, any other key is ignored",
     "Chmod dialog: arrows move over the rwx grid, Space toggles, 0-7 set the highlighted row, Enter applies, Esc cancels",
-    "Sync dialog (Y): Up/Down choose update copy vs mirror, Enter confirms (mirror always re-confirms its deletions), Esc cancels",
+    "Sync dialog (Y): Up/Down (or your cursor_up/cursor_down keys) choose update copy vs mirror, Enter confirms (mirror always re-confirms its deletions), Esc cancels",
+    "Overwrite dialog: Up/Down (or your cursor_up/cursor_down keys) choose, Enter answers for this file, Esc cancels the whole transfer",
     "File info: Esc/Enter/q close",
-    "Select menu (history/bookmarks): Up/Down move, Enter select, Esc cancel, d delete (bookmarks only)",
+    "Select menu (history/bookmarks): Up/Down (or your cursor_up/cursor_down keys) move, Enter select, Esc cancel; bookmarks only: d delete, Shift+Up/Shift+Down reorder (saved immediately)",
+    "Command palette (F): type to filter, Up/Down move (letter keys type instead, so only modifier combos bound to cursor_up/cursor_down move here), Enter run, Esc cancel",
     "Viewer: Up/Down/j/k, Space/f/PageDown, b/PageUp, d/u (half page), g/Home top, G/End bottom, Left/Right scroll horizontally (text mode), Tab toggle text/hex, /,? search, n/N next/prev match, Esc clears a search then closes, q closes",
     "This help screen: same less-style scrolling and /,?,n/N search as the viewer, q/Esc/h close (Esc clears a search first)",
     "Log viewer (L/S-l): same less-style scrolling and /,?,n/N search as the viewer, q/Esc close (Esc clears a search first)",
@@ -100,7 +105,8 @@ pub fn build_lines(keymap: &Keymap) -> Vec<HelpLine> {
     }
 
     lines.push(HelpLine::Header(
-        "Fixed keys (not remappable via [keys]/[bindings])".to_string(),
+        "Modal keys (fixed, though the menus below also take your cursor_up/cursor_down keys)"
+            .to_string(),
     ));
     for text in FIXED_KEY_LINES {
         lines.push(HelpLine::Text((*text).to_string()));
@@ -112,6 +118,16 @@ pub fn build_lines(keymap: &Keymap) -> Vec<HelpLine> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// The modal key lines are hand-written, so they can silently drift
+    /// from the handlers. Pin the two the reorder feature depends on being
+    /// documented — nothing else announces Shift+Up/Shift+Down.
+    #[test]
+    fn fixed_key_lines_document_the_bookmark_reorder_keys() {
+        let text = build_display_lines(&Keymap::defaults()).join("\n");
+        assert!(text.contains("Shift+Up/Shift+Down reorder"), "{text}");
+        assert!(text.contains("cursor_up/cursor_down"), "{text}");
+    }
 
     #[test]
     fn includes_a_multi_bound_action_with_comma_joined_keys() {
@@ -188,14 +204,14 @@ mod tests {
     }
 
     #[test]
-    fn ends_with_the_fixed_key_section() {
+    fn ends_with_the_modal_key_section() {
         let keymap = Keymap::defaults();
         let lines = build_lines(&keymap);
         assert!(matches!(lines.last(), Some(HelpLine::Text(_))));
         assert!(
             lines
                 .iter()
-                .any(|l| matches!(l, HelpLine::Header(h) if h.contains("Fixed keys")))
+                .any(|l| matches!(l, HelpLine::Header(h) if h.contains("Modal keys")))
         );
     }
 }

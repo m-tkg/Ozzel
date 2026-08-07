@@ -229,6 +229,11 @@ executable = "yellow"
 # specific key, don't delete this line — instead specify "that key" =
 # "none" in the [keys] section above (e.g. "q" = "none").
 [bindings]
+# cursor_up/cursor_down also drive the select-style modals: the
+# history/bookmark menu, the sort dialog (t), the sync dialog (Y), the
+# overwrite dialog, and the command palette (F). Each of those handles its
+# own keys first, so a modal key is never shadowed by a rebind (and in the
+# palette, letter keys go into the filter rather than moving the highlight).
 cursor_up = ["Up", "i"]
 cursor_down = ["Down", "k"]
 page_up = ["PageUp"]

@@ -135,6 +135,28 @@ impl Bookmarks {
         self.paths.retain(|p| p != path);
         self.paths.len() != before
     }
+
+    /// Swaps the bookmark at `index` with the one before it. Returns
+    /// whether anything moved — `false` at the top of the list and for an
+    /// out-of-range index, both ordinary no-ops rather than errors: the
+    /// bookmark menu calls this blindly on every keypress.
+    pub fn move_up(&mut self, index: usize) -> bool {
+        if index == 0 || index >= self.paths.len() {
+            return false;
+        }
+        self.paths.swap(index, index - 1);
+        true
+    }
+
+    /// Swaps the bookmark at `index` with the one after it. Same no-op
+    /// rules as `move_up`, at the bottom of the list instead.
+    pub fn move_down(&mut self, index: usize) -> bool {
+        if index + 1 >= self.paths.len() {
+            return false;
+        }
+        self.paths.swap(index, index + 1);
+        true
+    }
 }
 
 /// Path to `history.json`, if this platform has a resolvable data dir.
@@ -359,6 +381,63 @@ mod tests {
         assert_eq!(bookmarks.paths, vec![PathBuf::from("/b")]);
     }
 
+    #[test]
+    fn bookmarks_move_swaps_with_the_neighbour() {
+        let mut bookmarks = Bookmarks::default();
+        bookmarks.add(PathBuf::from("/a"));
+        bookmarks.add(PathBuf::from("/b"));
+        bookmarks.add(PathBuf::from("/c"));
+
+        assert!(bookmarks.move_down(0));
+        assert_eq!(
+            bookmarks.paths,
+            vec![
+                PathBuf::from("/b"),
+                PathBuf::from("/a"),
+                PathBuf::from("/c")
+            ]
+        );
+
+        assert!(bookmarks.move_up(1));
+        assert_eq!(
+            bookmarks.paths,
+            vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/c")
+            ],
+            "moving back up must restore the original order"
+        );
+    }
+
+    #[test]
+    fn bookmarks_move_at_either_end_is_a_no_op() {
+        let mut bookmarks = Bookmarks::default();
+        bookmarks.add(PathBuf::from("/a"));
+        bookmarks.add(PathBuf::from("/b"));
+
+        assert!(!bookmarks.move_up(0), "already at the top");
+        assert!(!bookmarks.move_down(1), "already at the bottom");
+        assert_eq!(
+            bookmarks.paths,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+    }
+
+    #[test]
+    fn bookmarks_move_out_of_range_is_a_no_op() {
+        let mut empty = Bookmarks::default();
+        assert!(!empty.move_up(0));
+        assert!(!empty.move_down(0));
+        assert!(empty.paths.is_empty());
+
+        let mut bookmarks = Bookmarks::default();
+        bookmarks.add(PathBuf::from("/a"));
+        assert!(!bookmarks.move_up(9));
+        assert!(!bookmarks.move_down(9));
+        assert_eq!(bookmarks.paths, vec![PathBuf::from("/a")]);
+    }
+
     // `unix_data_dir` is XDG-style resolution meaningful only on unix
     // (Windows paths like "/custom/xdg" aren't absolute, and the join
     // semantics differ), so these tests are unix-only.
@@ -416,6 +495,29 @@ mod tests {
         let (loaded, warning): (Bookmarks, Option<String>) = load_json(&path);
         assert!(warning.is_none());
         assert_eq!(loaded, bookmarks);
+    }
+
+    #[test]
+    fn persist_round_trips_a_reordered_bookmark_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bookmarks.json");
+
+        let mut bookmarks = Bookmarks::default();
+        bookmarks.add(PathBuf::from("/home/user/projects"));
+        bookmarks.add(PathBuf::from("/tmp/scratch"));
+        assert!(bookmarks.move_up(1));
+        save_json(&path, &bookmarks).unwrap();
+
+        let (loaded, warning): (Bookmarks, Option<String>) = load_json(&path);
+        assert!(warning.is_none());
+        assert_eq!(
+            loaded.paths,
+            vec![
+                PathBuf::from("/tmp/scratch"),
+                PathBuf::from("/home/user/projects")
+            ],
+            "a reorder must survive the save/load round trip"
+        );
     }
 
     #[test]

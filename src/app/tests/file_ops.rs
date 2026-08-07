@@ -663,6 +663,33 @@ fn copy_collision_opens_the_dialog_even_with_confirm_operations_false() {
 }
 
 #[test]
+fn collision_dialog_moves_on_the_keymap_cursor_keys() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    std::fs::write(left.path().join("a.txt"), b"new").unwrap();
+    std::fs::write(right.path().join("a.txt"), b"existing").unwrap();
+
+    let mut app = App::new(
+        left.path().to_path_buf(),
+        right.path().to_path_buf(),
+        Config {
+            bindings: HashMap::from([("cursor_down".to_string(), vec!["n".to_string()])]),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    app.active_pane_mut().reload().unwrap();
+    select_entry_named(&mut app, "a.txt");
+
+    app.dispatch(Action::Copy);
+    app.handle_event(AppEvent::Input(KeyCode::Char('n'), KeyModifiers::NONE));
+    match &app.mode {
+        Mode::TransferCollision { state } => assert_eq!(state.cursor, 1),
+        other => panic!("expected Mode::TransferCollision, got {other:?}"),
+    }
+}
+
+#[test]
 fn copy_collision_opens_the_per_file_dialog_before_spawning() {
     let left = tempfile::tempdir().unwrap();
     let right = tempfile::tempdir().unwrap();

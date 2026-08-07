@@ -96,7 +96,7 @@ These are the default key bindings. They can be freely redefined in the `[keys]`
 | `Backspace` | Go to the parent directory |
 | `w` | Swap the left and right panes |
 | `s` | Cycle the sort key (name → size → modified time → extension → name…) |
-| `t` | Open the sort dialog: choose the sort key **and** ascending/descending in one modal (`↑`/`↓` to move, `Enter` to apply, `Esc` to cancel). The chosen state is also remembered per directory (see below) |
+| `t` | Open the sort dialog: choose the sort key **and** ascending/descending in one modal (`↑`/`↓`, or your `cursor_up`/`cursor_down` keys, to move; `Enter` to apply; `Esc` to cancel). The chosen state is also remembered per directory (see below) |
 | `v` | Cycle the size column format: bytes → bytes with thousands separators → human (`1.5M`). The choice is written back to the config file, so it persists across restarts (also editable from the settings screen) |
 | `z` | Compute the recursive size of the marked directories (or the directory under the cursor) on a background task. Each directory's `<DIR>` cell is replaced with its real size as results arrive (kept only while the pane stays in this directory), size-sorting picks the numbers up, and the log shows a grand total |
 | `.` | Toggle showing hidden (dot) files |
@@ -136,7 +136,7 @@ A pane's header is a fixed two-row area (DYNA-style — the entry list below nev
 | `T` (Shift+t) | Touch: prompt for a timestamp (pre-filled with the cursor entry's mtime; formats `YYYY-MM-DD HH:MM:SS`, `YYYY-MM-DD HH:MM`, or `YYYY-MM-DD`; empty input = now) and set the marked (or cursor) entries' modified/accessed times to it |
 | `I` (Shift+i) | Show a file-information dialog for the entry under the cursor: full path, type, link target (symlinks), exact byte size, permissions + octal mode, owner/group, hard-link count, inode, and modified/accessed/changed times — all re-read from disk at open time. With marks active, a summary row (`N item(s), files total X bytes` — shallow file sizes only) is appended. `Esc`/`Enter`/`q` closes |
 | `=` | Diff the file under the cursor against the same-named file in the other pane's directory, shown as a colored unified diff (3 context lines; `+` green, `-` red, `@@` cyan, headers bold) in the built-in viewer — all the usual viewer keys (scroll, `/` search, `q` close) work as-is. Identical files, binary files, and a missing counterpart just log a note instead of opening. Reads are capped at the viewer's 10 MiB limit (`[truncated]` is flagged in the title) |
-| `Y` (Shift+y) | Sync the active pane's **whole directory** onto the other pane's, after choosing a mode in a dialog: **Update copy** copies new/missing files only (a file is re-copied when sizes differ or the source is more than 1 s newer — the tolerance absorbs FAT-style mtime granularity; the destination is never deleted, and a newer destination file is left alone), or **Mirror**, which additionally deletes everything that exists only in the destination — mirror always shows an explicit deletion confirmation regardless of `confirm_operations`, and its deletions respect `delete_behavior` (trash by default). Runs as a cancellable background task with byte progress; symlinks are compared by link target and recreated as links, never followed. Same-directory and nested (either-way) pane pairs are rejected |
+| `Y` (Shift+y) | Sync the active pane's **whole directory** onto the other pane's, after choosing a mode in a dialog (`↑`/`↓`, or your `cursor_up`/`cursor_down` keys, to move): **Update copy** copies new/missing files only (a file is re-copied when sizes differ or the source is more than 1 s newer — the tolerance absorbs FAT-style mtime granularity; the destination is never deleted, and a newer destination file is left alone), or **Mirror**, which additionally deletes everything that exists only in the destination — mirror always shows an explicit deletion confirmation regardless of `confirm_operations`, and its deletions respect `delete_behavior` (trash by default). Runs as a cancellable background task with byte progress; symlinks are compared by link target and recreated as links, never followed. Same-directory and nested (either-way) pane pairs are rejected |
 
 By default, `D`/`R` are also simultaneously bound to their lowercase forms (`d`/`r`). This is a concrete example of "multiple keys → one action" (you can add more of your own in the `[bindings]` section, described below).
 
@@ -158,7 +158,7 @@ Copy, move, and delete run as async tasks, with a progress gauge shown in the lo
 | `Overwrite All` | Apply `Overwrite` to this and every remaining conflict |
 | `Skip All` | Apply `Skip` to this and every remaining conflict |
 
-`↑`/`↓` move the highlight, `Enter` answers, and `Esc` cancels the **whole** transfer (including the non-conflicting entries — nothing has started yet at that point). Non-conflicting entries transfer normally alongside whatever the dialog resolves. This dialog is itself the confirmation, so it appears even with `confirm_operations = false` — a collision is never silently overwritten.
+`↑`/`↓` (or your `cursor_up`/`cursor_down` keys) move the highlight, `Enter` answers, and `Esc` cancels the **whole** transfer (including the non-conflicting entries — nothing has started yet at that point). Non-conflicting entries transfer normally alongside whatever the dialog resolves. This dialog is itself the confirmation, so it appears even with `confirm_operations = false` — a collision is never silently overwritten.
 
 **How `y` (copy path) works:** Without pulling in any extra dependency crates, it writes to the clipboard using a terminal escape sequence called [OSC 52](https://sw.kovidgoyal.net/kitty/clipboard/#clipboard-escape-code). Its advantage is that it works even over SSH or from inside tmux (if tmux is configured with the equivalent of `set-clipboard on`). On unsupported terminals, the escape sequence is simply ignored — no error, no crash (since there's no reliable way to detect support in advance, pressing `y` always logs `copied: /path/to/file`).
 
@@ -282,14 +282,17 @@ External viewers do not apply to files inside a Virtual Directory (browsing insi
 | `B` (Shift+b) | Add the active pane's current directory to bookmarks (no duplicates are added) |
 | `~` | Go to the `home` setting (or the OS home directory if unset) |
 
-Inside the history/bookmark menus, the following fixed keys are available.
+Inside the history/bookmark menus, the following keys are available.
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` | Move the highlight |
+| `↑` / `↓` | Move the highlight (whatever `cursor_up`/`cursor_down` are bound to works here too — by default that adds `i`/`k`) |
 | `Enter` | Move the active pane to the selected item |
 | `Esc` | Close the menu (without moving) |
 | `d` | (bookmark menu only) Delete the highlighted bookmark |
+| `Shift+↑` / `Shift+↓` | (bookmark menu only) Move the highlighted bookmark one slot up/down. The highlight follows it, and the new order is written to `bookmarks.json` immediately |
+
+The arrows are wired up unconditionally, so unbinding them in `[keys]`/`[bindings]` cannot leave a menu impossible to drive. Conversely, the menu's own keys always win over the keymap: `Shift+↑`/`Shift+↓` reorder here even though they are `top`/`bottom` in Normal mode, and `d` still deletes even if you have bound `d` to something else.
 
 ### Help Screen
 
@@ -297,7 +300,7 @@ Inside the history/bookmark menus, the following fixed keys are available.
 | --- | --- |
 | `h` / `?` | Open the current effective key binding list (help screen) |
 
-A full-screen screen listing the **currently effective key bindings** — reflecting any user overrides via `[keys]`/`[bindings]` — grouped by category (navigation, marking, file operations, filtering, history/bookmarks/home, external integration/viewers, other). When multiple keys are assigned to the same action, they are combined into a single comma-separated line (e.g., `r, R    rename    Rename the cursor entry`). At the end, the fixed keys for each mode that are outside key-binding remapping (not remappable) — prompts, confirmation dialogs, the history/bookmark menu, the viewer, the log viewer, and the help screen itself — are also shown as a static section.
+A full-screen screen listing the **currently effective key bindings** — reflecting any user overrides via `[keys]`/`[bindings]` — grouped by category (navigation, marking, file operations, filtering, history/bookmarks/home, external integration/viewers, other). When multiple keys are assigned to the same action, they are combined into a single comma-separated line (e.g., `r, R    rename    Rename the cursor entry`). At the end, the keys of each mode that live outside the keymap — prompts, confirmation dialogs, the history/bookmark menu, the sort/sync/overwrite dialogs, the command palette, the viewer, the log viewer, and the help screen itself — are also shown as a static section. Those are fixed, except that the menus and dialogs additionally accept whatever `cursor_up`/`cursor_down` are bound to.
 
 Scrolling and search use the exact same `less`-compatible fixed key set as the text viewer (and log viewer): `↑`/`↓` (also `k`/`j`) for one line, `PageUp`/`PageDown` (also `b`/`f`/`Space`) for a page, `d`/`u` for a half page, `Home` or `g` for the top, `End` or `G` for the bottom, `/`/`?` for forward/backward search, and `n`/`N` to move to the next/previous match (the search target here is the text of each line in the key binding list).
 
@@ -315,7 +318,7 @@ A modal listing all actions (name + description); typing in the input field at t
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` | Move the highlight |
+| `↑` / `↓` | Move the highlight. Letter keys are typed into the filter instead, so only modifier combos bound to `cursor_up`/`cursor_down` (e.g. `C-p`/`C-n`) also move here |
 | `Enter` | Run the highlighted action (the palette closes before running it, so actions that open a prompt or confirmation dialog work fine too) |
 | `Esc` | Close the palette without running anything |
 | Any other character key | Append to the filter string (editable with `Backspace`/`Delete`/`←`/`→`/`Home`/`End`) |
@@ -644,7 +647,7 @@ Directory history and bookmarks are persisted as JSON files.
 | Windows | `%APPDATA%\ozzel\data\` |
 
 - `history.json`: Visited directories per pane (up to 50, deduplicated, most-recent order)
-- `bookmarks.json`: The bookmark list (in the order added)
+- `bookmarks.json`: The bookmark list (in the order added, unless reordered with `Shift+↑`/`Shift+↓` in the bookmark menu)
 - `sort_prefs.json`: Remembered per-directory sort choices (up to 200, most-recently-changed order; see "Per-directory sort memory" above)
 
 If either file is missing, it starts in an empty state. If a file is corrupted (unparseable), it also falls back to an empty state, and this is shown in the log (never silently ignored). Bookmarks are saved on every change; history is saved on exit.

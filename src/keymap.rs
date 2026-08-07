@@ -1,6 +1,12 @@
 //! Key combo parsing and the configurable keymap. Normal mode is the only
-//! mode that consults this — Prompt/Confirm use fixed editing keys instead
-//! (see `App::handle_prompt_key` / `App::handle_confirm_key`).
+//! mode that consults the *whole* keymap. The select-style modals (the
+//! history/bookmark menu, the sort and sync dialogs, the collision dialog,
+//! the command palette) consult exactly two actions from it —
+//! `cursor_up`/`cursor_down`, via `menu_nav` — and only for keys they
+//! don't already consume themselves. Prompt/Confirm and the pagers
+//! (viewer/help/log) use fixed keys throughout (see
+//! `App::handle_prompt_key` / `App::handle_confirm_key` /
+//! `app::pager::scroll_cmd`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -105,6 +111,15 @@ fn parse_action(name: &str) -> Result<Action, KeymapError> {
     let deserializer: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
         name.into_deserializer();
     Action::deserialize(deserializer).map_err(|_| KeymapError::UnknownAction(name.to_string()))
+}
+
+/// The only movement the select-style modals take from the keymap — a bare
+/// direction, since each modal decides for itself what happens at the ends
+/// of its list. See `Keymap::menu_nav`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuNav {
+    Up,
+    Down,
 }
 
 /// Source for `Keymap::generation` — global rather than per-`Keymap` because
@@ -311,6 +326,25 @@ impl Keymap {
 
     pub fn resolve(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         self.bindings.get(&KeyCombo::new(code, modifiers)).copied()
+    }
+
+    /// Resolves a keypress to a *menu* cursor movement — deliberately just
+    /// the two `cursor_up`/`cursor_down` actions, so that a user's
+    /// `[keys]`/`[bindings]` can drive every select-style modal's list
+    /// without any other action leaking into a modal that has no business
+    /// running it (a remapped `delete` or `quit` firing inside a dialog
+    /// would be a disaster). Direction only: each modal applies its own
+    /// edge rule (the jump menu clamps, the dialogs wrap) to it.
+    ///
+    /// Callers consult this *last*, for keys they didn't consume
+    /// themselves, so a modal's own keys can never be shadowed by a
+    /// rebind — see `App::handle_select_key`.
+    pub fn menu_nav(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<MenuNav> {
+        match self.resolve(code, modifiers) {
+            Some(Action::CursorUp) => Some(MenuNav::Up),
+            Some(Action::CursorDown) => Some(MenuNav::Down),
+            _ => None,
+        }
     }
 
     /// Every key combo currently bound to `action`, formatted for display
@@ -1090,6 +1124,61 @@ mod tests {
         assert_eq!(
             rebuilt.bindings, default_km.bindings,
             "generated [bindings] TOML must reconstruct the default keymap exactly"
+        );
+    }
+
+    #[test]
+    fn menu_nav_maps_only_the_two_cursor_actions() {
+        let km = Keymap::defaults();
+        assert_eq!(
+            km.menu_nav(KeyCode::Up, KeyModifiers::NONE),
+            Some(MenuNav::Up)
+        );
+        assert_eq!(
+            km.menu_nav(KeyCode::Char('i'), KeyModifiers::NONE),
+            Some(MenuNav::Up)
+        );
+        assert_eq!(
+            km.menu_nav(KeyCode::Down, KeyModifiers::NONE),
+            Some(MenuNav::Down)
+        );
+        assert_eq!(
+            km.menu_nav(KeyCode::Char('k'), KeyModifiers::NONE),
+            Some(MenuNav::Down)
+        );
+        // Every other bound action stays out of the modals — including the
+        // scrolling ones, which the fixed-height select popups have no way
+        // to honor anyway.
+        assert_eq!(km.menu_nav(KeyCode::Home, KeyModifiers::NONE), None, "top");
+        assert_eq!(
+            km.menu_nav(KeyCode::End, KeyModifiers::NONE),
+            None,
+            "bottom"
+        );
+        assert_eq!(
+            km.menu_nav(KeyCode::Up, KeyModifiers::SHIFT),
+            None,
+            "S-Up is `top`, and the bookmark menu reorders on it"
+        );
+        assert_eq!(km.menu_nav(KeyCode::PageDown, KeyModifiers::NONE), None);
+        assert_eq!(
+            km.menu_nav(KeyCode::Char('q'), KeyModifiers::NONE),
+            None,
+            "quit must never reach a modal"
+        );
+    }
+
+    #[test]
+    fn menu_nav_follows_a_rebind() {
+        let mut km = Keymap::defaults();
+        km.apply_bindings(&HashMap::from([(
+            "cursor_down".to_string(),
+            vec!["C-n".to_string()],
+        )]))
+        .unwrap();
+        assert_eq!(
+            km.menu_nav(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            Some(MenuNav::Down)
         );
     }
 }
