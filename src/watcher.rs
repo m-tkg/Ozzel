@@ -49,13 +49,16 @@ struct Watched {
     /// caller can compare against its own state without knowing anything
     /// about symlink resolution.
     requested: PathBuf,
-    /// `requested` run through `fs::canonicalize`, which is the form the
-    /// backend reports paths in. On macOS this is the difference between
-    /// `/var/folders/...` (what a caller has) and `/private/var/folders/...`
-    /// (what FSEvents delivers), since `/var` is a symlink — without this
-    /// every event would be attributed to no pane at all and auto-refresh
-    /// would silently never fire. Falls back to `requested` when
-    /// canonicalization fails (a directory that just vanished).
+    /// `requested` run through `fs::canonicalize`, the common form both
+    /// sides of the comparison in [`DirWatcher::changed_dirs`] are put
+    /// into. A caller's path and the backend's rarely spell the same
+    /// directory the same way: on macOS `/var` is a symlink, so a cwd of
+    /// `/var/folders/...` is delivered as `/private/var/folders/...`; on
+    /// Windows the two differ by `\\?\` prefixing and 8.3 short names
+    /// (`RUNNER~1` vs `runneradmin`). Comparing raw paths misses every
+    /// event on both, and auto-refresh silently never fires. Falls back to
+    /// `requested` when canonicalization fails (a directory that just
+    /// vanished).
     canonical: PathBuf,
 }
 
@@ -125,28 +128,35 @@ impl DirWatcher {
     /// Which watched directories have changed since the last call, named
     /// the way the caller asked for them (see `Watched::requested`),
     /// deduplicated, and drained without blocking.
+    ///
+    /// Each reported path is reduced to the directory the change happened
+    /// *in* — its parent for the usual per-file event, or the path itself
+    /// for a backend that reports the directory (FSEvents does) — and that
+    /// directory is canonicalized before being compared, since neither
+    /// side spells a path the same way (see `Watched::canonical`). Only
+    /// the directory is canonicalized, never the changed entry itself: a
+    /// deletion names something that no longer exists.
+    ///
+    /// A change *deeper* than one level below a watched directory belongs
+    /// to no pane: watches are non-recursive, so anything deeper is only
+    /// ever coalesced noise from a backend that watches by tree.
     pub fn changed_dirs(&self) -> Vec<PathBuf> {
         let mut changed: Vec<PathBuf> = Vec::new();
         for path in self.rx.try_iter().flatten() {
-            for w in &self.watched {
-                if affects_dir(&path, &w.canonical) && !changed.contains(&w.requested) {
-                    changed.push(w.requested.clone());
+            for dir in [path.parent().map(Path::to_path_buf), Some(path)]
+                .into_iter()
+                .flatten()
+            {
+                let resolved = std::fs::canonicalize(&dir).unwrap_or(dir);
+                for w in &self.watched {
+                    if resolved == w.canonical && !changed.contains(&w.requested) {
+                        changed.push(w.requested.clone());
+                    }
                 }
             }
         }
         changed
     }
-}
-
-/// Whether a change at `changed` should refresh a pane showing `dir`.
-///
-/// Both the entry itself (`dir/a.txt` — the usual case) and the directory
-/// (which macOS's FSEvents backend reports instead of the individual file)
-/// count. A path deeper than one level below `dir` does not: watches are
-/// non-recursive, so anything deeper only ever arrives as coalesced noise
-/// from a backend that watches by directory tree.
-pub fn affects_dir(changed: &Path, dir: &Path) -> bool {
-    changed == dir || changed.parent() == Some(dir)
 }
 
 #[cfg(test)]
@@ -204,12 +214,33 @@ mod tests {
     }
 
     #[test]
-    fn affects_dir_matches_the_directory_and_its_direct_children() {
-        let dir = Path::new("/a/b");
-        assert!(affects_dir(Path::new("/a/b"), dir));
-        assert!(affects_dir(Path::new("/a/b/c.txt"), dir));
-        assert!(!affects_dir(Path::new("/a/b/c/d.txt"), dir));
-        assert!(!affects_dir(Path::new("/a/other.txt"), dir));
-        assert!(!affects_dir(Path::new("/a"), dir));
+    fn a_real_watch_ignores_a_change_in_a_sibling_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let watched = root.path().join("watched");
+        let other = root.path().join("other");
+        std::fs::create_dir(&watched).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let mut watcher = DirWatcher::new().unwrap();
+        assert!(watcher.sync(std::slice::from_ref(&watched)).is_empty());
+
+        std::fs::write(other.join("created.txt"), b"hi").unwrap();
+        // Then a change in the watched directory, as a barrier: once it
+        // has been reported, anything the sibling was going to produce has
+        // had at least as long to arrive.
+        std::fs::write(watched.join("created.txt"), b"hi").unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let changed = watcher.changed_dirs();
+            assert!(
+                !changed.contains(&other),
+                "a sibling directory is not watched"
+            );
+            if changed.contains(&watched) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("no event for the watched directory arrived within 5s");
     }
 }
