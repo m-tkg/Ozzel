@@ -1104,13 +1104,71 @@ fn copy_path_queues_the_cursor_entrys_absolute_path() {
 }
 
 #[test]
-fn copy_path_with_no_selection_logs_an_error_and_queues_nothing() {
-    let dir = tempfile::tempdir().unwrap(); // empty dir, only ".." (or nothing)
-    let mut app = test_app(dir.path(), dir.path());
-    // An empty, non-root directory's only row is "..", which has no
-    // path — selected_entry_path() is None either way here.
+fn copy_path_on_the_parent_row_copies_the_parent_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut app = test_app(&sub, &sub);
+    // Index 0 is the synthetic ".." row, which is where the cursor starts.
+    assert_eq!(app.active_pane().cursor, 0);
+
     app.dispatch(Action::CopyPath);
-    assert!(app.outbox.clipboard.is_none());
+
+    assert_eq!(
+        app.outbox.clipboard.as_deref(),
+        Some(dir.path().to_string_lossy().as_ref()),
+        ".. must copy the directory it would navigate to"
+    );
+    assert!(!app.log.iter().any(|l| l.is_error));
+}
+
+#[test]
+fn copy_path_on_the_parent_row_of_an_empty_directory_still_works() {
+    // An empty, non-root directory's only row is "..", which used to make
+    // copy_path an error — there is always a parent to name.
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut app = test_app(&sub, &sub);
+
+    app.dispatch(Action::CopyPath);
+
+    assert_eq!(
+        app.outbox.clipboard.as_deref(),
+        Some(dir.path().to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn copy_dir_path_copies_the_active_panes_cwd() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    std::fs::write(left.path().join("a.txt"), b"hi").unwrap();
+    let mut app = test_app(left.path(), right.path());
+    // Wherever the cursor happens to be, this copies the directory itself.
+    app.active_pane_mut().cursor = 1;
+
+    app.dispatch(Action::CopyDirPath);
+
+    assert_eq!(
+        app.outbox.clipboard.as_deref(),
+        Some(left.path().to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn copy_dir_path_follows_the_active_pane() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let mut app = test_app(left.path(), right.path());
+
+    app.dispatch(Action::SwitchPane);
+    app.dispatch(Action::CopyDirPath);
+
+    assert_eq!(
+        app.outbox.clipboard.as_deref(),
+        Some(right.path().to_string_lossy().as_ref())
+    );
 }
 
 #[test]

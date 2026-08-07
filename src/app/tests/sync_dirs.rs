@@ -1,4 +1,4 @@
-//! Tests for the `Y` (sync_dirs) flow: the mode dialog, the
+//! Tests for the `W` (sync_dirs) flow: the mode dialog, the
 //! mirror-always-confirms rule, and the rejected pane layouts.
 
 use super::super::test_support::*;

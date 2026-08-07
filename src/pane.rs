@@ -681,6 +681,17 @@ impl Pane {
         self.visible_entries().get(self.cursor).copied()
     }
 
+    /// Whether the cursor is on the synthetic `..` row — the other reason
+    /// `selected_entry()` returns `None` besides an empty pane, which
+    /// callers that want to act on `..` itself (`App::begin_copy_path`)
+    /// have to tell apart.
+    pub fn cursor_is_parent_row(&self) -> bool {
+        matches!(
+            self.visible_entries_cached_at_cursor(),
+            Some(VisibleItem::Parent)
+        )
+    }
+
     /// The name of the entry under the cursor, or `None` if the cursor is
     /// on `..` or the pane is empty.
     pub fn selected_entry_name(&self) -> Option<String> {

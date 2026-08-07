@@ -9,7 +9,7 @@ impl App {
     /// `" {action:<20} {combos}"` line per `Action::ALL` entry — from a
     /// cache keyed by `Keymap::generation`, same story as `App::help_lines`:
     /// `settings::combos_for` scans the whole keymap per action, and
-    /// without this it was doing that for all ~44 actions on every single
+    /// without this it was doing that for every action on every single
     /// frame the Keybindings list is on screen, not just when a binding
     /// actually changed. `pub(crate)` so `ui::settings_view` can call it.
     pub(crate) fn settings_keybinding_lines(&mut self) -> &[String] {
