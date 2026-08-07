@@ -1565,14 +1565,13 @@ impl App {
     /// (the menu has no wrap-around, unlike the fixed-length sort/sync
     /// dialogs).
     fn select_move_cursor(&mut self, down: bool) {
-        if let Mode::Select { cursor, items, .. } = &mut self.mode {
-            if down {
-                if *cursor + 1 < items.len() {
-                    *cursor += 1;
-                }
-            } else {
-                *cursor = cursor.saturating_sub(1);
-            }
+        let Mode::Select { cursor, items, .. } = &mut self.mode else {
+            return;
+        };
+        if !down {
+            *cursor = cursor.saturating_sub(1);
+        } else if *cursor + 1 < items.len() {
+            *cursor += 1;
         }
     }
 
@@ -1602,11 +1601,12 @@ impl App {
         let from = *cursor;
         // The persisted list is the gate — it owns the bounds check, so a
         // move at either end stops here without dirtying anything.
-        if !if down {
+        let moved = if down {
             self.bookmarks.move_down(from)
         } else {
             self.bookmarks.move_up(from)
-        } {
+        };
+        if !moved {
             return false;
         }
         let to = if down { from + 1 } else { from - 1 };
@@ -1956,12 +1956,8 @@ impl App {
         // Only keys the search field didn't want get this far.
         match nav {
             Some(MenuNav::Up) => *cursor = cursor.saturating_sub(1),
-            Some(MenuNav::Down) => {
-                if *cursor + 1 < len {
-                    *cursor += 1;
-                }
-            }
-            None => {}
+            Some(MenuNav::Down) if *cursor + 1 < len => *cursor += 1,
+            _ => {}
         }
     }
 
