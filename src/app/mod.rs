@@ -21,11 +21,12 @@ use crate::external::{self, ExternalRequest};
 use crate::file_search::{self, MAX_TREE_ENTRIES};
 use crate::filter::FilterSpec;
 use crate::help::HelpLine;
-use crate::keymap::{KeyCombo, Keymap, MenuNav};
+use crate::keymap::{KeyCombo, Keymap, MenuNav, MenuPage};
 use crate::mode::{
     COLLISION_CHOICES, ChmodState, CollisionInfo, CollisionState, LineEditor, Mode,
     PasswordPending, PendingOp, PromptKind, SYNC_CHOICES, SearchDirection, SelectKind,
     SettingsEditor, SettingsScreen, TextField, TransferKind, ViewMode, ViewerSearch, ViewerSyntax,
+    select_pagination,
 };
 use crate::ops;
 use crate::pane::{CursorAnchor, PAGE_SIZE, Pane, SortKey};
@@ -1519,9 +1520,11 @@ impl App {
 
     /// Keys for `Mode::Select`. The menu's own keys come first — Esc
     /// cancels, Enter jumps the active pane to the highlight, and in the
-    /// bookmark menu `d` deletes it while Shift+Up/Shift+Down reorder it —
+    /// bookmark menu `1`..`9` pick a row of the current page outright
+    /// while `d` deletes the highlight and Shift+Up/Shift+Down reorder it —
     /// and only a key the menu didn't claim falls through to the keymap's
-    /// `cursor_up`/`cursor_down` (`Keymap::menu_nav`). That order is what
+    /// `cursor_up`/`cursor_down` (`Keymap::menu_nav`) and
+    /// `focus_left`/`focus_right` (`Keymap::menu_page`). That order is what
     /// keeps a rebind from shadowing a menu key: Shift+Up reorders here
     /// even though it's `top` in Normal mode, and `d` still deletes even
     /// if it's been bound to something else.
@@ -1530,15 +1533,19 @@ impl App {
     /// the keymap says, so that unbinding them in `[keys]`/`[bindings]`
     /// can't leave the menu impossible to drive.
     fn handle_select_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        // Resolved up front, and into a plain `Copy` value: taking this
-        // borrow of `self.keymap` inside the `match` below would collide
+        // Resolved up front, and into plain `Copy` values: taking these
+        // borrows of `self.keymap` inside the `match` below would collide
         // with the `&mut self` the arms need.
         let nav = self.keymap.menu_nav(code, modifiers);
+        let page_turn = self.keymap.menu_page(code, modifiers);
         let shift = modifiers.contains(KeyModifiers::SHIFT);
         match code {
             KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Enter => self.commit_select(),
             KeyCode::Char('d') if self.select_is_bookmark() => self.delete_selected_bookmark(),
+            KeyCode::Char(c @ '1'..='9') if self.select_is_bookmark() => {
+                self.select_pick_row(c as usize - '0' as usize);
+            }
             KeyCode::Up if shift && self.select_is_bookmark() => {
                 self.move_selected_bookmark(false);
             }
@@ -1547,10 +1554,14 @@ impl App {
             }
             KeyCode::Up => self.select_move_cursor(false),
             KeyCode::Down => self.select_move_cursor(true),
-            _ => match nav {
-                Some(MenuNav::Up) => self.select_move_cursor(false),
-                Some(MenuNav::Down) => self.select_move_cursor(true),
-                None => {}
+            KeyCode::Left => self.select_move_page(false),
+            KeyCode::Right => self.select_move_page(true),
+            _ => match (nav, page_turn) {
+                (Some(MenuNav::Up), _) => self.select_move_cursor(false),
+                (Some(MenuNav::Down), _) => self.select_move_cursor(true),
+                (None, Some(MenuPage::Prev)) => self.select_move_page(false),
+                (None, Some(MenuPage::Next)) => self.select_move_page(true),
+                (None, None) => {}
             },
         }
     }
@@ -1565,9 +1576,19 @@ impl App {
         )
     }
 
+    /// This menu's rows-per-page, or `None` when it isn't paged at all
+    /// (the history menu) or no menu is open.
+    fn select_page_size(&self) -> Option<usize> {
+        match &self.mode {
+            Mode::Select { kind, .. } => kind.page_size(),
+            _ => None,
+        }
+    }
+
     /// Moves the `Mode::Select` highlight one row, clamping at both ends
     /// (the menu has no wrap-around, unlike the fixed-length sort/sync
-    /// dialogs).
+    /// dialogs). In the paged bookmark menu this carries the page along
+    /// with it, since the page is derived from the cursor.
     fn select_move_cursor(&mut self, down: bool) {
         let Mode::Select { cursor, items, .. } = &mut self.mode else {
             return;
@@ -1577,6 +1598,56 @@ impl App {
         } else if *cursor + 1 < items.len() {
             *cursor += 1;
         }
+    }
+
+    /// Turns a paged menu's page, keeping the highlight on the same row of
+    /// the new page (clamped up to the last entry when the final page is
+    /// short). No-op in an unpaged menu and at either end — pages clamp
+    /// rather than wrap, like the row cursor.
+    fn select_move_page(&mut self, next: bool) {
+        let Some(page_size) = self.select_page_size() else {
+            return;
+        };
+        let Mode::Select { items, cursor, .. } = &mut self.mode else {
+            return;
+        };
+        let (page, pages) = select_pagination(items.len(), *cursor, page_size);
+        let target = if next {
+            if page + 1 >= pages {
+                return;
+            }
+            page + 1
+        } else {
+            if page == 0 {
+                return;
+            }
+            page - 1
+        };
+        let row = *cursor % page_size;
+        *cursor = (target * page_size + row).min(items.len().saturating_sub(1));
+    }
+
+    /// The `1`..`9` shortcuts: pick the `row`-th (1-based) entry of the
+    /// page currently on screen and commit it in one keystroke — the same
+    /// jump Enter would do on that row. Ignored when the page is short
+    /// enough that the digit points past its last entry.
+    fn select_pick_row(&mut self, row: usize) {
+        let Some(page_size) = self.select_page_size() else {
+            return;
+        };
+        if row == 0 || row > page_size {
+            return;
+        }
+        let Mode::Select { items, cursor, .. } = &mut self.mode else {
+            return;
+        };
+        let (page, _) = select_pagination(items.len(), *cursor, page_size);
+        let index = page * page_size + row - 1;
+        if index >= items.len() {
+            return;
+        }
+        *cursor = index;
+        self.commit_select();
     }
 
     /// Moves the highlighted bookmark one slot up/down, carrying the

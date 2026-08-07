@@ -290,8 +290,12 @@ Inside the history/bookmark menus, the following keys are available.
 | `↑` / `↓` | Move the highlight (whatever `cursor_up`/`cursor_down` are bound to works here too — by default that adds `i`/`k`) |
 | `Enter` | Move the active pane to the selected item |
 | `Esc` | Close the menu (without moving) |
+| `1` – `9` | (bookmark menu only) Jump straight to that numbered row of the page currently shown — the same as highlighting it and pressing `Enter` |
+| `←` / `→` | (bookmark menu only) Turn to the previous/next page (whatever `focus_left`/`focus_right` are bound to works here too — by default that adds `j`/`l`) |
 | `d` | (bookmark menu only) Delete the highlighted bookmark |
 | `Shift+↑` / `Shift+↓` | (bookmark menu only) Move the highlighted bookmark one slot up/down. The highlight follows it, and the new order is written to `bookmarks.json` immediately |
+
+**Bookmark menu paging:** The bookmark menu shows at most 9 entries per page, each prefixed with the `1`–`9` digit that selects it directly. The top-right corner of the menu border shows the current page as `02/09` (current/total). `←`/`→` turn the page, and `↑`/`↓` scroll across page boundaries as if the list were continuous. Pages clamp rather than wrap, and when the last page is shorter than the one you came from the highlight lands on its last entry. The history menu is not paged and shows no digits.
 
 The arrows are wired up unconditionally, so unbinding them in `[keys]`/`[bindings]` cannot leave a menu impossible to drive. Conversely, the menu's own keys always win over the keymap: `Shift+↑`/`Shift+↓` reorder here even though they are `top`/`bottom` in Normal mode, and `d` still deletes even if you have bound `d` to something else.
 
@@ -301,7 +305,7 @@ The arrows are wired up unconditionally, so unbinding them in `[keys]`/`[binding
 | --- | --- |
 | `h` / `?` | Open the current effective key binding list (help screen) |
 
-A full-screen screen listing the **currently effective key bindings** — reflecting any user overrides via `[keys]`/`[bindings]` — grouped by category (navigation, marking, file operations, filtering, history/bookmarks/home, external integration/viewers, other). When multiple keys are assigned to the same action, they are combined into a single comma-separated line (e.g., `r, R    rename    Rename the cursor entry`). At the end, the keys of each mode that live outside the keymap — prompts, confirmation dialogs, the history/bookmark menu, the sort/sync/overwrite dialogs, the command palette, the viewer, the log viewer, and the help screen itself — are also shown as a static section. Those are fixed, except that the menus and dialogs additionally accept whatever `cursor_up`/`cursor_down` are bound to.
+A full-screen screen listing the **currently effective key bindings** — reflecting any user overrides via `[keys]`/`[bindings]` — grouped by category (navigation, marking, file operations, filtering, history/bookmarks/home, external integration/viewers, other). When multiple keys are assigned to the same action, they are combined into a single comma-separated line (e.g., `r, R    rename    Rename the cursor entry`). At the end, the keys of each mode that live outside the keymap — prompts, confirmation dialogs, the history/bookmark menu, the sort/sync/overwrite dialogs, the command palette, the viewer, the log viewer, and the help screen itself — are also shown as a static section. Those are fixed, except that the menus and dialogs additionally accept whatever `cursor_up`/`cursor_down` are bound to, and the paged bookmark menu whatever `focus_left`/`focus_right` are.
 
 Scrolling and search use the exact same `less`-compatible fixed key set as the text viewer (and log viewer): `↑`/`↓` (also `k`/`j`) for one line, `PageUp`/`PageDown` (also `b`/`f`/`Space`) for a page, `d`/`u` for a half page, `Home` or `g` for the top, `End` or `G` for the bottom, `/`/`?` for forward/backward search, and `n`/`N` to move to the next/previous match (the search target here is the text of each line in the key binding list).
 

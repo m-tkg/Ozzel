@@ -291,6 +291,145 @@ fn bookmark_menu_reorder_wins_over_shift_up_being_bound_to_top() {
     );
 }
 
+/// Opens the bookmark menu over `count` bookmarked tempdirs — the paging
+/// counterpart of `bookmark_menu_app`, which only makes three.
+fn paged_bookmark_menu_app(count: usize) -> (App, Vec<PathBuf>, Vec<tempfile::TempDir>) {
+    let dirs: Vec<tempfile::TempDir> = (0..count + 1)
+        .map(|_| tempfile::tempdir().unwrap())
+        .collect();
+    let paths: Vec<PathBuf> = dirs[1..].iter().map(|d| d.path().to_path_buf()).collect();
+    let mut app = test_app(dirs[0].path(), dirs[0].path());
+    for path in &paths {
+        app.bookmarks.add(path.clone());
+    }
+    app.dispatch(Action::BookmarkJump);
+    (app, paths, dirs)
+}
+
+fn select_cursor(app: &App) -> usize {
+    match &app.mode {
+        Mode::Select { cursor, .. } => *cursor,
+        other => panic!("expected the bookmark menu to stay open, got {other:?}"),
+    }
+}
+
+#[test]
+fn bookmark_menu_digit_jumps_straight_to_that_row_of_the_page() {
+    let (mut app, paths, _dirs) = paged_bookmark_menu_app(12);
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('3'), KeyModifiers::NONE));
+
+    assert!(matches!(app.mode, Mode::Normal), "the digit also commits");
+    assert_eq!(app.panes[0].cwd, paths[2]);
+}
+
+#[test]
+fn bookmark_menu_right_turns_the_page_and_digits_index_into_it() {
+    let (mut app, paths, _dirs) = paged_bookmark_menu_app(12);
+
+    app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(select_cursor(&app), 9, "page 2 starts at the 10th entry");
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('3'), KeyModifiers::NONE));
+    assert_eq!(app.panes[0].cwd, paths[11], "digits are page-relative");
+}
+
+#[test]
+fn bookmark_menu_page_keys_clamp_at_both_ends() {
+    let (mut app, _paths, _dirs) = paged_bookmark_menu_app(12);
+
+    app.handle_event(AppEvent::Input(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(select_cursor(&app), 0, "no page before the first");
+
+    app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(select_cursor(&app), 9, "no page after the last");
+}
+
+#[test]
+fn bookmark_menu_page_turn_clamps_onto_a_short_final_page() {
+    // 12 bookmarks: page 2 holds three, so row 5 of page 1 has no
+    // counterpart there and the highlight lands on the last entry.
+    let (mut app, _paths, _dirs) = paged_bookmark_menu_app(12);
+    for _ in 0..4 {
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    }
+    assert_eq!(select_cursor(&app), 4);
+
+    app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(select_cursor(&app), 11);
+
+    // ...and back: row 3 of the short page maps to row 3 of the first.
+    app.handle_event(AppEvent::Input(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(select_cursor(&app), 2);
+}
+
+#[test]
+fn bookmark_menu_digit_past_the_last_row_of_a_short_page_is_ignored() {
+    let (mut app, _paths, dirs) = paged_bookmark_menu_app(12);
+    let start = dirs[0].path().to_path_buf();
+    app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('4'), KeyModifiers::NONE));
+
+    assert_eq!(select_cursor(&app), 9, "the menu stays open, untouched");
+    assert_eq!(app.panes[0].cwd, start, "and nothing navigated");
+}
+
+#[test]
+fn bookmark_menu_up_down_scrolling_crosses_a_page_boundary() {
+    // The page is derived from the cursor, so plain Down off the end of a
+    // page has to land on the next one rather than stall.
+    let (mut app, paths, _dirs) = paged_bookmark_menu_app(12);
+    for _ in 0..9 {
+        app.handle_event(AppEvent::Input(KeyCode::Down, KeyModifiers::NONE));
+    }
+    assert_eq!(select_cursor(&app), 9);
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('1'), KeyModifiers::NONE));
+    assert_eq!(
+        app.panes[0].cwd, paths[9],
+        "row 1 of the page we scrolled to"
+    );
+}
+
+#[test]
+fn history_menu_ignores_the_digit_and_page_keys() {
+    let a = tempfile::tempdir().unwrap();
+    let start = tempfile::tempdir().unwrap();
+    let mut app = test_app(start.path(), start.path());
+    app.history.record(Side::Left, a.path().to_path_buf());
+
+    app.dispatch(Action::HistoryJump);
+    app.handle_event(AppEvent::Input(KeyCode::Char('1'), KeyModifiers::NONE));
+    app.handle_event(AppEvent::Input(KeyCode::Right, KeyModifiers::NONE));
+
+    match &app.mode {
+        Mode::Select { kind, cursor, .. } => {
+            assert_eq!(*kind, SelectKind::History);
+            assert_eq!(*cursor, 0, "the history menu is not paged");
+        }
+        other => panic!("expected the history menu to stay open, got {other:?}"),
+    }
+    assert_eq!(app.panes[0].cwd, start.path(), "and nothing navigated");
+}
+
+#[test]
+fn bookmark_menu_pages_on_a_remapped_focus_key() {
+    let (mut app, paths, _dirs) = paged_bookmark_menu_app(12);
+    assert_eq!(
+        app.keymap.resolve(KeyCode::Char('l'), KeyModifiers::NONE),
+        Some(Action::FocusRight),
+        "precondition: `l` is focus_right by default"
+    );
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert_eq!(select_cursor(&app), 9);
+
+    app.handle_event(AppEvent::Input(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert_eq!(app.panes[0].cwd, paths[10]);
+}
+
 #[test]
 fn bookmark_menu_moves_the_cursor_on_a_remapped_cursor_down_key() {
     let target = tempfile::tempdir().unwrap();

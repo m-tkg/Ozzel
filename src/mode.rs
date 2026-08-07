@@ -111,6 +111,34 @@ pub enum SelectKind {
     Bookmark,
 }
 
+impl SelectKind {
+    /// How many rows one page of this menu shows, or `None` for a menu
+    /// that isn't paged at all. Only the bookmark menu pages: its rows
+    /// carry a `1`..`9` direct-pick digit (see
+    /// `App::handle_select_key`), which is exactly what caps a page at
+    /// `SELECT_PAGE_SIZE`.
+    pub fn page_size(self) -> Option<usize> {
+        match self {
+            SelectKind::History => None,
+            SelectKind::Bookmark => Some(SELECT_PAGE_SIZE),
+        }
+    }
+}
+
+/// Rows per page in the bookmark jump menu — nine, so every visible row
+/// gets a distinct `1`..`9` shortcut digit. Left/Right (the pane-focus
+/// keys) turn the page; see `App::select_move_page`.
+pub const SELECT_PAGE_SIZE: usize = 9;
+
+/// The page `cursor` sits on and the total page count, for a menu of
+/// `len` items showing `page_size` rows at a time. Both are 0-based/count
+/// pairs ready for a `{page + 1}/{count}` indicator; `count` is at least
+/// 1 even for an empty list, so the indicator never reads `00/00`.
+pub fn select_pagination(len: usize, cursor: usize, page_size: usize) -> (usize, usize) {
+    let count = len.div_ceil(page_size).max(1);
+    (cursor / page_size, count)
+}
+
 /// Which direction a marked-or-cursor transfer is going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferKind {
@@ -421,6 +449,13 @@ pub enum Mode {
     /// A centered jump menu (history or bookmarks): up/down move, Enter
     /// selects (the active pane cd's there), Esc cancels, and `d` deletes
     /// the highlighted entry when `kind` is `Bookmark`.
+    ///
+    /// The bookmark menu additionally pages at `SELECT_PAGE_SIZE` rows,
+    /// with `1`..`9` picking a row on the current page directly and
+    /// Left/Right turning the page. There is no separate page field:
+    /// the page is always `cursor / SELECT_PAGE_SIZE` (see
+    /// `select_pagination`), so plain up/down scrolling and an explicit
+    /// page turn can't disagree about which page is showing.
     Select {
         kind: SelectKind,
         title: String,
