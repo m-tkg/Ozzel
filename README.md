@@ -95,6 +95,7 @@ These are the default key bindings. They can be freely redefined in the `[keys]`
 | `Enter` / `o` | If a directory, open it (including `..`); if a file, open it in the built-in viewer (both are unified into a single `open` action, described below) |
 | `Backspace` | Go to the parent directory |
 | `w` | Swap the left and right panes |
+| `_` (Shift+`-`) | Show the active pane's directory in the other pane as well. The other pane really moves there — the jump is recorded in its own history and back/forward stack, and the destination's remembered sort is applied — but nothing on disk is touched (unlike `W`). Refused while the active pane is inside a Virtual Directory; if the *other* pane is inside one, this is how you pull it back out |
 | `s` | Cycle the sort key (name → size → modified time → extension → name…) |
 | `t` | Open the sort dialog: choose the sort key **and** ascending/descending in one modal (`↑`/`↓`, or your `cursor_up`/`cursor_down` keys, to move; `Enter` to apply; `Esc` to cancel). The chosen state is also remembered per directory (see below) |
 | `v` | Cycle the size column format: bytes → bytes with thousands separators → human (`1.5M`). The choice is written back to the config file, so it persists across restarts (also editable from the settings screen) |
@@ -172,6 +173,14 @@ Inside a git work tree, each pane shows the current directory's git state, refre
 
 Outside a work tree — or on a machine with no `git` at all — nothing is shown and nothing changes. The probes run detached from the task system: they never appear as running tasks, never gate quitting, and are not touched by `Ctrl+K`. When the pane is too narrow, the marker column is dropped before the name column gets squeezed (same policy as the permissions column). Set `show_git_status = false` in the config (also on the settings screen) to disable the probes entirely.
 
+### Auto-Refresh (External Changes)
+
+Each pane watches its own directory through the OS (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows), so a file added, edited or removed by Finder or another shell shows up on its own — no `Ctrl+R` needed. A pane browsing an archive watches the directory holding it, so an externally rewritten `project.zip` is re-listed the same way.
+
+The reload is the same one `Ctrl+R` performs: the cursor stays on the entry it was on (falling back to the top if that entry is gone), and marks are kept. It is deferred while a prompt, dialog, viewer or the settings screen is open — a listing shifting under an open dialog would be a hazard — and applied as soon as that closes.
+
+Set `auto_refresh = false` in the config (also on the settings screen) to register no watch at all. On a filesystem where the OS reports nothing (some network mounts), no events arrive and `Ctrl+R` remains the way to reload; that is the platform's behavior rather than a setting.
+
 ### Filtering & Search
 
 | Key | Action |
@@ -217,9 +226,9 @@ Setting `file_search_incremental = false` (or the "Behavior" category in the set
 | Key | Action |
 | --- | --- |
 | `p` | Zip the marked entries (or the entry under the cursor if none are marked). A prompt for the archive name is shown, pre-filled with the first target's filename plus `.zip`. It is created in the other pane's directory |
-| `u` | Extract the `.zip` file under the cursor into the other pane |
+| `u` | Extract the archive under the cursor into the other pane. Every format the Virtual Directory supports works: `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`, `.gz`, `.bz2`. Multi-file archives extract into a **newly created subdirectory** named after the archive (`project.tar.gz` → `project/`); if that name is taken, `project-1`, `project-2`, … is used, so nothing existing is ever overwritten. A bare `.gz`/`.bz2` holds a single payload and is written straight into the other pane (refused if a file of that name is already there) |
 
-Compression (`p`) and this bulk extraction with `u` are currently zip-only (the Virtual Directory feature described below also supports formats other than zip).
+Compression (`p`) is currently zip-only. Extraction with `u` covers every format the Virtual Directory described below supports; `.7z`, `.rar` and `.zst` are not supported anywhere in ozzel. Because `u` always extracts into a fresh directory, it never asks about overwriting. A cancelled or failed extraction leaves its (possibly partial) directory behind, the same way a cancelled copy leaves partial files.
 
 ### Virtual Directory (Browsing Archives Like Directories)
 
@@ -340,7 +349,7 @@ A full-screen settings UI structured like `raspi-config`, with three levels: cat
 
 | Category | Contents |
 | --- | --- |
-| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
+| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
 | Colors | Each item under `[colors]` (`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`) |
 | Startup/Integration | `home` / `editor` |
 | Extension Viewers | `[viewers]` (list of extension → launch command; add/edit/delete) |
@@ -569,6 +578,11 @@ show_permissions = true
 # Outside a work tree nothing is shown either way; false disables the probes entirely.
 show_git_status = true
 
+# Whether each pane watches its directory for changes made outside ozzel and reloads
+# itself when one lands. Default is true; false registers no watch at all, leaving
+# Ctrl+R as the only way to reload.
+auto_refresh = true
+
 # External viewer per extension. When opening with open (Enter/o), an external command
 # can be specified per extension to use instead of the built-in viewer. The key is the
 # lowercase, dot-less extension; the value is a shell command. If "{}" appears in the
@@ -638,7 +652,7 @@ The [`examples/config.toml`](examples/config.toml) that actually gets generated 
 
 ### Action Names (valid values for the right side of `[keys]` / the left side of `[bindings]`)
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `sort_dialog`, `toggle_size_format`, `calc_dir_size`, `toggle_hidden`, `swap_panes`, `refresh`, `mark`, `mark_all`, `rename`, `rename_marks`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `copy_dir_path`, `filter`, `clear_filter`, `jump_search`, `file_search`, `zip_marked`, `unzip`, `cancel_tasks`, `symlink`, `chmod`, `touch`, `file_info`, `diff`, `sync_dirs`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `sort_dialog`, `toggle_size_format`, `calc_dir_size`, `toggle_hidden`, `swap_panes`, `match_other_pane`, `refresh`, `mark`, `mark_all`, `rename`, `rename_marks`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `copy_dir_path`, `filter`, `clear_filter`, `jump_search`, `file_search`, `zip_marked`, `unzip`, `cancel_tasks`, `symlink`, `chmod`, `touch`, `file_info`, `diff`, `sync_dirs`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
 
 You can always check the current effective key bindings corresponding to this list from the in-app help screen (`h`/`?`).
 

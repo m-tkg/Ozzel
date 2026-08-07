@@ -39,4 +39,5 @@ pub mod ui;
 pub mod update;
 pub mod viewer;
 pub mod virtual_dir;
+pub mod watcher;
 mod xdg;

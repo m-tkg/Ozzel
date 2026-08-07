@@ -39,6 +39,12 @@ pub enum Action {
     CalcDirSize,
     ToggleHidden,
     SwapPanes,
+    /// Points the *inactive* pane at the active pane's directory — a real
+    /// cd on that pane (its own history ring, its own back/forward stack,
+    /// its destination's sort preference), not a cosmetic copy. Nothing on
+    /// disk is touched; contrast `SyncDirs`, which copies files (and, in
+    /// mirror mode, deletes them). See `App::begin_match_other_pane`.
+    MatchOtherPane,
     Refresh,
     Mark,
     MarkAll,
@@ -190,7 +196,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 57] = [
+    pub const ALL: [Action; 58] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -207,6 +213,7 @@ impl Action {
         Action::ToggleSizeFormat,
         Action::ToggleHidden,
         Action::SwapPanes,
+        Action::MatchOtherPane,
         Action::Refresh,
         Action::Mark,
         Action::MarkAll,
@@ -255,7 +262,7 @@ impl Action {
         match self {
             CursorUp | CursorDown | PageUp | PageDown | Top | Bottom | SwitchPane | FocusLeft
             | FocusRight | Open | Parent | CycleSort | SortDialog | ToggleSizeFormat
-            | ToggleHidden | SwapPanes | Refresh => ActionCategory::Movement,
+            | ToggleHidden | SwapPanes | MatchOtherPane | Refresh => ActionCategory::Movement,
             Mark | MarkAll => ActionCategory::Marks,
             Rename | RenameMarks | Mkdir | Delete | Copy | Move | Duplicate | CopyPath
             | CopyDirPath | CalcDirSize | ZipMarked | Unzip | CancelTasks | Symlink | Chmod
@@ -290,6 +297,9 @@ impl Action {
             CalcDirSize => "Compute sizes of marked directories (or the cursor directory)",
             ToggleHidden => "Toggle hidden files",
             SwapPanes => "Swap the left and right panes",
+            MatchOtherPane => {
+                "Show the active pane's directory in the other pane too (moves that pane, copies nothing)"
+            }
             Refresh => "Reload both panes",
             Mark => "Mark/unmark the cursor entry",
             MarkAll => "Toggle marks on all visible entries",
@@ -305,7 +315,7 @@ impl Action {
             }
             CopyDirPath => "Copy the active pane's own directory path to the clipboard",
             ZipMarked => "Zip marked entries (or the cursor entry)",
-            Unzip => "Unzip the cursor .zip file",
+            Unzip => "Extract the cursor archive into a new directory in the other pane",
             CancelTasks => "Cancel all running background tasks",
             Symlink => "Create symlinks to marked entries (or the cursor entry) in the other pane",
             Chmod => "Edit permissions of marked entries (or the cursor entry)",
@@ -357,6 +367,7 @@ impl Action {
             CalcDirSize => "calc_dir_size",
             ToggleHidden => "toggle_hidden",
             SwapPanes => "swap_panes",
+            MatchOtherPane => "match_other_pane",
             Refresh => "refresh",
             Mark => "mark",
             MarkAll => "mark_all",

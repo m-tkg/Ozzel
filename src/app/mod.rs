@@ -257,6 +257,27 @@ pub struct App {
     /// comparison per pane per event). Reset to `None` to force a
     /// re-probe (config reload, task completion, ...).
     git_checked_dir: [Option<PathBuf>; 2],
+    /// The filesystem watcher behind `config.auto_refresh`, or `None` when
+    /// auto-refresh is off, the platform backend refused to start, or
+    /// nobody turned it on. Deliberately *not* created by `App::new`:
+    /// `main.rs` calls `enable_directory_watching` once at startup, so the
+    /// hundreds of `App`s the test suite builds never register a real
+    /// watch (which on Linux would burn through the per-user inotify
+    /// instance limit for no reason). Tests drive `fs_dirty` directly
+    /// instead — see `App::mark_fs_dirty_for_test`.
+    watcher: Option<crate::watcher::DirWatcher>,
+    /// Whether `main.rs` asked for filesystem watching at all (see
+    /// `enable_directory_watching`). Separate from `config.auto_refresh`
+    /// so that toggling the setting at runtime can start/stop the watcher
+    /// without a test — which never opts in — ever getting a real one.
+    watching_requested: bool,
+    /// Per-pane "the filesystem under this pane changed, it needs a
+    /// reload" flag, set by `drain_fs_events` and cleared by
+    /// `apply_fs_refresh` once it actually reloads. A flag rather than an
+    /// immediate reload because one external `cp` produces a burst of
+    /// events, and because a refresh has to *wait* while a modal is open
+    /// (see `apply_fs_refresh`) rather than be dropped.
+    fs_dirty: [bool; 2],
     /// Overrides `config::config_path()` for the settings screen's own
     /// `toml_edit` writes and its post-write `reload_config_from` call —
     /// `None` (the real-app default) means "use the real, XDG-resolved
@@ -474,6 +495,9 @@ impl App {
             pending_git_status: HashMap::new(),
             latest_git_task: [None, None],
             git_checked_dir: [None, None],
+            watcher: None,
+            watching_requested: false,
+            fs_dirty: [false, false],
             settings_config_path: None,
             log_view_width: DEFAULT_LOG_VIEW_WIDTH,
             log_generation: 0,
@@ -783,6 +807,11 @@ impl App {
         // its last probe. One PathBuf comparison per pane when nothing
         // changed, so running this unconditionally is cheap.
         self.maybe_refresh_git();
+        // Same deal for the filesystem watcher: re-point it if a pane
+        // navigated, and apply any pending external-change reload now that
+        // this event may have closed whatever modal was blocking it.
+        self.maybe_resync_watches();
+        self.apply_fs_refresh();
     }
 
     /// The single chokepoint deciding when a pane's git status gets
@@ -807,6 +836,136 @@ impl App {
             }
             self.refresh_git_status(idx);
         }
+    }
+
+    /// Opts this `App` into filesystem watching. Called once by `main.rs`
+    /// at startup — `App::new` deliberately doesn't, so the hundreds of
+    /// `App`s the test suite builds never register a real OS watch (see
+    /// the `watcher` field), and neither does a config reload inside one.
+    pub fn enable_directory_watching(&mut self) {
+        self.watching_requested = true;
+        self.sync_watcher_to_config();
+    }
+
+    /// Makes the live watcher match `config.auto_refresh`: starts one when
+    /// watching is both requested and enabled, and drops it (which
+    /// unregisters every watch) otherwise. A backend that refuses to start
+    /// is logged once and the app simply runs without auto-refresh; `C-r`
+    /// still works.
+    fn sync_watcher_to_config(&mut self) {
+        if !self.watching_requested || !self.config.auto_refresh {
+            self.watcher = None;
+            self.fs_dirty = [false, false];
+            return;
+        }
+        if self.watcher.is_some() {
+            return;
+        }
+        match crate::watcher::DirWatcher::new() {
+            Ok(watcher) => {
+                self.watcher = Some(watcher);
+                self.maybe_resync_watches();
+            }
+            Err(err) => self.log_error(format!("{err} — auto-refresh disabled")),
+        }
+    }
+
+    /// Points the watcher at whatever the panes currently show: each
+    /// pane's `cwd`, deduplicated (both panes routinely show the same
+    /// directory). Runs after every event, alongside `maybe_refresh_git`,
+    /// and is a no-op unless the set actually changed — `DirWatcher::sync`
+    /// diffs against what it already has.
+    ///
+    /// A pane inside an archive needs no special case: its `cwd` is the
+    /// real directory holding that archive, so watching `cwd` catches the
+    /// archive being rewritten, and `VirtualDir::list`'s mtime/len check
+    /// turns the reload into a re-listing.
+    fn maybe_resync_watches(&mut self) {
+        let Some(watcher) = self.watcher.as_mut() else {
+            return;
+        };
+        let mut desired: Vec<PathBuf> = Vec::with_capacity(2);
+        for pane in &self.panes {
+            if !desired.contains(&pane.cwd) {
+                desired.push(pane.cwd.clone());
+            }
+        }
+        let failed = watcher.sync(&desired);
+        for path in failed {
+            self.log_error(format!("cannot watch for changes: {}", path.display()));
+        }
+    }
+
+    /// Drains whatever the watcher's backend thread has reported and marks
+    /// the panes those changes belong to for reload. Called once per
+    /// main-loop iteration, next to `drain_tasks`; the reload itself
+    /// happens in `apply_fs_refresh`, which this ends with so a change is
+    /// on screen at the top of the very next iteration rather than a poll
+    /// interval later.
+    pub fn drain_fs_events(&mut self) {
+        let Some(watcher) = self.watcher.as_ref() else {
+            return;
+        };
+        // Reported as the very paths `maybe_resync_watches` registered —
+        // each pane's `cwd` — so this is a plain equality check rather
+        // than any kind of path matching (`DirWatcher` owns the symlink
+        // resolution that makes that true).
+        let changed = watcher.changed_dirs();
+        for dir in &changed {
+            for idx in 0..2 {
+                if &self.panes[idx].cwd == dir {
+                    self.fs_dirty[idx] = true;
+                }
+            }
+        }
+        self.apply_fs_refresh();
+    }
+
+    /// Reloads whichever panes an external change touched, once it is safe
+    /// to do so.
+    ///
+    /// Deferred entirely while anything but `Mode::Normal` is up: a
+    /// listing shifting under an open prompt or dialog is a real hazard,
+    /// since several pending operations captured entry paths when they
+    /// opened, and a viewer/help/settings screen isn't showing the listing
+    /// anyway. The dirty flags survive until then, so the refresh happens
+    /// the moment the modal closes rather than being lost.
+    ///
+    /// Uses the same cursor-preserving reload `C-r` does, with the same
+    /// consequences: marks on entries that vanished linger until the pane
+    /// leaves the directory, and a cursor sitting on a file someone else
+    /// just deleted lands back at the top.
+    fn apply_fs_refresh(&mut self) {
+        if !matches!(self.mode, Mode::Normal) || self.fs_dirty == [false, false] {
+            return;
+        }
+        for idx in 0..2 {
+            if !std::mem::replace(&mut self.fs_dirty[idx], false) {
+                continue;
+            }
+            if let Err(err) = self.panes[idx].reload_preserving_cursor() {
+                push_log_line(
+                    &mut self.log,
+                    &mut self.log_generation,
+                    err.to_string(),
+                    true,
+                );
+            }
+            // The directory changed, so its git state plausibly did too.
+            self.git_checked_dir[idx] = None;
+        }
+        // `AppEvent::Tick` deliberately doesn't mark the frame dirty, so a
+        // refresh that lands on one has to say so itself or it wouldn't be
+        // drawn until the next keypress.
+        self.needs_redraw = true;
+    }
+
+    /// Marks pane `which` as needing an external-change reload, exactly as
+    /// a real watcher event would. The seam the auto-refresh tests drive,
+    /// so they never depend on OS watcher delivery timing.
+    #[cfg(test)]
+    pub(crate) fn mark_fs_dirty_for_test(&mut self, which: ActivePane) {
+        self.fs_dirty[which.index()] = true;
     }
 
     /// Spawns one background `git status` probe for pane `idx`'s cwd,
@@ -905,6 +1064,10 @@ impl App {
             }
             Action::SwapPanes => {
                 self.panes.swap(0, 1);
+                Ok(())
+            }
+            Action::MatchOtherPane => {
+                self.begin_match_other_pane();
                 Ok(())
             }
             Action::Refresh => {
@@ -1202,16 +1365,23 @@ impl App {
         self.sort_prefs.record(cwd, key.as_str(), ascending);
     }
 
-    /// Restores the active pane's remembered sort for its (new) cwd, if
-    /// one was recorded; otherwise the pane keeps whatever sort it already
-    /// had (the pre-existing "sort follows the pane" behavior).
-    fn apply_sort_pref_to_active(&mut self) {
-        let cwd = self.active_pane().cwd.clone();
+    /// Restores `which` pane's remembered sort for its (new) cwd, if one
+    /// was recorded; otherwise the pane keeps whatever sort it already had
+    /// (the pre-existing "sort follows the pane" behavior).
+    fn apply_sort_pref_to(&mut self, which: ActivePane) {
+        let cwd = self.panes[which.index()].cwd.clone();
         if let Some((key_str, ascending)) = self.sort_prefs.get(&cwd)
             && let Some(key) = SortKey::from_str(key_str)
         {
-            self.active_pane_mut().set_sort(key, ascending);
+            self.panes[which.index()].set_sort(key, ascending);
         }
+    }
+
+    /// The active-pane case of `apply_sort_pref_to` — kept as its own name
+    /// because `begin_history_back`/`begin_history_forward` deliberately
+    /// bypass `navigate` and have to call it by hand.
+    fn apply_sort_pref_to_active(&mut self) {
+        self.apply_sort_pref_to(self.active);
     }
 
     /// Applies loaded sort preferences to both panes' startup directories —
@@ -1249,36 +1419,48 @@ impl App {
         }
     }
 
-    /// Runs `f` against the active pane and, if its `cwd` actually
-    /// changed, records the new directory in `history`. The shared
-    /// entry point for every cwd-changing action (`Enter`, `Parent`,
-    /// history/bookmark/home jumps) so history recording lives in exactly
-    /// one place instead of being duplicated at each call site.
-    fn navigate(&mut self, f: impl FnOnce(&mut Pane) -> anyhow::Result<()>) {
-        let before = self.active_pane().cwd.clone();
-        let result = f(self.active_pane_mut());
-        self.record_history_if_changed(&before);
+    /// Runs `f` against `which` pane and, if its `cwd` actually changed,
+    /// records the move in *that* pane's history. The generalized form of
+    /// `navigate`: cwd-changing bookkeeping still lives in exactly one
+    /// place, it just no longer has to be the *active* pane — see
+    /// `begin_match_other_pane`, the one action that moves the other one.
+    fn navigate_pane(
+        &mut self,
+        which: ActivePane,
+        f: impl FnOnce(&mut Pane) -> anyhow::Result<()>,
+    ) {
+        let before = self.panes[which.index()].cwd.clone();
+        let result = f(&mut self.panes[which.index()]);
+        self.record_history_if_changed_for(which, &before);
         if let Err(err) = result {
             self.log_error(err.to_string());
         }
     }
 
-    /// Records `before` in the persisted MRU history *and* pushes it onto
-    /// the active pane's `back` stack (clearing `forward`, same as a real
-    /// browser navigating somewhere new) — but only when `cwd` actually
-    /// changed, so a failed/no-op navigation doesn't pollute either. This
-    /// is the single choke point every cwd-changing action goes through
-    /// (`navigate`), so `history_back`/`history_forward` deliberately
-    /// bypass it (see `begin_history_back`) — walking the stack must not
-    /// re-push onto itself.
-    fn record_history_if_changed(&mut self, before: &Path) {
-        let after = self.active_pane().cwd.clone();
+    /// The active-pane case: the shared entry point for every ordinary
+    /// cwd-changing action (`Enter`, `Parent`, history/bookmark/home
+    /// jumps).
+    fn navigate(&mut self, f: impl FnOnce(&mut Pane) -> anyhow::Result<()>) {
+        self.navigate_pane(self.active, f);
+    }
+
+    /// Records `before` in the persisted MRU history for `which` pane's
+    /// side *and* pushes it onto that pane's `back` stack (clearing
+    /// `forward`, same as a real browser navigating somewhere new) — but
+    /// only when `cwd` actually changed, so a failed/no-op navigation
+    /// doesn't pollute either. Reached only through `navigate_pane`, the
+    /// single choke point every cwd-changing action goes through, so
+    /// `history_back`/`history_forward` deliberately bypass it (see
+    /// `begin_history_back`) — walking the stack must not re-push onto
+    /// itself.
+    fn record_history_if_changed_for(&mut self, which: ActivePane, before: &Path) {
+        let after = self.panes[which.index()].cwd.clone();
         if after.as_path() != before {
-            self.history.record(self.active.into(), after);
-            let pane = self.active_pane_mut();
+            self.history.record(which.into(), after);
+            let pane = &mut self.panes[which.index()];
             pane.back.push(before.to_path_buf());
             pane.forward.clear();
-            self.apply_sort_pref_to_active();
+            self.apply_sort_pref_to(which);
         }
     }
 
@@ -1330,7 +1512,45 @@ impl App {
     }
 
     fn jump_active_pane_to(&mut self, path: PathBuf) {
-        self.navigate(|pane| pane.jump_to(path));
+        self.jump_pane_to(self.active, path);
+    }
+
+    /// `jump_active_pane_to` for an arbitrary pane — the inactive one, in
+    /// practice (see `begin_match_other_pane`).
+    fn jump_pane_to(&mut self, which: ActivePane, path: PathBuf) {
+        self.navigate_pane(which, |pane| pane.jump_to(path));
+    }
+
+    /// `_`: points the *inactive* pane at the active pane's directory. A
+    /// real cd on that pane — recorded in its own `Side` history ring,
+    /// pushed onto its own `back` stack with `forward` cleared, and its
+    /// destination's per-directory sort preference applied — not a
+    /// cosmetic copy of a path. The active pane and the focus both stay
+    /// exactly where they are, and nothing on disk is touched (contrast
+    /// `W`/`begin_sync_dirs`, which copies files).
+    ///
+    /// Refused while the *active* pane is inside a Virtual Directory: its
+    /// `cwd` there still names the real directory *containing* the
+    /// archive, so mirroring it would silently send the other pane
+    /// somewhere the user isn't actually looking. The *destination* pane
+    /// being virtual is fine — `Pane::jump_to` exits the archive as a side
+    /// effect, which is exactly what's wanted, and is why the
+    /// already-same-directory guard below has to exclude that case.
+    fn begin_match_other_pane(&mut self) {
+        if self.reject_if_virtual("match_other_pane") {
+            return;
+        }
+        let target = self.active_pane().cwd.clone();
+        // Short-circuits *before* `Pane::jump_to`, which is not free even
+        // on an unchanged cwd: it clears the other pane's marks, filter,
+        // computed directory sizes and git state and resets its cursor.
+        // Letting a same-directory press through would silently wipe all
+        // of that.
+        if self.other_pane().cwd == target && !self.other_pane().is_virtual() {
+            self.log_error("both panes already show the same directory");
+            return;
+        }
+        self.jump_pane_to(self.active.other(), target);
     }
 
     /// Enters `Mode::Confirm`: shows `message`, then runs `on_yes` (via
@@ -1868,6 +2088,10 @@ impl App {
                 for pane in &mut self.panes {
                     pane.set_natural_sort(natural);
                 }
+                // `auto_refresh` may have just been toggled — start the
+                // watcher if it went on, drop it (which unregisters every
+                // watch) if it went off.
+                self.sync_watcher_to_config();
                 self.log_info("config reloaded");
             }
             Err(err) => self.log_error(format!("config reload failed: {err}")),
@@ -2538,11 +2762,14 @@ impl App {
             }
             PasswordPending::Unzip {
                 archive_path,
-                dest_dir,
+                dest_root,
             } => {
                 // No VirtualDir session here (`u` runs from a real pane) —
                 // nothing to cache the password on; it just rides the op.
-                self.continue_unzip(archive_path, dest_dir, Some(password));
+                // Reached exactly once per `u` press: a wrong password is
+                // rejected above and re-prompts without ever getting here,
+                // so `continue_unzip`'s directory creation runs once.
+                self.continue_unzip(archive_path, dest_root, Some(password));
             }
         }
     }

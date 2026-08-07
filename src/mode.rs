@@ -95,11 +95,16 @@ pub enum PasswordPending {
         inner_targets: Vec<PathBuf>,
         dest_dir: PathBuf,
     },
-    /// A whole-archive `u` unzip (continues into the overwrite-confirm
-    /// flow once the password verifies).
+    /// A whole-archive `u` unzip (spawns straight away once the password
+    /// verifies — there is no overwrite confirm any more, since `u`
+    /// extracts into a freshly created directory). `dest_root` is the
+    /// other pane's cwd, *not* the final destination: the stem-named
+    /// subdirectory under it is only created once the extraction actually
+    /// spawns, so cancelling this prompt leaves nothing behind. See
+    /// `App::continue_unzip`.
     Unzip {
         archive_path: PathBuf,
-        dest_dir: PathBuf,
+        dest_root: PathBuf,
     },
 }
 
@@ -395,14 +400,6 @@ pub enum PendingOp {
     ZipOverwrite {
         targets: Vec<PathBuf>,
         archive_path: PathBuf,
-    },
-    /// One or more top-level entries in the archive already exist in the
-    /// destination directory; overwrite them. `password` (already
-    /// verified at prompt time) rides along for an encrypted zip.
-    UnzipOverwrite {
-        archive_path: PathBuf,
-        dest_dir: PathBuf,
-        password: Option<String>,
     },
     /// A confirmed extraction from a Virtual Directory (`C` while the
     /// active pane is browsing inside a `.zip`): a partial extraction of

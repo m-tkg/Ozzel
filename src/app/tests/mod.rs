@@ -1,4 +1,5 @@
 mod attr_ops;
+mod auto_refresh;
 mod diff_action;
 mod dispatch;
 mod external;
@@ -12,4 +13,5 @@ mod settings;
 mod sorting;
 mod startup;
 mod sync_dirs;
+mod unzip;
 mod virtual_dir;

@@ -119,6 +119,14 @@ fn default_mouse() -> bool {
     true
 }
 
+/// Panes pick up external changes (a file added or edited by Finder, or by
+/// another shell) on their own by default, via an OS filesystem watch —
+/// see `App::enable_directory_watching`. `auto_refresh = false` turns the
+/// watch off entirely, leaving `C-r` as the only way to reload.
+fn default_auto_refresh() -> bool {
+    true
+}
+
 /// The git status column (per-row markers + a branch tag in the pane
 /// header, inside a git work tree only) is shown by default; set
 /// `show_git_status = false` to disable the background `git status`
@@ -330,6 +338,13 @@ pub struct Config {
     /// leaves the terminal's native text selection usable instead.
     #[serde(default = "default_mouse")]
     pub mouse: bool,
+    /// Whether each pane watches its directory for external changes and
+    /// reloads itself when one lands — see `App::drain_fs_events` /
+    /// `App::apply_fs_refresh`. `false` registers no watch at all, so a
+    /// listing only ever changes in response to something ozzel itself
+    /// did, or to `C-r`.
+    #[serde(default = "default_auto_refresh")]
+    pub auto_refresh: bool,
     /// `combo -> action_name`; `"none"` unbinds. Applied to the default
     /// keymap first (see `App::new`).
     pub keys: HashMap<String, String>,
@@ -365,6 +380,7 @@ impl Default for Config {
             show_permissions: default_show_permissions(),
             show_git_status: default_show_git_status(),
             mouse: default_mouse(),
+            auto_refresh: default_auto_refresh(),
             keys: HashMap::new(),
             bindings: HashMap::new(),
             viewers: HashMap::new(),

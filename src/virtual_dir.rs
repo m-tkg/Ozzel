@@ -236,6 +236,20 @@ pub enum TarCompression {
     Xz,
 }
 
+/// Every compound tar suffix, longest-match-first within each compression
+/// family so `.tar.gz` is claimed before `.tar` ever gets a look. Shared by
+/// [`detect_archive_kind`] and [`archive_stem`] precisely so the two can
+/// never disagree about which suffixes exist.
+const TAR_SUFFIXES: &[(&str, TarCompression)] = &[
+    (".tar.gz", TarCompression::Gzip),
+    (".tgz", TarCompression::Gzip),
+    (".tar.bz2", TarCompression::Bzip2),
+    (".tbz2", TarCompression::Bzip2),
+    (".tar.xz", TarCompression::Xz),
+    (".txz", TarCompression::Xz),
+    (".tar", TarCompression::Plain),
+];
+
 /// Detects which archive backend (if any) `path` names, purely from its
 /// filename — case-insensitive, and, for the tar family, matching the
 /// *whole* compound suffix (`.tar.gz`, not just `.gz`) rather than
@@ -244,15 +258,6 @@ pub enum TarCompression {
 /// all" to every caller (`is_archive_file`/`App::begin_open`).
 pub fn detect_archive_kind(path: &Path) -> Option<ArchiveKind> {
     let name = path.file_name()?.to_str()?.to_lowercase();
-    const TAR_SUFFIXES: &[(&str, TarCompression)] = &[
-        (".tar.gz", TarCompression::Gzip),
-        (".tgz", TarCompression::Gzip),
-        (".tar.bz2", TarCompression::Bzip2),
-        (".tbz2", TarCompression::Bzip2),
-        (".tar.xz", TarCompression::Xz),
-        (".txz", TarCompression::Xz),
-        (".tar", TarCompression::Plain),
-    ];
     if name.ends_with(".zip") {
         return Some(ArchiveKind::Zip);
     }
@@ -282,6 +287,50 @@ pub fn detect_archive_kind(path: &Path) -> Option<ArchiveKind> {
 /// plain viewer like any other file.
 pub fn is_archive_file(path: &Path) -> bool {
     detect_archive_kind(path).is_some()
+}
+
+/// `name` with `suffix` cut off its end, comparing case-insensitively —
+/// `None` when it doesn't end that way.
+///
+/// Deliberately not `name.to_lowercase().strip_suffix(..)`: `to_lowercase`
+/// is Unicode-aware and can *change the byte length* (`İ` U+0130 lowercases
+/// to two chars), so a length measured on the lowercased string can slice
+/// the original at a non-char boundary and panic. Suffixes here are all
+/// ASCII, so an ASCII-case-insensitive tail compare on the original bytes
+/// is both correct and cheaper. (`detect_archive_kind` gets away with
+/// `to_lowercase` because it only ever uses the result as a boolean.)
+fn strip_suffix_ci(name: &str, suffix: &str) -> Option<String> {
+    let cut = name.len().checked_sub(suffix.len())?;
+    (name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(suffix))
+        .then(|| name[..cut].to_string())
+}
+
+/// The bare name a multi-file archive extracts under: its file name with
+/// the *whole* recognized archive suffix removed (`project.tar.gz` ->
+/// `project`, `Photos.ZIP` -> `Photos`), matching the same compound
+/// suffixes [`detect_archive_kind`] does rather than `Path::file_stem`,
+/// which would leave `project.tar`.
+///
+/// Falls back to the full file name when stripping would leave nothing (a
+/// file literally named `.tar.gz`) or when the name isn't a recognized
+/// archive at all, so the caller always has a usable directory name. Only
+/// meaningful for `Zip`/`Tar` — an `ArchiveKind::Single` payload gets no
+/// wrapper directory and uses [`single_payload_name`] instead. See
+/// `App::continue_unzip`.
+pub fn archive_stem(archive_path: &Path) -> String {
+    let name = archive_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stripped = strip_suffix_ci(&name, ".zip").or_else(|| {
+        TAR_SUFFIXES
+            .iter()
+            .find_map(|(suffix, _)| strip_suffix_ci(&name, suffix))
+    });
+    match stripped {
+        Some(stem) if !stem.is_empty() => stem,
+        _ => name,
+    }
 }
 
 /// Renders `inner` (an archive-internal path) the way the pane header and
@@ -432,7 +481,7 @@ pub fn open_single_reader(
 /// that's absolute or escapes the archive root) are silently excluded
 /// entirely — they're simply never shown, so there's nothing for a later
 /// `open`/extract to act on. This is stricter than
-/// `tasks::archive::run_unzip`'s "log and skip" policy since a plain
+/// `tasks::archive::run_extract`'s "log and skip" policy, since a plain
 /// directory listing has nowhere to log to.
 fn read_zip_raw_entries(archive_path: &Path) -> Result<Vec<RawEntry>> {
     let file = fs::File::open(archive_path)
@@ -655,6 +704,8 @@ pub fn open_tar_archive(
 /// Whether any entry in `archive_path` (a zip) is encrypted — the cheap
 /// metadata-only scan `begin_extract`/`begin_unzip` use to decide whether
 /// to ask for a password *before* spawning a task that would only fail.
+/// Both callers gate this behind an `ArchiveKind::Zip` check: it opens its
+/// argument *as a zip*, so probing a tar with it would fail opaquely.
 pub fn zip_has_encrypted_entries(archive_path: &Path) -> Result<bool> {
     let file = fs::File::open(archive_path)
         .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
@@ -879,6 +930,37 @@ mod tests {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
     use zip::{CompressionMethod, ZipWriter};
+
+    #[test]
+    fn archive_stem_strips_the_whole_compound_suffix() {
+        // `Path::file_stem` would leave `project.tar` for the first three.
+        for (name, expected) in [
+            ("project.tar.gz", "project"),
+            ("project.tgz", "project"),
+            ("project.tar.bz2", "project"),
+            ("project.tbz2", "project"),
+            ("project.tar.xz", "project"),
+            ("project.txz", "project"),
+            ("project.tar", "project"),
+            ("project.zip", "project"),
+        ] {
+            assert_eq!(archive_stem(Path::new(name)), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn archive_stem_is_case_insensitive_like_detect_archive_kind() {
+        assert_eq!(archive_stem(Path::new("Photos.ZIP")), "Photos");
+        assert_eq!(archive_stem(Path::new("X.Tar.Gz")), "X");
+    }
+
+    #[test]
+    fn archive_stem_falls_back_to_the_whole_name() {
+        // Stripping would leave nothing...
+        assert_eq!(archive_stem(Path::new(".tar.gz")), ".tar.gz");
+        // ...and an unrecognized name has nothing to strip.
+        assert_eq!(archive_stem(Path::new("notes.txt")), "notes.txt");
+    }
 
     fn make_archive() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
