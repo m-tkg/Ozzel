@@ -181,7 +181,8 @@ impl Keymap {
     /// pane's own browser-style back/forward stack (distinct from `S-h`'s
     /// persisted MRU menu), `c` duplicates the cursor entry under a new
     /// name in the same directory, `y` copies its absolute path to the
-    /// clipboard, `S-l` (capital `L`) opens the full in-memory log,
+    /// clipboard (`Y` copies the pane's own directory instead, which is
+    /// why sync sits on `W`), `S-l` (capital `L`) opens the full in-memory log,
     /// `S-f` (capital `F`) opens the function-list command palette,
     /// `\` opens prefix-jump search (pure cursor movement to the first
     /// visible entry starting with what's typed — distinct from `f`/`/`'s
@@ -247,7 +248,8 @@ impl Keymap {
             ("T", Touch),
             ("I", FileInfo),
             ("=", Diff),
-            ("Y", SyncDirs),
+            ("W", SyncDirs),
+            ("Y", CopyDirPath),
             ("h", Help),
             ("?", Help),
             ("H", HistoryJump),
@@ -644,6 +646,16 @@ mod tests {
         assert_eq!(
             km.resolve(KeyCode::Char('y'), KeyModifiers::NONE),
             Some(Action::CopyPath)
+        );
+        // The shifted pair copies the pane's own directory; sync moved off
+        // `Y` to `W` to make room for it.
+        assert_eq!(
+            km.resolve(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+            Some(Action::CopyDirPath)
+        );
+        assert_eq!(
+            km.resolve(KeyCode::Char('W'), KeyModifiers::SHIFT),
+            Some(Action::SyncDirs)
         );
     }
 

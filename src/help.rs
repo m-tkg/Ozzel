@@ -65,7 +65,7 @@ const FIXED_KEY_LINES: &[&str] = &[
     "Prompt (rename/mkdir/zip name/touch time/:command): Enter confirm, Esc cancel, Backspace/Delete/Left/Right/Home/End edit",
     "Confirm dialogs: y/Y proceed, n/N/Esc cancel, any other key is ignored",
     "Chmod dialog: arrows move over the rwx grid, Space toggles, 0-7 set the highlighted row, Enter applies, Esc cancels",
-    "Sync dialog (Y): Up/Down (or your cursor_up/cursor_down keys) choose update copy vs mirror, Enter confirms (mirror always re-confirms its deletions), Esc cancels",
+    "Sync dialog (W): Up/Down (or your cursor_up/cursor_down keys) choose update copy vs mirror, Enter confirms (mirror always re-confirms its deletions), Esc cancels",
     "Overwrite dialog: Up/Down (or your cursor_up/cursor_down keys) choose, Enter answers for this file, Esc cancels the whole transfer",
     "File info: Esc/Enter/q close",
     "Select menu (history/bookmarks): Up/Down (or your cursor_up/cursor_down keys) move, Enter select, Esc cancel; bookmarks only: d delete, Shift+Up/Shift+Down reorder (saved immediately)",

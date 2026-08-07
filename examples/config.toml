@@ -202,13 +202,17 @@ executable = "yellow"
 # (unassigned by default; x is an unused key by default)
 # "x" = "open_default"
 
-# List of available action names:
+# List of available action names (the [bindings] section below always
+# lists every one of them with its default key, so that is the
+# authoritative list if this comment ever falls behind):
 # cursor_up, cursor_down, focus_left, focus_right, page_up, page_down,
-# top, bottom, switch_pane, open, parent, cycle_sort, toggle_hidden,
-# swap_panes, refresh, mark, mark_all, rename, mkdir, delete, copy, move,
-# duplicate, copy_path, filter, clear_filter, jump_search, file_search,
-# zip_marked, unzip,
-# cancel_tasks, history_jump, history_back, history_forward, bookmark_jump,
+# top, bottom, switch_pane, open, parent, cycle_sort, sort_dialog,
+# toggle_size_format, calc_dir_size, toggle_hidden, swap_panes, refresh,
+# mark, mark_all, rename, rename_marks, mkdir, delete, copy, move,
+# duplicate, copy_path, copy_dir_path, filter, clear_filter, jump_search,
+# file_search, zip_marked, unzip, cancel_tasks, symlink, chmod, touch,
+# file_info, diff, sync_dirs,
+# history_jump, history_back, history_forward, bookmark_jump,
 # bookmark_add, go_home, command_line, open_editor, open_default,
 # help, edit_config, show_log, function_list, settings, quit
 
@@ -262,6 +266,7 @@ copy = ["C"]
 move = ["M"]
 duplicate = ["c"]
 copy_path = ["y"]
+copy_dir_path = ["Y"]
 zip_marked = ["p"]
 unzip = ["u"]
 cancel_tasks = ["C-k"]
@@ -270,7 +275,7 @@ chmod = ["A"]
 touch = ["T"]
 file_info = ["I"]
 diff = ["="]
-sync_dirs = ["Y"]
+sync_dirs = ["W"]
 filter = ["/", "f"]
 clear_filter = ["Esc"]
 jump_search = ["\\"]

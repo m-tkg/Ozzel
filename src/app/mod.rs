@@ -1023,6 +1023,10 @@ impl App {
                 self.begin_copy_path();
                 Ok(())
             }
+            Action::CopyDirPath => {
+                self.begin_copy_dir_path();
+                Ok(())
+            }
             Action::Duplicate => {
                 self.begin_duplicate();
                 Ok(())
@@ -1817,31 +1821,72 @@ impl App {
     }
 
     /// `y` (copy_path): copies the cursor entry's absolute path to the
-    /// system clipboard via an OSC 52 terminal escape (see
-    /// `external::osc52_copy_sequence`, written to stdout by `main.rs`'s
-    /// loop once it drains `pending_clipboard`) — works over SSH/tmux and
-    /// needs no extra dependency, unlike a native-clipboard crate. Never
-    /// fails loudly: a terminal that doesn't understand OSC 52 just
-    /// silently ignores it (no reliable way to detect support up front),
-    /// so this always logs success rather than trying to guess.
+    /// system clipboard. On the `..` row there's no entry to name, so it
+    /// copies the directory `..` would navigate to instead — the same
+    /// destination `Pane::enter` would take, which for a virtual pane at
+    /// the archive root means the real directory holding the archive.
     fn begin_copy_path(&mut self) {
         let pane = self.active_pane();
-        let Some(path) = pane.selected_entry_path() else {
+        let text = if let Some(path) = pane.selected_entry_path() {
+            self.clipboard_path_text(&path)
+        } else if pane.cursor_is_parent_row() {
+            match &pane.virtual_dir {
+                // Inside the archive: one level up, still archive-internal.
+                Some(vd) if !vd.inner.as_os_str().is_empty() => {
+                    let parent = vd.inner.parent().unwrap_or(Path::new(""));
+                    format!("{}:{}", vd.archive_name, virtual_dir::inner_display(parent))
+                }
+                // At the archive root `..` leaves the archive entirely, and
+                // `cwd` still points at the real directory it came from.
+                Some(_) => pane.cwd.to_string_lossy().into_owned(),
+                None => match pane.cwd.parent() {
+                    Some(parent) => parent.to_string_lossy().into_owned(),
+                    // Unreachable in practice: `visible_entries` omits the
+                    // `..` row at the filesystem root.
+                    None => pane.cwd.to_string_lossy().into_owned(),
+                },
+            }
+        } else {
             self.log_error("no entry selected to copy the path of");
             return;
         };
-        // Non-mutating, so unlike the rename/delete/etc. family this
-        // isn't rejected in a virtual pane — but `path` there is only an
-        // archive-internal path (`Pane::virtual_dir`'s doc comment), not a
-        // real absolute one, so it's formatted the same way the pane
-        // header is (`archive.zip:/inner/path`) rather than misleadingly
-        // presented as a real filesystem path.
+        self.queue_clipboard(text);
+    }
+
+    /// `Y` (copy_dir_path): copies the active pane's own directory,
+    /// whatever the cursor happens to be on.
+    fn begin_copy_dir_path(&mut self) {
+        let pane = self.active_pane();
         let text = match &pane.virtual_dir {
-            Some(vd) => format!("{}:{}", vd.archive_name, virtual_dir::inner_display(&path)),
-            None => path.to_string_lossy().into_owned(),
+            Some(vd) => virtual_dir::header_label(vd),
+            None => pane.cwd.to_string_lossy().into_owned(),
         };
-        self.outbox.clipboard = Some(text.clone());
+        self.queue_clipboard(text);
+    }
+
+    /// Renders a path for the clipboard the way the pane header shows it.
+    /// Non-mutating, so unlike the rename/delete/etc. family the copy
+    /// actions aren't rejected in a virtual pane — but a path there is only
+    /// archive-internal (`Pane::virtual_dir`'s doc comment), not a real
+    /// absolute one, so it's formatted as `archive.zip:/inner/path` rather
+    /// than misleadingly presented as a real filesystem path.
+    fn clipboard_path_text(&self, path: &Path) -> String {
+        match &self.active_pane().virtual_dir {
+            Some(vd) => format!("{}:{}", vd.archive_name, virtual_dir::inner_display(path)),
+            None => path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Hands `text` to `main.rs`'s loop, which writes it out as an OSC 52
+    /// terminal escape (see `external::osc52_copy_sequence`) — that works
+    /// over SSH/tmux and needs no extra dependency, unlike a
+    /// native-clipboard crate. Never fails loudly: a terminal that doesn't
+    /// understand OSC 52 just silently ignores it (no reliable way to
+    /// detect support up front), so this always logs success rather than
+    /// trying to guess.
+    fn queue_clipboard(&mut self, text: String) {
         self.log_info(format!("copied: {text}"));
+        self.outbox.clipboard = Some(text);
     }
 
     /// `F`/`S-f`: opens the command palette with an empty filter (every

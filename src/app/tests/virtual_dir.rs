@@ -72,6 +72,50 @@ fn virtual_directory_navigation_descends_and_exits_with_cursor_restored() {
 }
 
 #[test]
+fn copy_dir_path_inside_an_archive_uses_the_header_label() {
+    let dir = tempfile::tempdir().unwrap();
+    make_test_archive(dir.path());
+    let mut app = test_app(dir.path(), dir.path());
+    move_cursor_onto(app.active_pane_mut(), "project.zip");
+    app.dispatch(Action::Open);
+
+    app.dispatch(Action::CopyDirPath);
+    assert_eq!(app.outbox.clipboard.as_deref(), Some("project.zip:/"));
+
+    move_cursor_onto(app.active_pane_mut(), "src");
+    app.dispatch(Action::Open);
+    app.dispatch(Action::CopyDirPath);
+    assert_eq!(app.outbox.clipboard.as_deref(), Some("project.zip:/src"));
+}
+
+#[test]
+fn copy_path_on_the_parent_row_inside_an_archive_walks_back_out() {
+    let dir = tempfile::tempdir().unwrap();
+    make_test_archive(dir.path());
+    let mut app = test_app(dir.path(), dir.path());
+    move_cursor_onto(app.active_pane_mut(), "project.zip");
+    app.dispatch(Action::Open);
+    move_cursor_onto(app.active_pane_mut(), "src");
+    app.dispatch(Action::Open);
+
+    // In "src", ".." is the archive root — still an archive-internal path.
+    app.active_pane_mut().cursor = 0;
+    assert!(app.active_pane().cursor_is_parent_row());
+    app.dispatch(Action::CopyPath);
+    assert_eq!(app.outbox.clipboard.as_deref(), Some("project.zip:/"));
+
+    // At the archive root, ".." leaves the archive, so it names the real
+    // directory the archive sits in.
+    app.dispatch(Action::Parent);
+    app.active_pane_mut().cursor = 0;
+    app.dispatch(Action::CopyPath);
+    assert_eq!(
+        app.outbox.clipboard.as_deref(),
+        Some(dir.path().to_string_lossy().as_ref())
+    );
+}
+
+#[test]
 fn extract_via_copy_copies_marked_entry_to_the_other_panes_real_cwd() {
     let src_dir = tempfile::tempdir().unwrap();
     let dest_dir = tempfile::tempdir().unwrap();

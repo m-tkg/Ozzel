@@ -343,7 +343,7 @@ pub fn render_transfer_collision(frame: &mut Frame, area: Rect, mode: &Mode) {
     frame.render_widget(List::new(rows), inner);
 }
 
-/// Draws the sync-mode dialog (`Mode::SyncSelect`, the `Y` action): the
+/// Draws the sync-mode dialog (`Mode::SyncSelect`, the `W` action): the
 /// source/destination info lines and the two `SYNC_CHOICES` rows with the
 /// highlight on `cursor` — same info-lines-plus-choices layout as the
 /// transfer-collision dialog. No-op if `mode` is not `SyncSelect`.

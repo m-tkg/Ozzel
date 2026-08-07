@@ -549,7 +549,7 @@ pub enum Mode {
         /// (`FilterSpec::error`), shown under the input line.
         error: Option<String>,
     },
-    /// The sync-mode dialog (`Y`): choose between "update copy" and
+    /// The sync-mode dialog (`W`): choose between "update copy" and
     /// "mirror" for syncing the active pane's directory onto the other
     /// pane's (see `SYNC_CHOICES` / `App::handle_sync_select_key`).
     /// `src`/`dest` are captured at open time, like every other dialog.

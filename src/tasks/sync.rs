@@ -1,4 +1,4 @@
-//! The directory-sync (`Y`) worker: makes the destination pane's
+//! The directory-sync (`W`) worker: makes the destination pane's
 //! directory match the source pane's, in one of two modes chosen in the
 //! sync dialog — *update* (copy new/missing files only, never delete)
 //! or *mirror* (update **plus** delete whatever exists only in the

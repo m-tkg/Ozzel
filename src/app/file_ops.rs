@@ -828,7 +828,7 @@ impl App {
         }
     }
 
-    /// `Y` (sync_dirs): opens the sync-mode dialog for syncing the active
+    /// `W` (sync_dirs): opens the sync-mode dialog for syncing the active
     /// pane's whole directory onto the other pane's. Same-directory and
     /// nested (either-way) pane pairs are rejected up front — a mirror of
     /// a directory into its own ancestor/descendant would eat itself.

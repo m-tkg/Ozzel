@@ -56,8 +56,13 @@ pub enum Action {
     /// `App::begin_duplicate`.
     Duplicate,
     /// Copies the cursor entry's absolute path to the system clipboard
-    /// (via an OSC 52 terminal escape — see `App::begin_copy_path`).
+    /// (via an OSC 52 terminal escape — see `App::begin_copy_path`). On
+    /// the `..` row it copies the parent directory, the one `..` would
+    /// navigate to.
     CopyPath,
+    /// Copies the active pane's own directory to the clipboard, whatever
+    /// the cursor is on — see `App::begin_copy_dir_path`.
+    CopyDirPath,
     /// Creates symbolic links to the marked (or cursor) entries in the
     /// other pane's directory, pointing at the sources' absolute paths.
     /// See `App::begin_symlink`.
@@ -185,7 +190,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 56] = [
+    pub const ALL: [Action; 57] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -213,6 +218,7 @@ impl Action {
         Action::Move,
         Action::Duplicate,
         Action::CopyPath,
+        Action::CopyDirPath,
         Action::CalcDirSize,
         Action::ZipMarked,
         Action::Unzip,
@@ -252,8 +258,8 @@ impl Action {
             | ToggleHidden | SwapPanes | Refresh => ActionCategory::Movement,
             Mark | MarkAll => ActionCategory::Marks,
             Rename | RenameMarks | Mkdir | Delete | Copy | Move | Duplicate | CopyPath
-            | CalcDirSize | ZipMarked | Unzip | CancelTasks | Symlink | Chmod | Touch
-            | FileInfo | Diff | SyncDirs => ActionCategory::FileOps,
+            | CopyDirPath | CalcDirSize | ZipMarked | Unzip | CancelTasks | Symlink | Chmod
+            | Touch | FileInfo | Diff | SyncDirs => ActionCategory::FileOps,
             Filter | ClearFilter | JumpSearch | FileSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
@@ -294,7 +300,10 @@ impl Action {
             Copy => "Copy marked entries (or the cursor entry) to the other pane",
             Move => "Move marked entries (or the cursor entry) to the other pane",
             Duplicate => "Copy the cursor entry to a new name in the same directory",
-            CopyPath => "Copy the cursor entry's absolute path to the clipboard",
+            CopyPath => {
+                "Copy the cursor entry's absolute path to the clipboard (.. copies the parent)"
+            }
+            CopyDirPath => "Copy the active pane's own directory path to the clipboard",
             ZipMarked => "Zip marked entries (or the cursor entry)",
             Unzip => "Unzip the cursor .zip file",
             CancelTasks => "Cancel all running background tasks",
@@ -359,6 +368,7 @@ impl Action {
             Move => "move",
             Duplicate => "duplicate",
             CopyPath => "copy_path",
+            CopyDirPath => "copy_dir_path",
             Filter => "filter",
             ClearFilter => "clear_filter",
             JumpSearch => "jump_search",
