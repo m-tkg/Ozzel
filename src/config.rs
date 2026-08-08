@@ -207,6 +207,17 @@ fn default_cursor_wrap() -> bool {
     false
 }
 
+/// Leaving a directory remembers where the cursor was in it, and returning
+/// puts the cursor back there, by default. A top-level
+/// `cursor_memory = false` turns that off: every arrival starts at the top
+/// of the listing instead. The memory is per-session (never written to
+/// disk) either way; `..` still lands on the directory just climbed out of
+/// regardless, since that comes from the climb itself rather than from the
+/// remembered positions.
+fn default_cursor_memory() -> bool {
+    true
+}
+
 fn deserialize_color<'de, D>(deserializer: D) -> std::result::Result<Color, D::Error>
 where
     D: Deserializer<'de>,
@@ -325,6 +336,11 @@ pub struct Config {
     /// see `default_cursor_wrap`. Kept top-level like its neighbors.
     #[serde(default = "default_cursor_wrap")]
     pub cursor_wrap: bool,
+    /// Whether a directory's cursor position is remembered across visits —
+    /// see `default_cursor_memory`. Pushed onto both panes by `App`
+    /// (panes never read config), like `natural_sort`.
+    #[serde(default = "default_cursor_memory")]
+    pub cursor_memory: bool,
     /// How the size column renders sizes — cycled by `v`
     /// (toggle_size_format), which persists the choice here.
     #[serde(default)]
@@ -391,6 +407,7 @@ impl Default for Config {
             file_search_incremental: default_file_search_incremental(),
             natural_sort: default_natural_sort(),
             cursor_wrap: default_cursor_wrap(),
+            cursor_memory: default_cursor_memory(),
             size_format: SizeFormat::default(),
             show_permissions: default_show_permissions(),
             show_git_status: default_show_git_status(),

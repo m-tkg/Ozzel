@@ -111,7 +111,7 @@ pub enum ItemKind {
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 15] = [
+pub const BEHAVIOR_ITEMS: [Item; 16] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations (confirm before copy/move)",
@@ -188,6 +188,11 @@ pub const BEHAVIOR_ITEMS: [Item; 15] = [
     Item {
         key: "process_auto_refresh",
         label: "process_auto_refresh (re-run ps every 2s while the process manager is open)",
+        kind: ItemKind::Bool,
+    },
+    Item {
+        key: "cursor_memory",
+        label: "cursor_memory (restore the cursor position when revisiting a directory)",
         kind: ItemKind::Bool,
     },
 ];
@@ -322,6 +327,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "command_line_interactive" => config.command_line_interactive,
                 "natural_sort" => config.natural_sort,
                 "cursor_wrap" => config.cursor_wrap,
+                "cursor_memory" => config.cursor_memory,
                 "show_permissions" => config.show_permissions,
                 "show_git_status" => config.show_git_status,
                 "auto_refresh" => config.auto_refresh,

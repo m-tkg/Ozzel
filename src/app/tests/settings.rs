@@ -431,3 +431,31 @@ fn settings_keybinding_capture_esc_cancels_without_writing() {
     let text = std::fs::read_to_string(&config_path).unwrap();
     assert_eq!(text, "", "Esc during capture must never write anything");
 }
+
+#[test]
+fn settings_toggle_persists_cursor_memory_and_pushes_it_onto_both_panes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, config_path) = settings_test_app(dir.path());
+    assert!(app.config.cursor_memory, "defaults to on");
+    assert!(app.panes.iter().all(|p| p.cursor_memory_enabled));
+
+    let cursor = settings::BEHAVIOR_ITEMS
+        .iter()
+        .position(|item| item.key == "cursor_memory")
+        .unwrap();
+    app.mode = Mode::Settings {
+        screen: SettingsScreen::Items {
+            category: Category::Behavior,
+            cursor,
+        },
+    };
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(!app.config.cursor_memory, "toggled and reloaded");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(text.contains("cursor_memory = false"), "{text}");
+    // The reload has to reach the panes — they never read config
+    // themselves, so a toggle that stops at `app.config` would leave the
+    // feature running.
+    assert!(app.panes.iter().all(|p| !p.cursor_memory_enabled));
+}
