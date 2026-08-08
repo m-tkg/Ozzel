@@ -228,4 +228,31 @@ mod tests {
     fn empty_output_yields_no_statuses() {
         assert!(parse("/repo", b"").is_empty());
     }
+
+    /// On Windows the two paths handed to `parse_porcelain` arrive spelled
+    /// differently: `repo_root` comes from `git rev-parse --show-toplevel`
+    /// (forward slashes, `C:/Users/…`) while `pane_dir` is the pane's own
+    /// `cwd` (backslashes, from `std::env::current_dir` or the command
+    /// line). `strip_prefix` bridges that, since `Path` treats both as
+    /// separators — and the returned keys are built from `pane_dir`, so
+    /// they match the `FsEntry::path`s the pane renders. If this ever
+    /// stopped holding, every marker would silently vanish on Windows as
+    /// "outside the pane directory".
+    #[cfg(windows)]
+    #[test]
+    fn a_forward_slash_repo_root_matches_a_backslash_pane_dir() {
+        let statuses = parse_porcelain(
+            Path::new("C:/Users/x/repo"),
+            Path::new(r"C:\Users\x\repo"),
+            b" M a.txt\0?? sub/b.txt\0",
+        );
+        assert_eq!(
+            statuses[Path::new(r"C:\Users\x\repo\a.txt")],
+            GitMarker::Modified
+        );
+        assert_eq!(
+            statuses[Path::new(r"C:\Users\x\repo\sub")],
+            GitMarker::Untracked
+        );
+    }
 }
