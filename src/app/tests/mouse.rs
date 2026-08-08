@@ -270,7 +270,7 @@ fn wheel_scroll_moves_the_cursor_of_the_pane_under_the_pointer_without_changing_
     app.active = ActivePane::Left;
     app.panes[0].cursor = 0;
     app.handle_mouse(MouseEvent {
-        kind: MouseEventKind::ScrollDown,
+        kind: MouseEventKind::ScrollUp,
         column: 5,
         row: 2,
         modifiers: KeyModifiers::NONE,
@@ -282,11 +282,40 @@ fn wheel_scroll_moves_the_cursor_of_the_pane_under_the_pointer_without_changing_
     // that pane's cursor, and must still not change focus.
     app.panes[1].cursor = 0;
     app.handle_mouse(MouseEvent {
-        kind: MouseEventKind::ScrollDown,
+        kind: MouseEventKind::ScrollUp,
         column: 25,
         row: 2,
         modifiers: KeyModifiers::NONE,
     });
     assert!(app.panes[1].cursor > 0);
     assert_eq!(app.active, ActivePane::Left);
+}
+
+/// The wheel drags the listing, not the cursor: wheel up brings later
+/// entries into view, so the cursor moves *down* the list. Pinned because
+/// it's the opposite of what a reader would assume from the event names.
+#[test]
+fn the_wheel_direction_is_inverted_relative_to_the_event_names() {
+    let (_dir, mut app) = mouse_test_app();
+    app.panes[0].cursor = 0;
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 5,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    });
+    let after_up = app.panes[0].cursor;
+    assert!(after_up > 0, "wheel up moves down the list");
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 5,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(
+        app.panes[0].cursor < after_up,
+        "wheel down moves back up the list"
+    );
 }

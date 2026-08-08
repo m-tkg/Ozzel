@@ -63,14 +63,73 @@ impl App {
     /// mode (see `App::wants_mouse_capture`/`main.rs`'s `sync_mouse_capture`),
     /// so the terminal never even reports a mouse event while one is
     /// showing — that's the whole point, it hands wheel/selection back to
-    /// the terminal's own native scrollback and text selection. Only
-    /// `Normal` has anything to do here; every other mode (including the
-    /// Function List command palette, which keeps capture on but has no
-    /// mouse behavior of its own) ignores mouse input.
+    /// the terminal's own native scrollback and text selection. `Normal`
+    /// and the process manager are the two modes with anything to do here;
+    /// every other mode (including the Function List command palette, which
+    /// keeps capture on but has no mouse behavior of its own) ignores mouse
+    /// input.
     pub(super) fn handle_mouse(&mut self, ev: MouseEvent) {
-        if matches!(self.mode, Mode::Normal) {
-            self.handle_mouse_normal(ev);
+        match self.mode {
+            Mode::Normal => self.handle_mouse_normal(ev),
+            Mode::ProcessManager { .. } => self.handle_mouse_process_manager(ev),
+            _ => {}
         }
+    }
+
+    /// Mouse in the process manager: click a row to put the cursor on that
+    /// process, wheel to scroll the cursor. That's the whole set —
+    /// deliberately no double-click-to-kill (a pane's double-click opens a
+    /// file, which is recoverable; signalling whatever happened to be under
+    /// a stray second click is not, and a confirmation dialog is thin
+    /// protection against a double-click that was already an accident), and
+    /// no drag-select, since this view has no marks to select.
+    ///
+    /// Ignored entirely while a kill confirmation is up: the question owns
+    /// the screen until it's answered, exactly as it does for the keyboard.
+    fn handle_mouse_process_manager(&mut self, ev: MouseEvent) {
+        if matches!(&self.mode, Mode::ProcessManager { state } if state.pending_kill.is_some()) {
+            return;
+        }
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.click_process_row(ev),
+            // Inverted, same as a pane's wheel — see `handle_mouse_wheel`.
+            MouseEventKind::ScrollUp => self.scroll_process_cursor(MOUSE_WHEEL_STEP as isize),
+            MouseEventKind::ScrollDown => self.scroll_process_cursor(-(MOUSE_WHEEL_STEP as isize)),
+            _ => {}
+        }
+    }
+
+    fn click_process_row(&mut self, ev: MouseEvent) {
+        let Some(layout) = self.process_layout else {
+            return;
+        };
+        let Some(row) = hit_test_row(&layout, ev.column, ev.row) else {
+            // The title, the column header, or the footer: nothing to move
+            // the cursor to.
+            return;
+        };
+        let Mode::ProcessManager { state } = &mut self.mode else {
+            return;
+        };
+        // Past the last process (a short list, or the blank space under
+        // one): leave the cursor where it is rather than snapping it to the
+        // end.
+        if row < state.processes.len() {
+            state.cursor = row;
+        }
+    }
+
+    /// Wheel scrolling in the process manager. Clamped at both ends, the
+    /// same as this view's own Up/Down — and unlike a pane's wheel there's
+    /// no `cursor_wrap` to honor, since the setting is about the entry list.
+    fn scroll_process_cursor(&mut self, delta: isize) {
+        let Mode::ProcessManager { state } = &mut self.mode else {
+            return;
+        };
+        let Some(last) = state.processes.len().checked_sub(1) else {
+            return;
+        };
+        state.cursor = (state.cursor as isize + delta).clamp(0, last as isize) as usize;
     }
 
     /// Which pane (if any) `(x, y)` falls inside, by its last-drawn `area`
@@ -106,8 +165,8 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => self.handle_mouse_left_down(ev),
             MouseEventKind::Drag(MouseButton::Left) => self.handle_mouse_left_drag(ev),
             MouseEventKind::Up(MouseButton::Left) => self.drag = None,
-            MouseEventKind::ScrollUp => self.handle_mouse_wheel(ev, -(MOUSE_WHEEL_STEP as isize)),
-            MouseEventKind::ScrollDown => self.handle_mouse_wheel(ev, MOUSE_WHEEL_STEP as isize),
+            MouseEventKind::ScrollUp => self.handle_mouse_wheel(ev, MOUSE_WHEEL_STEP as isize),
+            MouseEventKind::ScrollDown => self.handle_mouse_wheel(ev, -(MOUSE_WHEEL_STEP as isize)),
             _ => {}
         }
     }
@@ -217,6 +276,13 @@ impl App {
     /// tried focus-follow while implementing this and found it more
     /// surprising than leaving focus alone, since a stray wheel tick while
     /// reading the other pane would otherwise silently redirect keystrokes.
+    ///
+    /// The direction is **inverted** relative to the usual list convention:
+    /// wheel *up* moves the cursor *down*. The wheel is treated as dragging
+    /// the listing itself rather than the cursor — push the wheel away and
+    /// the rows travel up past the cursor, bringing later entries into view,
+    /// the same sense as a touchpad's natural scrolling. The process
+    /// manager's wheel matches, so the two screens never disagree.
     fn handle_mouse_wheel(&mut self, ev: MouseEvent, delta: isize) {
         let Some(pane) = self.pane_at(ev.column, ev.row) else {
             return;

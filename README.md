@@ -24,6 +24,7 @@
 - A built-in viewer (open files with `Enter`/`o`; supports displaying Japanese text; `Tab` toggles between text display and an `xxd`-style hex dump). Supports `less`-compatible scrolling (`j`/`k`/`d`/`u`/`f`/`b`/`Space`) and search (`/`, `?`, `n`, `N`, with regex preferred and substring-match fallback, plus match highlighting)
 - Launching external commands with `:` and an editor with `e` (both temporarily suspend the TUI)
 - Command palette (`F`) — incrementally filter and run any action by name
+- A `ps`-backed process manager (`P`, unix only) — a full-screen process list that refreshes itself every 2 seconds, sorts by any column, and can send `SIGTERM`/`SIGKILL` to the process under the cursor (always confirmed)
 - A raspi-config-style settings screen (`S`) — a three-level, full-screen category → item → edit UI that lets you change behavior, colors, startup integration, extension viewers, and key bindings (add/remove, with conflict detection) without editing the config file directly. Edits are saved and applied immediately, and the layout of the existing config file, including comments, is preserved
 - Cursor color (both active and inactive), and the row colors for directories, hidden files, and executable files, are all customizable in settings (named color or `#RRGGBB`)
 - The inactive pane is dimmed (can be disabled in settings)
@@ -349,7 +350,7 @@ A full-screen settings UI structured like `raspi-config`, with three levels: cat
 
 | Category | Contents |
 | --- | --- |
-| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
+| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
 | Colors | Each item under `[colors]` (`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`) |
 | Startup/Integration | `home` / `editor` |
 | Extension Viewers | `[viewers]` (list of extension → launch command; add/edit/delete) |
@@ -367,6 +368,37 @@ How to edit each item type:
 **Settings are saved on the spot.** Every time you edit and confirm an item, only the changed part is written to the [configuration file](#configuration) (using the `toml_edit` crate for diff-based writes, so existing comments and layout are preserved), and the in-app settings are then hot-reloaded immediately. If saving or reloading fails, the value shown on screen reverts to its previous (unchanged) state, and an error is logged. Since changes are saved as you go rather than "all at once when you close the screen," forgetting to close the settings screen never loses your changes.
 
 Regarding where key bindings get written: new additions are always written to `[bindings]` (since `[bindings]` always takes priority over `[keys]`). Deletion removes the combo from `[bindings]` if it's there; otherwise (for a default key binding or one that came from `[keys]`), it writes that combo to `[keys]` as `"none"` — if a `[keys]` line for the same combo already existed, that line is simply overwritten, so the meaning is never left doubly defined. "Taking" a combo is just "delete" followed by "add," in sequence.
+
+### Process Manager
+
+| Key | Action |
+| --- | --- |
+| `P` (Shift+p) | Open the process manager (unix only) |
+
+A full-screen list of every process on the machine, collected by running `ps` and re-collected every 2 seconds while the view is open (so the `%CPU` column keeps moving). Lower-case `p` is already zip compression, hence `Shift+p`.
+
+Columns: `PID`, `PPID`, `USER`, `%CPU`, `%MEM`, `RSS` (human-readable), `STAT` (the raw state letters, which differ between macOS and Linux), `ELAPSED`, and the full `COMMAND` line, truncated to the width left over.
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` (or your `cursor_up`/`cursor_down` keys) | Move the cursor (clamped at both ends; it never wraps) |
+| `PageUp` / `PageDown` | Move a page |
+| `g` / `Home`, `G` / `End` | Jump to the top / bottom |
+| `p` / `u` / `c` / `m` / `s` / `t` / `n` | Sort by PID / USER / %CPU / %MEM / RSS / ELAPSED / COMMAND. Pressing the key of the column already being sorted reverses the direction |
+| `r` | Refresh now (works even with `process_auto_refresh = false`) |
+| `x` | Send `SIGTERM` to the process under the cursor (confirmed with `y`/`n`) |
+| `X` (Shift+x) | Send `SIGKILL` instead (also confirmed) |
+| `q` / `Esc` | Close and return to the filer |
+
+The mouse works here too when `mouse = true`: click a row to move the cursor onto it, wheel to scroll. Double-click does nothing on purpose — see [Mouse](#mouse).
+
+Usage columns (`%CPU`/`%MEM`/`RSS`/`ELAPSED`) start out descending; identity columns (`PID`/`USER`/`COMMAND`) start ascending. The cursor follows its *process*, not its row number — it stays on the same PID across a refresh or a re-sort, so a row can't slide out from under you between aiming at it and pressing `x`. If that process exits, the cursor stays where it was rather than jumping back to the top.
+
+The view's own keys are matched before the keymap is consulted, so remapping `cursor_up`/`cursor_down` onto (say) `c` still leaves `c` meaning "sort by %CPU" in here. Keys that aren't one of the view's own do fall through to your `cursor_up`/`cursor_down` bindings, so the default `i`/`k` work as expected.
+
+`ozzel`'s own process is refused as a kill target (killing it would leave the terminal in raw mode with no chance to restore it), as are PID 0 and PID 1. A kill that fails because the process belongs to someone else, or exited between the snapshot and the keypress, is logged rather than treated as an error. Kill confirmations are always shown regardless of the `confirm_operations` setting.
+
+If `ps` itself fails (not installed, or a non-zero exit), the reason is shown in the footer with the last good snapshot still listed above it, and logged only when the message changes — a failure repeating every 2 seconds never floods the log.
 
 ### Text Viewer
 
@@ -487,13 +519,24 @@ Mouse capture is enabled by default (can be disabled via the `mouse` setting; de
 | --- | --- |
 | Left-click an entry row | Move focus to that pane, and move the cursor to that entry |
 | Left-click a pane's header/margin area | Only moves focus (the cursor does not move) |
-| Scroll the wheel over a pane | Moves only the cursor of the pane under the wheel, 3 lines per notch, without changing focus |
+| Scroll the wheel over a pane | Moves only the cursor of the pane under the wheel, 3 lines per notch, without changing focus. **The direction is inverted**: wheel up moves the cursor *down* the list — the wheel drags the listing rather than the cursor, the same sense as a touchpad's natural scrolling |
 | Left-button drag from an entry row | A live rubber-band selection that toggles (marked → unmarked, unmarked → marked) the range from the drag's starting point to the current position, based on the mark state at the moment the drag started. Since the range is recomputed live as the pointer moves, even a row that was toggled while inside the range **automatically reverts to its pre-drag state** if the pointer moves back out of the range (it is not a permanent toggle — it's a temporary selection that only applies while inside the range). **If the pointer leaves the pane where the drag started, nothing is toggled and focus does not move in the other pane** (this is by design, so selections never leak across the left/right panes) |
 | Double-click an entry row | Same as `open` (navigates if a directory, opens the viewer if a file) |
 
+The [process manager](#process-manager) also takes the mouse while `mouse = true`:
+
+| Action | Behavior |
+| --- | --- |
+| Left-click a process row | Move the cursor to that process |
+| Left-click the title, column header, footer, or the blank space past the last process | Nothing (the cursor stays where it is) |
+| Scroll the wheel | Moves the cursor 3 lines per notch, clamped at both ends. Inverted the same way as a pane's wheel (up moves down the list) |
+| Double-click | **Nothing, by design.** A pane's double-click opens a file, which is recoverable; sending a signal to whatever happened to be under a stray second click is not. Killing is always `x`/`X` plus a confirmation |
+
+While a kill confirmation is up, mouse input in the process manager is ignored entirely, the same as key input other than `y`/`n`/`Esc`.
+
 Other modal screens (prompts, confirmation dialogs, the history/bookmark menu, etc.) ignore mouse input and can only be closed with key operations like `Esc`. Click-to-dismiss is not implemented for any of these screens.
 
-**Mouse capture is automatically suspended while the viewer, the log viewer (`L`), or the help screen (`h`/`?`) is open.** These are full-screen modes for reading file or log contents, so it's more practical to release capture and hand control back to the terminal's native mouse selection/copy. While suspended, all clicks and drags pass straight through to the terminal instead of ozzel, so you can select text with the mouse and copy it as usual (none of these three screens draw decorative characters like borders, so the selection never picks up anything other than the actual content). Returning to the filer by closing one of these three screens with `q`/`Esc` automatically resumes capture if `mouse = true` (the default). **As a trade-off, wheel scrolling doesn't reach ozzel in these three screens (since mouse capture is off) and instead scrolls the terminal's own scrollback.** Keyboard scrolling (`↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End`, etc.) still works as usual. The command palette (`F`) is a screen for choosing what to act on rather than reading text, so it is not subject to this automatic release (mouse capture remains active while it's open).
+**Mouse capture is automatically suspended while the viewer, the log viewer (`L`), or the help screen (`h`/`?`) is open.** These are full-screen modes for reading file or log contents, so it's more practical to release capture and hand control back to the terminal's native mouse selection/copy. While suspended, all clicks and drags pass straight through to the terminal instead of ozzel, so you can select text with the mouse and copy it as usual (none of these three screens draw decorative characters like borders, so the selection never picks up anything other than the actual content). Returning to the filer by closing one of these three screens with `q`/`Esc` automatically resumes capture if `mouse = true` (the default). **As a trade-off, wheel scrolling doesn't reach ozzel in these three screens (since mouse capture is off) and instead scrolls the terminal's own scrollback.** Keyboard scrolling (`↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End`, etc.) still works as usual. The command palette (`F`) and the process manager (`P`) are screens for choosing what to act on rather than reading text, so they are not subject to this automatic release (mouse capture remains active while either is open).
 
 Setting `mouse = false` never enables mouse capture at all, so the terminal's native text selection (drag-select and copy) is always available. If you want to use the terminal's native text selection while in the filer (normal mode) with `mouse = true` (the default), most terminals let you **hold Shift while dragging**. When suspending the TUI for an external program with `:`/`e`, the current mouse capture state is likewise temporarily released before handing off control, and restored on return, just like the keyboard-enhancement flag.
 
@@ -583,6 +626,13 @@ show_git_status = true
 # Ctrl+R as the only way to reload.
 auto_refresh = true
 
+# Whether the process manager (P) re-runs `ps` every 2 seconds while it is open, which
+# is what makes the %CPU column mean anything. Default is true; false keeps the snapshot
+# it opened with until you press `r` inside the view. No effect while the view is closed
+# — nothing runs `ps` then either way. Unix only; on Windows the P key just logs that it
+# is unsupported.
+process_auto_refresh = true
+
 # External viewer per extension. When opening with open (Enter/o), an external command
 # can be specified per extension to use instead of the built-in viewer. The key is the
 # lowercase, dot-less extension; the value is a shell command. If "{}" appears in the
@@ -652,7 +702,7 @@ The [`examples/config.toml`](examples/config.toml) that actually gets generated 
 
 ### Action Names (valid values for the right side of `[keys]` / the left side of `[bindings]`)
 
-`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `sort_dialog`, `toggle_size_format`, `calc_dir_size`, `toggle_hidden`, `swap_panes`, `match_other_pane`, `refresh`, `mark`, `mark_all`, `rename`, `rename_marks`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `copy_dir_path`, `filter`, `clear_filter`, `jump_search`, `file_search`, `zip_marked`, `unzip`, `cancel_tasks`, `symlink`, `chmod`, `touch`, `file_info`, `diff`, `sync_dirs`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `quit`
+`cursor_up`, `cursor_down`, `focus_left`, `focus_right`, `page_up`, `page_down`, `top`, `bottom`, `switch_pane`, `open`, `parent`, `cycle_sort`, `sort_dialog`, `toggle_size_format`, `calc_dir_size`, `toggle_hidden`, `swap_panes`, `match_other_pane`, `refresh`, `mark`, `mark_all`, `rename`, `rename_marks`, `mkdir`, `delete`, `copy`, `move`, `duplicate`, `copy_path`, `copy_dir_path`, `filter`, `clear_filter`, `jump_search`, `file_search`, `zip_marked`, `unzip`, `cancel_tasks`, `symlink`, `chmod`, `touch`, `file_info`, `diff`, `sync_dirs`, `history_jump`, `history_back`, `history_forward`, `bookmark_jump`, `bookmark_add`, `go_home`, `command_line`, `open_editor`, `open_default`, `help`, `edit_config`, `show_log`, `function_list`, `settings`, `process_manager`, `quit`
 
 You can always check the current effective key bindings corresponding to this list from the in-app help screen (`h`/`?`).
 
@@ -684,7 +734,9 @@ If either file is missing, it starts in an empty state. If a file is corrupted (
 - **A Virtual Directory does not recursively browse nested archives (an archive inside an archive).** Opening a `.zip`/`.tar.gz`/etc. from within an archive simply opens it in the built-in viewer (usually as a hex dump, since it's binary).
 - **Tar-family archives do not support 7z or rar.** Only gzip, bzip2, and xz compression are supported; any other `.tar.*` (e.g., zstd, lz4) is not recognized and is opened as a regular file in the built-in viewer.
 - **Password-protected zip support has caveats.** Viewing and extracting work via a masked password prompt (see "Virtual Directory" above), but zip *creation* (`p`) never encrypts, and legacy ZipCrypto's weak integrity check lets roughly 1 in 256 wrong passwords past the initial verification (they still fail, as a logged error, during the actual read).
-- **The settings screen does not support mouse operations.** Every category, item, and edit screen requires keyboard input only.
+- **The settings screen does not support mouse operations.** Every category, item, and edit screen requires keyboard input only. (The process manager, by contrast, does take clicks and the wheel — see [Mouse](#mouse).)
+- **The process manager is unix only.** On Windows, `P` just logs that it is unsupported; a Windows implementation would need `tasklist`/`taskkill` and a second output parser.
+- **The process manager's `%CPU` is whatever `ps` reports, not what `top` shows.** On Linux it is an average over the process's whole lifetime, and on macOS a decayed average — so a process that was busy an hour ago and is idle now still shows a non-trivial figure. This is a consequence of using `ps` as the data source rather than sampling `/proc` (or a platform API) over an interval ourselves.
 - Unusual regex syntax and highly unusual filenames (e.g., containing NUL bytes) have not been explicitly tested.
 - **`ozzel update` does not work until the repository is published on GitHub.** Both checking the remote version and reinstalling via `cargo install --git` fail, and a corresponding error message is shown (it does not crash).
 

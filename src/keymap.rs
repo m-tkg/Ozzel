@@ -203,7 +203,8 @@ impl Keymap {
     /// sort dialog (key + direction in one modal, alongside `s`'s cycle),
     /// `v` cycles the size display format, `z` computes directory sizes
     /// in the background, and `m` renames the marked entries one prompt
-    /// at a time.
+    /// at a time. `S-p` (capital `P`) opens the process manager
+    /// (`crate::process`) — lower-case `p` is already `ZipMarked`.
     pub fn defaults() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -275,6 +276,7 @@ impl Keymap {
             ("L", ShowLog),
             ("F", FunctionList),
             ("S", Settings),
+            ("P", ProcessManager),
             ("q", Quit),
             ("C-c", Quit),
         ];

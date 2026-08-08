@@ -142,6 +142,15 @@ show_git_status = true
 # only way to reload.
 auto_refresh = true
 
+# --- Process manager auto-refresh -------------------------------------------
+# Default true: while the process manager (P) is open, its list is
+# re-collected by running `ps` again every two seconds, which is what makes
+# the %CPU column mean anything. Set to false to keep the snapshot the view
+# opened with until you press `r` inside it. This has no effect while the
+# view is closed — nothing runs `ps` then either way.
+# Unix only; on Windows the P key just logs that it is unsupported.
+process_auto_refresh = true
+
 # --- External viewer per extension ------------------------------------------
 # You can specify, per extension, an external command to use instead of
 # the built-in viewer when opening with `open` (Enter/o). Keys are
@@ -307,4 +316,5 @@ help = ["?", "h"]
 show_log = ["L"]
 function_list = ["F"]
 settings = ["S"]
+process_manager = ["P"]
 quit = ["C-c", "q"]

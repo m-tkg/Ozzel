@@ -149,6 +149,10 @@ pub enum Action {
     /// keybinding editing): see `crate::settings` and
     /// `App::begin_settings`.
     Settings,
+    /// Opens the full-frame process manager (`Mode::ProcessManager`): a
+    /// `ps`-backed list that refreshes itself, sorts by column, and can send
+    /// SIGTERM/SIGKILL. Unix only — see `App::begin_process_manager`.
+    ProcessManager,
     Quit,
 }
 
@@ -196,7 +200,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 58] = [
+    pub const ALL: [Action; 59] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -254,6 +258,7 @@ impl Action {
         Action::ShowLog,
         Action::FunctionList,
         Action::Settings,
+        Action::ProcessManager,
         Action::Quit,
     ];
 
@@ -272,7 +277,9 @@ impl Action {
                 ActionCategory::Jumps
             }
             CommandLine | OpenEditor | OpenDefault | EditConfig => ActionCategory::External,
-            Help | ShowLog | FunctionList | Settings | Quit => ActionCategory::Misc,
+            Help | ShowLog | FunctionList | Settings | ProcessManager | Quit => {
+                ActionCategory::Misc
+            }
         }
     }
 
@@ -341,6 +348,7 @@ impl Action {
             ShowLog => "Show the full in-memory log",
             FunctionList => "Open the command palette (search and run any action)",
             Settings => "Open the settings screen",
+            ProcessManager => "Open the process manager (Unix only)",
             Quit => "Quit ozzel",
         }
     }
@@ -410,6 +418,7 @@ impl Action {
             ShowLog => "show_log",
             FunctionList => "function_list",
             Settings => "settings",
+            ProcessManager => "process_manager",
         }
     }
 }

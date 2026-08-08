@@ -111,7 +111,7 @@ pub enum ItemKind {
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 14] = [
+pub const BEHAVIOR_ITEMS: [Item; 15] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations (confirm before copy/move)",
@@ -183,6 +183,11 @@ pub const BEHAVIOR_ITEMS: [Item; 14] = [
     Item {
         key: "auto_refresh",
         label: "auto_refresh (reload a pane when its directory changes externally)",
+        kind: ItemKind::Bool,
+    },
+    Item {
+        key: "process_auto_refresh",
+        label: "process_auto_refresh (re-run ps every 2s while the process manager is open)",
         kind: ItemKind::Bool,
     },
 ];
@@ -320,6 +325,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "show_permissions" => config.show_permissions,
                 "show_git_status" => config.show_git_status,
                 "auto_refresh" => config.auto_refresh,
+                "process_auto_refresh" => config.process_auto_refresh,
                 "dim_inactive" => config.colors.dim_inactive,
                 _ => unreachable!("bool item key {:?}", item.key),
             };
