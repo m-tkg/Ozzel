@@ -5,12 +5,14 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use chrono::{DateTime, Local};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::action::Action;
 use crate::file_search::FileSearchTree;
 use crate::keymap::KeyCombo;
+use crate::process::{ProcessInfo, ProcessSortKey, Signal};
 use crate::settings::Category;
 use crate::viewer::Matcher;
 
@@ -623,6 +625,69 @@ pub enum Mode {
     Settings {
         screen: SettingsScreen,
     },
+    /// The full-frame process manager (`S-p`): a `ps`-backed list that
+    /// re-collects itself every `process::PROCESS_REFRESH_INTERVAL`, sorts
+    /// by column, and can signal the process under the cursor. Keys are all
+    /// fixed (`App::handle_process_manager_key`).
+    ///
+    /// Unix-only in behavior but defined on every platform: keeping the
+    /// variant out of a Windows build would mean `cfg`-gating three
+    /// exhaustive matches (`App::handle_event`'s routing, `ui::draw`'s
+    /// full-frame dispatch, and its trailing `unreachable!` arm) to save one
+    /// unreachable branch. `App::begin_process_manager` is what's gated
+    /// instead — on Windows it logs and stays in `Normal`, exactly like
+    /// `Mode::Chmod`.
+    ///
+    /// Boxed for the same reason as `FileInfo`, more so: a snapshot is a
+    /// thousand rows on a busy machine and `Mode` gets moved and cloned a
+    /// lot.
+    ProcessManager {
+        state: Box<ProcessManagerState>,
+    },
+}
+
+/// Everything the process manager shows, rebuilt from `ps` on every refresh.
+#[derive(Debug, Clone)]
+pub struct ProcessManagerState {
+    /// Already ordered by `sort_key`/`ascending` — the renderer sorts
+    /// nothing, in keeping with `ui::draw` being free of computation.
+    pub processes: Vec<ProcessInfo>,
+    pub sort_key: ProcessSortKey,
+    pub ascending: bool,
+    /// Index into `processes`. There's no separate scroll offset: the view
+    /// derives the visible window from the cursor every frame the way the
+    /// settings screen does (`ui::settings_view::windowed_range`), so the
+    /// two can't disagree.
+    pub cursor: usize,
+    /// True until the first snapshot lands, so an empty list can be told
+    /// apart from one that hasn't arrived.
+    pub loading: bool,
+    /// Why the last `ps` run failed, shown in the footer with the previous
+    /// snapshot still listed. `App::apply_process_snapshot` only logs this
+    /// when the text changes — at one probe every two seconds, logging every
+    /// occurrence would be thirty lines a minute.
+    pub error: Option<String>,
+    pub updated_at: Option<DateTime<Local>>,
+    /// Set while a kill confirmation is up; the view overlays a confirm box
+    /// and takes only `y`/`n`/Esc until it's answered.
+    ///
+    /// Deliberately *not* `Mode::Confirm`: `App::handle_confirm_key` replaces
+    /// the mode with `Normal` when answering, and `PendingOp` has no way to
+    /// carry a snapshot back, so going through it would close the view on
+    /// every kill. Since the confirmation is destructive it ignores
+    /// `config.confirm_operations` and always asks — same rule as mirror
+    /// sync.
+    pub pending_kill: Option<PendingKill>,
+}
+
+/// A kill the user has been asked to confirm. Captured at the moment the key
+/// was pressed, so a refresh landing mid-question can't retarget it at
+/// whatever process slid under the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingKill {
+    pub pid: u32,
+    pub name: String,
+    pub signal: Signal,
 }
 
 /// Which level of the settings screen is showing.

@@ -74,6 +74,9 @@ const FIXED_KEY_LINES: &[&str] = &[
     "Viewer: Up/Down/j/k, Space/f/PageDown, b/PageUp, d/u (half page), g/Home top, G/End bottom, Left/Right scroll horizontally (text mode), Tab toggle text/hex, /,? search, n/N next/prev match, Esc clears a search then closes, q closes",
     "This help screen: same less-style scrolling and /,?,n/N search as the viewer, q/Esc/h close (Esc clears a search first)",
     "Log viewer (L/S-l): same less-style scrolling and /,?,n/N search as the viewer, q/Esc close (Esc clears a search first)",
+    "Process manager (P/S-p, Unix only): Up/Down (or your cursor_up/cursor_down keys) move, PageUp/PageDown, g/Home top, G/End bottom, r refresh now, x SIGTERM, X SIGKILL (both confirm), q/Esc close",
+    "Process manager sort keys: p pid, u user, c %cpu, m %mem, s rss, t elapsed, n command — pressing the active one again reverses it. These letters win over any cursor_up/cursor_down you rebound onto them",
+    "Process manager mouse (when mouse = true): click a row to put the cursor on it, wheel to scroll (inverted, like the panes': wheel up moves down the list). No double-click action, deliberately — nothing here should be one stray click away from a signal",
 ];
 
 /// Builds the full listing: every bound action grouped by category (skipping
@@ -128,6 +131,24 @@ mod tests {
         let text = build_display_lines(&Keymap::defaults()).join("\n");
         assert!(text.contains("Shift+Up/Shift+Down reorder"), "{text}");
         assert!(text.contains("cursor_up/cursor_down"), "{text}");
+    }
+
+    /// Same deal for the process manager, whose keys exist nowhere in the
+    /// keymap — including the warning that its sort letters shadow a
+    /// rebound cursor_up/cursor_down.
+    #[test]
+    fn fixed_key_lines_document_the_process_manager_keys() {
+        let text = build_display_lines(&Keymap::defaults()).join("\n");
+        assert!(text.contains("x SIGTERM, X SIGKILL"), "{text}");
+        assert!(text.contains("p pid, u user, c %cpu"), "{text}");
+        assert!(
+            text.contains("click a row to put the cursor on it"),
+            "{text}"
+        );
+        assert!(
+            text.contains("win over any cursor_up/cursor_down"),
+            "{text}"
+        );
     }
 
     #[test]

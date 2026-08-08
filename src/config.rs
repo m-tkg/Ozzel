@@ -127,6 +127,15 @@ fn default_auto_refresh() -> bool {
     true
 }
 
+/// The process manager (`S-p`) re-runs `ps` every couple of seconds while
+/// it's open, which is what makes a `%CPU` column mean anything. Set
+/// `process_auto_refresh = false` to leave it on the snapshot it opened
+/// with until `r`. No effect while the view is closed — nothing runs `ps`
+/// then either way.
+fn default_process_auto_refresh() -> bool {
+    true
+}
+
 /// The git status column (per-row markers + a branch tag in the pane
 /// header, inside a git work tree only) is shown by default; set
 /// `show_git_status = false` to disable the background `git status`
@@ -345,6 +354,12 @@ pub struct Config {
     /// did, or to `C-r`.
     #[serde(default = "default_auto_refresh")]
     pub auto_refresh: bool,
+    /// Whether the process manager re-collects its list on a timer while
+    /// it's open (`crate::process::PROCESS_REFRESH_INTERVAL`) — see
+    /// `App::maybe_refresh_processes`. `false` leaves `r` as the only way to
+    /// update it.
+    #[serde(default = "default_process_auto_refresh")]
+    pub process_auto_refresh: bool,
     /// `combo -> action_name`; `"none"` unbinds. Applied to the default
     /// keymap first (see `App::new`).
     pub keys: HashMap<String, String>,
@@ -381,6 +396,7 @@ impl Default for Config {
             show_git_status: default_show_git_status(),
             mouse: default_mouse(),
             auto_refresh: default_auto_refresh(),
+            process_auto_refresh: default_process_auto_refresh(),
             keys: HashMap::new(),
             bindings: HashMap::new(),
             viewers: HashMap::new(),
@@ -676,6 +692,18 @@ mod tests {
     fn confirm_quit_absent_defaults_to_true() {
         let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
         assert!(config.confirm_quit);
+    }
+
+    #[test]
+    fn process_auto_refresh_can_be_set_to_false() {
+        let config: Config = toml::from_str("process_auto_refresh = false").unwrap();
+        assert!(!config.process_auto_refresh);
+    }
+
+    #[test]
+    fn process_auto_refresh_absent_defaults_to_true() {
+        let config: Config = toml::from_str("delete_behavior = \"trash\"").unwrap();
+        assert!(config.process_auto_refresh);
     }
 
     #[test]

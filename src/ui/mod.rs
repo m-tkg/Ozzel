@@ -17,8 +17,10 @@ pub mod log_view;
 // `pub(crate)` (not private) so `app`'s tests can assert the sort
 // dialog's labels stay index-aligned with `App::SORT_DIALOG_CHOICES`.
 pub(crate) mod modal;
-// `pub(crate)` so `App::collision_info` can reuse `format_mtime`.
+// `pub(crate)` so `App::collision_info` can reuse `format_mtime`, and the
+// process manager `human_size`.
 pub(crate) mod pane_view;
+mod process_view;
 mod settings_view;
 mod text;
 mod viewer_view;
@@ -56,6 +58,11 @@ pub struct LayoutFeedback {
     /// `Mode::Log`'s full-frame view was drawn (see
     /// `log_view::render_full`).
     pub log_view_width: Option<u16>,
+    /// The process manager's row geometry this frame — `Some` only when its
+    /// full-frame view was drawn. Unlike Viewer/Help/Log, this takeover
+    /// *is* clickable (it's a picker, not a reading mode), so it reports
+    /// geometry for the same hit-testing `panes` drives.
+    pub process_rows: Option<PaneLayout>,
 }
 
 /// Takes `&mut App` purely because some of the modes it dispatches to
@@ -89,13 +96,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
         let scroll_from_bottom = *scroll_from_bottom;
         let log_view_width = log_view::render_full(frame, area, app, scroll_from_bottom);
         return LayoutFeedback {
-            panes: None,
             log_view_width: Some(log_view_width),
+            ..LayoutFeedback::default()
         };
     }
     if matches!(app.mode, Mode::Settings { .. }) {
         settings_view::render(frame, area, app);
         return LayoutFeedback::default();
+    }
+    if matches!(app.mode, Mode::ProcessManager { .. }) {
+        return LayoutFeedback {
+            process_rows: process_view::render(frame, area, app),
+            ..LayoutFeedback::default()
+        };
     }
 
     let rows = Layout::default()
@@ -198,14 +211,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) -> LayoutFeedback {
             modal::render_file_info(frame, area, &app.mode);
         }
         Mode::Normal => render_status_bar(frame, rows[2], app),
-        Mode::Viewer { .. } | Mode::Help { .. } | Mode::Log { .. } | Mode::Settings { .. } => {
+        Mode::Viewer { .. }
+        | Mode::Help { .. }
+        | Mode::Log { .. }
+        | Mode::Settings { .. }
+        | Mode::ProcessManager { .. } => {
             unreachable!("handled by the full-frame takeover return above")
         }
     }
 
     LayoutFeedback {
         panes: Some([left_layout, right_layout]),
-        log_view_width: None,
+        ..LayoutFeedback::default()
     }
 }
 

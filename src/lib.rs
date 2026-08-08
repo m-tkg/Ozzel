@@ -31,6 +31,7 @@ pub mod mode;
 pub mod ops;
 pub mod pane;
 pub mod persist;
+pub mod process;
 pub mod search;
 pub mod settings;
 pub mod tasks;

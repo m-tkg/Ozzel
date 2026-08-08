@@ -9,6 +9,7 @@ mod git_status;
 mod mouse;
 mod navigation;
 mod pager;
+mod process_manager;
 mod settings;
 mod sorting;
 mod startup;

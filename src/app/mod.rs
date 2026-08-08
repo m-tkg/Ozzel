@@ -257,6 +257,34 @@ pub struct App {
     /// comparison per pane per event). Reset to `None` to force a
     /// re-probe (config reload, task completion, ...).
     git_checked_dir: [Option<PathBuf>; 2],
+    /// The process-list probes still in flight, in the same role
+    /// `pending_git_status` plays for git: the set `handle_task_event`
+    /// checks to swallow a probe's `Finished` event. A probe that ran while
+    /// the process manager was open must not log a line, reload a pane, or
+    /// clear marks the way a real file operation's completion does.
+    ///
+    /// A set rather than a single id because a superseded probe still
+    /// finishes: its `Finished` needs swallowing too, long after
+    /// `latest_process_probe` moved on.
+    pending_process_list: HashSet<TaskId>,
+    /// The most recently spawned process-list probe and its cancel flag.
+    /// Only *this* id's `TaskEvent::ProcessList` reaches the screen — an
+    /// older, slower probe landing after a newer one was spawned is dropped
+    /// (the same staleness defense as `latest_git_task`, which this mirrors
+    /// down to the detached-task cancel flag). `None` means nothing is in
+    /// flight, which is also what stops probes from piling up on a machine
+    /// where `ps` takes longer than the refresh interval.
+    latest_process_probe: Option<(TaskId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// When the last probe was *spawned* (not when it returned) —
+    /// `maybe_refresh_processes`'s elapsed-time gate. Measuring from the
+    /// spawn means a slow `ps` stretches the effective period instead of
+    /// queueing up behind itself.
+    process_probed_at: Option<Instant>,
+    /// The process manager's row geometry as of its last drawn frame, for
+    /// mouse hit-testing — the full-frame counterpart to `pane_layout`,
+    /// refreshed the same way (`ui::draw` returns it, `apply_layout_feedback`
+    /// stores it). `None` until that view has drawn at least once.
+    process_layout: Option<PaneLayout>,
     /// The filesystem watcher behind `config.auto_refresh`, or `None` when
     /// auto-refresh is off, the platform backend refused to start, or
     /// nobody turned it on. Deliberately *not* created by `App::new`:
@@ -495,6 +523,10 @@ impl App {
             pending_git_status: HashMap::new(),
             latest_git_task: [None, None],
             git_checked_dir: [None, None],
+            pending_process_list: HashSet::new(),
+            latest_process_probe: None,
+            process_probed_at: None,
+            process_layout: None,
             watcher: None,
             watching_requested: false,
             fs_dirty: [false, false],
@@ -542,6 +574,9 @@ impl App {
         if let Some(width) = feedback.log_view_width {
             self.log_view_width = width;
         }
+        if let Some(layout) = feedback.process_rows {
+            self.process_layout = Some(layout);
+        }
     }
 
     pub fn active_pane(&self) -> &Pane {
@@ -575,9 +610,11 @@ impl App {
     /// `false` while a full-frame text-*reading* mode (Viewer/Log/Help) is
     /// showing, so the terminal's own native text selection and
     /// scrollback take over instead of ozzel's own click/wheel handling —
-    /// `true` everywhere else, including the Function List command
-    /// palette (an interactive picker, not a reading mode, so it keeps
-    /// capture on even though it has no mouse behavior of its own).
+    /// `true` everywhere else, including the two other full-frame
+    /// takeovers that are pickers rather than reading modes: the Function
+    /// List command palette (which keeps capture on even though it has no
+    /// mouse behavior of its own) and the process manager (which does use
+    /// it — click a row, wheel to scroll).
     /// Always `false` when `config.mouse` itself is off, regardless of
     /// mode.
     pub fn wants_mouse_capture(&self) -> bool {
@@ -700,6 +737,43 @@ impl App {
             }
             return;
         }
+        // A process-list snapshot reaches the screen only if it came from
+        // the newest probe: with a probe every couple of seconds, a slow run
+        // overwriting a newer one would show the list jumping backwards in
+        // time. `apply_process_snapshot` drops it too if the view has since
+        // been closed.
+        if matches!(event, TaskEvent::ProcessList { .. }) {
+            let TaskEvent::ProcessList { id, result } = event else {
+                return;
+            };
+            if self
+                .latest_process_probe
+                .as_ref()
+                .is_some_and(|(latest, _)| *latest == id)
+            {
+                self.apply_process_snapshot(result);
+            }
+            return;
+        }
+        // A process-list probe's `Finished` is swallowed for exactly the
+        // same reason a git-status probe's is (see below): it's a passive
+        // background probe, not a file operation, so no log line, no pane
+        // reload, no mark clearing. Its failures aren't logged here either —
+        // `apply_process_snapshot` already put the reason in the view's
+        // footer, and at this refresh rate logging every one would bury the
+        // log.
+        if let TaskEvent::Finished { id, .. } = &event
+            && self.pending_process_list.remove(id)
+        {
+            if self
+                .latest_process_probe
+                .as_ref()
+                .is_some_and(|(latest, _)| latest == id)
+            {
+                self.latest_process_probe = None;
+            }
+            return;
+        }
         // A git-status probe's `Finished` is bookkeeping only — unlike
         // every real file operation's completion, it must never log a
         // summary line, reload the panes, or clear marks (probes are
@@ -791,6 +865,7 @@ impl App {
                 Mode::Chmod { .. } => self.handle_chmod_key(code),
                 Mode::FileInfo { .. } => self.handle_file_info_key(code),
                 Mode::Settings { .. } => self.handle_settings_key(code, modifiers),
+                Mode::ProcessManager { .. } => self.handle_process_manager_key(code, modifiers),
             },
             AppEvent::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             AppEvent::Task(task_event) => self.handle_task_event(task_event),
@@ -807,6 +882,10 @@ impl App {
         // its last probe. One PathBuf comparison per pane when nothing
         // changed, so running this unconditionally is cheap.
         self.maybe_refresh_git();
+        // And the same for the process list, which is why `Tick` reaching
+        // this far matters: nothing else would re-run `ps` on a screen the
+        // user isn't typing into.
+        self.maybe_refresh_processes();
         // Same deal for the filesystem watcher: re-point it if a pane
         // navigated, and apply any pending external-change reload now that
         // this event may have closed whatever modal was blocking it.
@@ -1201,6 +1280,10 @@ impl App {
             }
             Action::Settings => {
                 self.begin_settings();
+                Ok(())
+            }
+            Action::ProcessManager => {
+                self.begin_process_manager();
                 Ok(())
             }
             Action::Quit => {
@@ -2868,6 +2951,7 @@ impl App {
 mod file_ops;
 mod mouse;
 mod pager;
+mod process_manager;
 mod settings_ui;
 
 use mouse::DragState;

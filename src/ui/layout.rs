@@ -9,17 +9,23 @@
 use ratatui::layout::Rect;
 
 /// Just enough for mouse hit-testing to map a click's `(x, y)` back to
-/// "row N of this pane's visible entries" (see `App`'s `hit_test_row`).
+/// "row N of this list" (see `App`'s `hit_test_row`).
+///
+/// Named for the pane it was written for, but not limited to one: the
+/// process manager's full-frame list (`ui::process_view`) reports its own
+/// geometry in exactly this shape, so both screens share one piece of
+/// coordinate math rather than growing a second near-identical copy.
 #[derive(Debug, Clone, Copy)]
 pub struct PaneLayout {
-    /// The pane's full drawn area, borders included.
+    /// The full drawn area, borders included.
     pub area: Rect,
-    /// The entry-list rows' area specifically (inside the border and any
-    /// header rows) — what `hit_test_row` actually maps `y` against.
+    /// The list rows' area specifically (inside the border and any header
+    /// rows) — what `hit_test_row` actually maps `y` against.
     pub rows_area: Rect,
-    /// Index of the first visible entry (`Pane::visible_entries()[start]`
-    /// is whatever's drawn at `rows_area`'s first row) — mirrors
-    /// `ui::pane_view`'s own `scroll_offset` so hit-testing agrees with
-    /// what's actually on screen.
+    /// Index of the row drawn at `rows_area`'s first line
+    /// (`Pane::visible_entries()[start]` for a pane,
+    /// `ProcessManagerState::processes[start]` for the process manager) —
+    /// mirrors whatever scroll offset the renderer used, so hit-testing
+    /// agrees with what's actually on screen.
     pub start: usize,
 }

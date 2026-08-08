@@ -8,6 +8,7 @@ pub mod copy_move;
 pub mod delete;
 pub mod dir_size;
 pub mod git_status;
+pub mod process_list;
 pub mod sync;
 
 use std::collections::BTreeMap;
@@ -56,6 +57,17 @@ pub enum TaskEvent {
         id: TaskId,
         dir: std::path::PathBuf,
         status: Option<crate::git::GitDirStatus>,
+    },
+    /// One snapshot of the process list, from a `process_list` worker —
+    /// structured for the same reason as `DirSize`/`GitStatus`: the receiver
+    /// needs the rows themselves, not a summary line. `Err` carries why `ps`
+    /// couldn't be read (missing, non-zero exit); that's a normal outcome
+    /// shown in the view's footer rather than an error worth unwinding, and
+    /// `App::apply_process_snapshot` keeps it from spamming the log at the
+    /// two-second refresh rate.
+    ProcessList {
+        id: TaskId,
+        result: Result<Vec<crate::process::ProcessInfo>, String>,
     },
     Finished {
         id: TaskId,
@@ -182,6 +194,7 @@ impl TaskManager {
             // to; nothing to update in `running` and nothing to log here.
             TaskEvent::DirSize { .. } => None,
             TaskEvent::GitStatus { .. } => None,
+            TaskEvent::ProcessList { .. } => None,
             TaskEvent::Finished { id, result } => {
                 let desc = self
                     .running
