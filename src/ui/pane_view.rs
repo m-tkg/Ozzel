@@ -841,6 +841,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
         pane.git = Some(crate::git::GitDirStatus {
+            git_dir: dir.path().join(".git"),
             branch: "main".to_string(),
             statuses: std::collections::HashMap::new(),
         });
@@ -865,6 +866,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
         pane.git = Some(crate::git::GitDirStatus {
+            git_dir: dir.path().join(".git"),
             branch: "feature/an-extremely-long-branch-name-that-cannot-fit".to_string(),
             statuses: std::collections::HashMap::new(),
         });

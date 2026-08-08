@@ -950,29 +950,55 @@ impl App {
     }
 
     /// Points the watcher at whatever the panes currently show: each
-    /// pane's `cwd`, deduplicated (both panes routinely show the same
+    /// pane's `cwd`, plus the git directory of whatever repository that
+    /// cwd belongs to, deduplicated (both panes routinely show the same
+    /// directory, and two directories in one repository share a git
     /// directory). Runs after every event, alongside `maybe_refresh_git`,
     /// and is a no-op unless the set actually changed — `DirWatcher::sync`
     /// diffs against what it already has.
+    ///
+    /// The git directory is watched because `git add`, `git commit`,
+    /// `git checkout` and friends run in another terminal write only
+    /// `HEAD`/`index` in there — nothing in the pane's own cwd — so
+    /// without it the status column and branch tag stay stale until the
+    /// user navigates or presses `C-r`. Both are directly inside the git
+    /// directory, so the same non-recursive watch everything else uses
+    /// covers them. It is only known once the first probe has come back
+    /// (`GitDirStatus::git_dir`), which is why this reads it off the pane
+    /// rather than computing it.
     ///
     /// A pane inside an archive needs no special case: its `cwd` is the
     /// real directory holding that archive, so watching `cwd` catches the
     /// archive being rewritten, and `VirtualDir::list`'s mtime/len check
     /// turns the reload into a re-listing.
     fn maybe_resync_watches(&mut self) {
+        let desired = self.desired_watch_dirs();
         let Some(watcher) = self.watcher.as_mut() else {
             return;
         };
-        let mut desired: Vec<PathBuf> = Vec::with_capacity(2);
-        for pane in &self.panes {
-            if !desired.contains(&pane.cwd) {
-                desired.push(pane.cwd.clone());
-            }
-        }
         let failed = watcher.sync(&desired);
         for path in failed {
             self.log_error(format!("cannot watch for changes: {}", path.display()));
         }
+    }
+
+    /// The exact set `maybe_resync_watches` registers — see its doc
+    /// comment for why the git directory is in here. Deduplicated, since
+    /// both panes routinely show the same directory and two directories in
+    /// one repository share a git directory.
+    pub(crate) fn desired_watch_dirs(&self) -> Vec<PathBuf> {
+        let mut desired: Vec<PathBuf> = Vec::with_capacity(4);
+        for pane in &self.panes {
+            if !desired.contains(&pane.cwd) {
+                desired.push(pane.cwd.clone());
+            }
+            if let Some(git_dir) = pane.git.as_ref().map(|g| &g.git_dir)
+                && !desired.contains(git_dir)
+            {
+                desired.push(git_dir.clone());
+            }
+        }
+        desired
     }
 
     /// Drains whatever the watcher's backend thread has reported and marks
@@ -985,19 +1011,45 @@ impl App {
         let Some(watcher) = self.watcher.as_ref() else {
             return;
         };
-        // Reported as the very paths `maybe_resync_watches` registered —
-        // each pane's `cwd` — so this is a plain equality check rather
-        // than any kind of path matching (`DirWatcher` owns the symlink
-        // resolution that makes that true).
         let changed = watcher.changed_dirs();
-        for dir in &changed {
+        self.apply_changed_dirs(&changed);
+    }
+
+    /// Routes the directories a watcher reported as changed, then acts on
+    /// them. Split out from `drain_fs_events` so the routing can be tested
+    /// without a real OS watcher (`App::new` never creates one — see the
+    /// `watcher` field).
+    ///
+    /// Each path is one `maybe_resync_watches` registered — a pane's `cwd`
+    /// or its git directory — so these are plain equality checks rather
+    /// than any kind of path matching (`DirWatcher` owns the symlink
+    /// resolution that makes that true).
+    pub(crate) fn apply_changed_dirs(&mut self, changed: &[PathBuf]) {
+        for dir in changed {
             for idx in 0..2 {
                 if &self.panes[idx].cwd == dir {
                     self.fs_dirty[idx] = true;
                 }
+                // A write inside the git directory changes what `git
+                // status` would say, but nothing about the listing — so
+                // this forces a re-probe without reloading the pane.
+                if self.panes[idx]
+                    .git
+                    .as_ref()
+                    .is_some_and(|g| &g.git_dir == dir)
+                {
+                    self.git_checked_dir[idx] = None;
+                }
             }
         }
         self.apply_fs_refresh();
+        // Unlike the listing reload, a re-probe isn't deferred while a
+        // modal is up: it only replaces status markers behind whatever is
+        // on screen, and `apply_fs_refresh`'s hazard (entry paths captured
+        // by a pending operation) doesn't apply. Called here rather than
+        // left to the next event's sweep so the new markers are on screen
+        // at the top of the next iteration.
+        self.maybe_refresh_git();
     }
 
     /// Reloads whichever panes an external change touched, once it is safe

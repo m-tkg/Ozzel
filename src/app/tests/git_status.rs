@@ -14,6 +14,7 @@ fn status_for(branch: &str, dir: &Path, name: &str, marker: GitMarker) -> GitDir
     let mut statuses = HashMap::new();
     statuses.insert(dir.join(name), marker);
     GitDirStatus {
+        git_dir: dir.join(".git"),
         branch: branch.to_string(),
         statuses,
     }
@@ -178,6 +179,105 @@ fn navigation_schedules_a_probe_per_pane_and_show_git_status_off_disables_it() {
     app.handle_event(AppEvent::Tick);
     assert!(app.git_checked_dir[0].is_none());
     assert!(app.panes[0].git.is_none());
+}
+
+#[test]
+fn a_change_in_the_git_directory_forces_a_reprobe_without_reloading_the_pane() {
+    // The reported bug: `git add` / `git commit` / `git checkout` in
+    // another terminal write only inside `.git`, never in the pane's cwd,
+    // so watching cwd alone left the status markers and branch tag stale
+    // until the user navigated away or pressed C-r.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+    let mut app = test_app(dir.path(), dir.path());
+    // A first probe has come back, so the pane knows its git directory.
+    let id = register_probe(&mut app);
+    app.handle_event(AppEvent::Task(TaskEvent::GitStatus {
+        id,
+        dir: dir.path().to_path_buf(),
+        status: Some(status_for("main", dir.path(), "a.txt", GitMarker::Modified)),
+    }));
+    app.handle_event(AppEvent::Tick);
+    let before = app.latest_git_task[0].as_ref().map(|(id, _)| *id).unwrap();
+
+    app.apply_changed_dirs(&[dir.path().join(".git")]);
+
+    let after = app.latest_git_task[0].as_ref().map(|(id, _)| *id).unwrap();
+    assert_ne!(before, after, "a write inside .git must force a re-probe");
+    assert_eq!(
+        app.fs_dirty,
+        [false, false],
+        "the listing didn't change, so no pane may be marked for reload"
+    );
+}
+
+#[test]
+fn the_git_directory_is_watched_alongside_each_pane_cwd() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let mut app = test_app(left.path(), right.path());
+    app.panes[0].set_git_status(Some(status_for(
+        "main",
+        left.path(),
+        "a.txt",
+        GitMarker::Modified,
+    )));
+
+    assert_eq!(
+        app.desired_watch_dirs(),
+        vec![
+            left.path().to_path_buf(),
+            left.path().join(".git"),
+            right.path().to_path_buf(),
+        ],
+        "a pane with no known git directory contributes only its cwd"
+    );
+
+    // Two panes in the same repository share one git directory, and it
+    // must not be registered twice.
+    app.panes[1].set_git_status(Some(status_for(
+        "main",
+        left.path(),
+        "a.txt",
+        GitMarker::Modified,
+    )));
+    assert_eq!(
+        app.desired_watch_dirs(),
+        vec![
+            left.path().to_path_buf(),
+            left.path().join(".git"),
+            right.path().to_path_buf(),
+        ]
+    );
+}
+
+#[test]
+fn a_change_in_another_panes_git_directory_leaves_this_one_alone() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let mut app = test_app(left.path(), right.path());
+    app.panes[0].set_git_status(Some(status_for(
+        "main",
+        left.path(),
+        "a.txt",
+        GitMarker::Modified,
+    )));
+    app.panes[1].set_git_status(Some(status_for(
+        "main",
+        right.path(),
+        "b.txt",
+        GitMarker::Modified,
+    )));
+    app.handle_event(AppEvent::Tick);
+    let right_before = app.latest_git_task[1].as_ref().map(|(id, _)| *id).unwrap();
+
+    app.apply_changed_dirs(&[left.path().join(".git")]);
+
+    assert_eq!(
+        app.latest_git_task[1].as_ref().map(|(id, _)| *id),
+        Some(right_before),
+        "the other repository's pane must not be re-probed"
+    );
 }
 
 #[test]
