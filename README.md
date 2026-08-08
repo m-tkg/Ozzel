@@ -118,6 +118,8 @@ A pane's header is a fixed two-row area (DYNA-style — the entry list below nev
 
 **Per-directory sort memory:** Every explicit sort change (`s`'s cycle or the `t` dialog) is remembered for the current directory (up to 200 directories, persisted as `sort_prefs.json` alongside the history file). Revisiting a directory — by any route: `Enter`, `Backspace`, bookmarks, the history menu, `Shift+←`/`Shift+→`, or at startup — restores its remembered key and direction. A directory with no remembered choice keeps whatever sort the pane already had (the pre-existing behavior). When a pane's sort deviates from the default (name, ascending), the pane header shows a tag like `[s:size↓]`.
 
+**Per-directory cursor memory:** Leaving a directory records where the cursor was sitting in it, and coming back — by any route: `Enter`, `Backspace`, bookmarks, the history menu, `Shift+←`/`Shift+→` — puts the cursor back on that same entry. So with the cursor on `Downloads` in `/Users/masaki`, `Backspace` up to `/Users` and then `Enter` back into `masaki` lands on `Downloads` again. Only the most recent visit to a directory is remembered; a cursor left on the `..` row records nothing, and an entry that has since disappeared falls back to the top of the listing. Directory levels inside an archive are remembered the same way. Unlike the sort memory above, none of this is written to disk — it lasts only for the session. Set `cursor_memory = false` (or flip it in the settings screen's Behavior category) to turn it off and have every arrival start at the top of the listing; `Backspace` still lands on the directory just left even then.
+
 **Cursor wrap-around:** With `cursor_wrap = true` (default `false`), single-step cursor movement wraps: one step past the last row lands on the first and vice versa. Page movement, `Home`/`End`, and the mouse wheel always stop at the edges regardless.
 
 ### Marking & File Operations
@@ -352,7 +354,7 @@ A full-screen settings UI structured like `raspi-config`, with three levels: cat
 
 | Category | Contents |
 | --- | --- |
-| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
+| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` / `cursor_memory` |
 | Colors | Each item under `[colors]` (`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`) |
 | Startup/Integration | `home` / `editor` |
 | Extension Viewers | `[viewers]` (list of extension → launch command; add/edit/delete) |
@@ -596,6 +598,11 @@ natural_sort = true
 # edges. Default is false. PageUp/PageDown, Home/End, and the mouse wheel
 # always stop at the edges regardless of this setting.
 cursor_wrap = false
+
+# Whether leaving a directory remembers where the cursor was in it, so
+# returning to that directory puts the cursor back on the same entry.
+# Default is true; the memory is per-session and never written to disk.
+cursor_memory = true
 
 # How the size column renders sizes: "human" (1.5M, default), "bytes"
 # (1536), or "bytes_grouped" (1,536). The v key cycles these at runtime

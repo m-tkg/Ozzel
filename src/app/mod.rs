@@ -500,6 +500,8 @@ impl App {
         let mut right = Pane::new_empty(right);
         left.set_natural_sort(config.natural_sort);
         right.set_natural_sort(config.natural_sort);
+        left.set_cursor_memory(config.cursor_memory);
+        right.set_cursor_memory(config.cursor_memory);
 
         Ok(Self {
             panes: [left, right],
@@ -1508,7 +1510,17 @@ impl App {
         if let Some((key_str, ascending)) = self.sort_prefs.get(&cwd)
             && let Some(key) = SortKey::from_str(key_str)
         {
-            self.panes[which.index()].set_sort(key, ascending);
+            let pane = &mut self.panes[which.index()];
+            // The cursor is an *index* into the sorted listing, so a
+            // re-sort right after a navigation would leave it pointing at
+            // whatever else landed on that row — including on top of the
+            // entry `Pane`'s cursor memory just restored. Re-anchor onto
+            // the same name once the new order is in effect.
+            let anchor = pane.selected_entry_name();
+            pane.set_sort(key, ascending);
+            if let Some(name) = anchor {
+                pane.restore_cursor_onto(&name);
+            }
         }
     }
 
@@ -2220,8 +2232,13 @@ impl App {
                 // both, invalidating their sort caches only on an actual
                 // change (see `Pane::set_natural_sort`).
                 let natural = self.config.natural_sort;
+                // Same story for `cursor_memory`: turning it off here also
+                // drops what the panes had already remembered (see
+                // `Pane::set_cursor_memory`).
+                let cursor_memory = self.config.cursor_memory;
                 for pane in &mut self.panes {
                     pane.set_natural_sort(natural);
+                    pane.set_cursor_memory(cursor_memory);
                 }
                 // `auto_refresh` may have just been toggled — start the
                 // watcher if it went on, drop it (which unregisters every

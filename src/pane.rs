@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::entry::{EntryKind, FsEntry, read_dir_entries};
 use crate::filter::FilterSpec;
-use crate::virtual_dir::{self, VirtualDir};
+use crate::virtual_dir::VirtualDir;
 
 /// How many rows a PageUp/PageDown jumps. Phase 2+ may make this track the
 /// actual rendered viewport height; a fixed constant is enough for MVP
@@ -100,10 +100,27 @@ pub struct Pane {
     pub natural_sort: bool,
     pub show_hidden: bool,
     /// Directory path -> name of the child entry that should be focused
-    /// when that directory is (re-)entered. Populated whenever `go_parent`
-    /// climbs out of a directory, so pressing Backspace and then looking at
-    /// the pane shows the cursor sitting back on the directory just left.
+    /// when that directory is (re-)entered. Written from two places, both
+    /// just before a navigation moves the pane elsewhere: `remember_cursor`
+    /// records wherever the cursor happened to be sitting in the directory
+    /// being left, and `go_parent`/`virtual_go_parent` additionally record
+    /// the name of the directory being climbed out of against the *parent*
+    /// — so Backspace lands the cursor back on the directory just left,
+    /// and re-entering it lands the cursor back where it was inside. The
+    /// latest visit always wins, the map is purely in-memory (nothing here
+    /// survives a restart), and archive-internal directories key off a
+    /// synthetic `archive.zip/inner/path` (see `cursor_memory_key`).
     pub cursor_memory: HashMap<PathBuf, String>,
+    /// Whether `cursor_memory` is written/read at all. Mirrors
+    /// `Config::cursor_memory`; pushed onto both panes by
+    /// `App::new_unloaded` on startup and `App::apply_reloaded_config` on
+    /// every config reload / settings edit (the pane itself never reads
+    /// config), exactly like `natural_sort`. With this off the map stays
+    /// empty and every
+    /// arrival puts the cursor at the top — except `..` itself, which
+    /// still lands back on the directory just left (that comes from the
+    /// climb, not from the map).
+    pub cursor_memory_enabled: bool,
     /// Paths marked for a bulk copy/move/delete. Survives a plain
     /// `reload()` of the same directory (re-sort, hidden toggle) but is
     /// cleared whenever `cwd` actually changes. Deliberately independent of
@@ -206,6 +223,7 @@ impl Pane {
             natural_sort: true,
             show_hidden: false,
             cursor_memory: HashMap::new(),
+            cursor_memory_enabled: true,
             marks: HashSet::new(),
             filter: None,
             back: Vec::new(),
@@ -490,16 +508,17 @@ impl Pane {
         // "the archive's own name" here is what lets `virtual_go_parent`
         // restore the cursor onto the .zip file when it exits back out,
         // via the exact same `restore_cursor_onto` real panes already use.
-        self.cursor_memory
-            .insert(self.cwd.clone(), vd.archive_name.clone());
+        self.remember_entry(self.cwd.clone(), vd.archive_name.clone());
         self.virtual_dir = Some(vd);
         self.entries = entries;
-        self.cursor = 0;
         self.marks.clear();
         self.filter = None;
         self.dir_size_overrides.clear();
         self.git = None;
         self.invalidate_visible_cache();
+        // After the cache invalidation, so the lookup sees the archive's
+        // listing rather than the real directory's.
+        self.restore_remembered_cursor();
         Ok(())
     }
 
@@ -509,12 +528,13 @@ impl Pane {
             return Ok(());
         };
         let entries = vd.list(&inner_path)?;
+        self.remember_cursor();
         self.virtual_dir.as_mut().unwrap().inner = inner_path;
         self.entries = entries;
-        self.cursor = 0;
         self.marks.clear();
         self.filter = None;
         self.invalidate_visible_cache();
+        self.restore_remembered_cursor();
         Ok(())
     }
 
@@ -530,6 +550,10 @@ impl Pane {
         let Some(vd) = self.virtual_dir.clone() else {
             return Ok(());
         };
+        // Same split as `go_parent`: this records the cursor's spot at the
+        // level being left, the insert further down records the level
+        // being climbed *into*.
+        self.remember_cursor();
 
         if vd.inner.as_os_str().is_empty() {
             self.virtual_dir = None;
@@ -552,8 +576,10 @@ impl Pane {
         self.filter = None;
         self.invalidate_visible_cache();
 
-        let memory_key = vd.archive_path.join(virtual_dir::inner_display(&new_inner));
-        self.cursor_memory.insert(memory_key, leaving_name.clone());
+        // Keyed exactly like `cursor_memory_key` builds it, so a later
+        // descend back to this level finds the record.
+        let memory_key = vd.archive_path.join(&new_inner);
+        self.remember_entry(memory_key, leaving_name.clone());
         self.restore_cursor_onto(&leaving_name);
         Ok(())
     }
@@ -565,6 +591,10 @@ impl Pane {
     /// way); reverts (and reloads the old `cwd` back) on failure, so a bad
     /// jump target never leaves the pane stuck mid-transition.
     pub fn jump_to(&mut self, path: PathBuf) -> Result<()> {
+        // Before anything else moves: stamp where the cursor was sitting
+        // in the directory (or archive level) we're leaving, so coming
+        // back here later restores it.
+        self.remember_cursor();
         let previous_cwd = std::mem::replace(&mut self.cwd, path);
         // `jump_to` always means "go to this real directory" (bookmarks,
         // home, the history menu, and `S-left`/`S-right` all funnel
@@ -592,7 +622,7 @@ impl Pane {
         self.filter = None;
         match self.reload() {
             Ok(()) => {
-                self.cursor = 0;
+                self.restore_remembered_cursor();
                 self.marks.clear();
                 Ok(())
             }
@@ -615,6 +645,11 @@ impl Pane {
         let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
             return Ok(());
         };
+        // Where the cursor sat *inside* the directory being left — keyed
+        // on that directory, so descending back into it later restores it.
+        // Distinct from the `parent -> leaving_name` record written below,
+        // which is what puts the cursor back on the directory itself.
+        self.remember_cursor();
         let leaving_name = self
             .cwd
             .file_name()
@@ -629,7 +664,7 @@ impl Pane {
 
         match leaving_name {
             Some(name) => {
-                self.cursor_memory.insert(self.cwd.clone(), name.clone());
+                self.remember_entry(self.cwd.clone(), name.clone());
                 self.restore_cursor_onto(&name);
             }
             None => self.cursor = 0,
@@ -643,6 +678,73 @@ impl Pane {
             VisibleItem::Parent => false,
         });
         self.cursor = idx.unwrap_or(0);
+    }
+
+    /// The `cursor_memory` key for wherever this pane currently *is*: the
+    /// real `cwd`, or — inside an archive, where no real directory path
+    /// exists — a synthetic `archive.zip/inner/path` built from the
+    /// archive's own path and the (always relative) inner path, which no
+    /// real directory can collide with as long as the archive itself sits
+    /// where it does.
+    fn cursor_memory_key(&self) -> PathBuf {
+        match &self.virtual_dir {
+            Some(vd) => vd.archive_path.join(&vd.inner),
+            None => self.cwd.clone(),
+        }
+    }
+
+    /// Records where the cursor is sitting *right now* against the
+    /// directory it's sitting in, so a later return there puts it back.
+    /// Every cwd-changing path calls this immediately before it moves. A
+    /// cursor parked on `..` (or an empty listing) drops the old record
+    /// instead of leaving a stale name behind — only the most recent visit
+    /// is remembered.
+    fn remember_cursor(&mut self) {
+        if !self.cursor_memory_enabled {
+            return;
+        }
+        let key = self.cursor_memory_key();
+        match self.selected_entry_name() {
+            Some(name) => {
+                self.cursor_memory.insert(key, name);
+            }
+            None => {
+                self.cursor_memory.remove(&key);
+            }
+        }
+    }
+
+    /// Records "focus `name` next time this pane is at `key`" — the other
+    /// half of `remember_cursor`, used where the entry to focus isn't the
+    /// one under the cursor but the directory (or archive) just climbed
+    /// out of. A no-op with `cursor_memory` off, so the map never fills up
+    /// behind the setting's back.
+    fn remember_entry(&mut self, key: PathBuf, name: String) {
+        if !self.cursor_memory_enabled {
+            return;
+        }
+        self.cursor_memory.insert(key, name);
+    }
+
+    /// Pushes the config's `cursor_memory` value onto this pane — see the
+    /// field's doc comment. Turning it off drops whatever was already
+    /// remembered, so re-enabling it later starts from the current
+    /// session's navigation rather than resurrecting stale positions.
+    pub fn set_cursor_memory(&mut self, enabled: bool) {
+        self.cursor_memory_enabled = enabled;
+        if !enabled {
+            self.cursor_memory.clear();
+        }
+    }
+
+    /// Puts the cursor back onto whatever `remember_cursor` last saw here,
+    /// falling back to the top of the listing. Callers must have refreshed
+    /// `entries` (and invalidated the visible cache) first.
+    fn restore_remembered_cursor(&mut self) {
+        match self.cursor_memory.get(&self.cursor_memory_key()).cloned() {
+            Some(name) => self.restore_cursor_onto(&name),
+            None => self.cursor = 0,
+        }
     }
 
     pub fn cycle_sort(&mut self) {
@@ -1143,6 +1245,188 @@ mod tests {
             pane.cursor_memory.get(dir.path()).map(String::as_str),
             Some("bbb")
         );
+    }
+
+    /// Puts the cursor on `name`, panicking if the pane isn't showing it.
+    fn focus(pane: &mut Pane, name: &str) {
+        let idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == name))
+            .unwrap_or_else(|| panic!("{name} is not in the listing"));
+        pane.cursor = idx;
+    }
+
+    fn cursor_name(pane: &Pane) -> Option<String> {
+        pane.selected_entry_name()
+    }
+
+    #[test]
+    fn cursor_position_inside_a_directory_is_restored_when_it_is_re_entered() {
+        // /root/sub/{aaa.txt, bbb.txt, ccc.txt}
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        for name in ["aaa.txt", "bbb.txt", "ccc.txt"] {
+            fs::write(sub.join(name), b"x").unwrap();
+        }
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        focus(&mut pane, "sub");
+        pane.enter().unwrap();
+        // Park the cursor on the last file, then climb back out.
+        focus(&mut pane, "ccc.txt");
+        pane.go_parent().unwrap();
+        assert_eq!(pane.cwd, dir.path());
+        assert_eq!(cursor_name(&pane).as_deref(), Some("sub"));
+
+        // Descending again lands back on ccc.txt, not at the top.
+        pane.enter().unwrap();
+        assert_eq!(pane.cwd, sub);
+        assert_eq!(cursor_name(&pane).as_deref(), Some("ccc.txt"));
+    }
+
+    #[test]
+    fn only_the_most_recent_visit_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        for name in ["aaa.txt", "bbb.txt"] {
+            fs::write(sub.join(name), b"x").unwrap();
+        }
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        focus(&mut pane, "sub");
+        pane.enter().unwrap();
+        focus(&mut pane, "bbb.txt");
+        pane.go_parent().unwrap();
+
+        pane.enter().unwrap();
+        assert_eq!(cursor_name(&pane).as_deref(), Some("bbb.txt"));
+        // A second visit that ends somewhere else overwrites the first.
+        focus(&mut pane, "aaa.txt");
+        pane.go_parent().unwrap();
+        pane.enter().unwrap();
+        assert_eq!(cursor_name(&pane).as_deref(), Some("aaa.txt"));
+    }
+
+    #[test]
+    fn a_cursor_left_on_the_parent_row_drops_the_remembered_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        for name in ["aaa.txt", "bbb.txt"] {
+            fs::write(sub.join(name), b"x").unwrap();
+        }
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        focus(&mut pane, "sub");
+        pane.enter().unwrap();
+        focus(&mut pane, "bbb.txt");
+        pane.go_parent().unwrap();
+        pane.enter().unwrap();
+        assert_eq!(cursor_name(&pane).as_deref(), Some("bbb.txt"));
+
+        // Leaving via the ".." row itself: nothing worth remembering, so
+        // the stale bbb.txt record goes rather than outliving the visit.
+        pane.cursor = 0;
+        assert!(pane.cursor_is_parent_row());
+        pane.enter().unwrap();
+        assert_eq!(pane.cwd, dir.path());
+        assert!(!pane.cursor_memory.contains_key(&sub));
+        pane.enter().unwrap();
+        assert_eq!(pane.cursor, 0);
+    }
+
+    #[test]
+    fn with_cursor_memory_off_every_arrival_starts_at_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        for name in ["aaa.txt", "bbb.txt"] {
+            fs::write(sub.join(name), b"x").unwrap();
+        }
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        pane.set_cursor_memory(false);
+        focus(&mut pane, "sub");
+        pane.enter().unwrap();
+        focus(&mut pane, "bbb.txt");
+        // Climbing out still lands on the directory just left — that comes
+        // from the climb itself, not from the (now unused) memory map.
+        pane.go_parent().unwrap();
+        assert_eq!(cursor_name(&pane).as_deref(), Some("sub"));
+        assert!(pane.cursor_memory.is_empty());
+
+        pane.enter().unwrap();
+        assert_eq!(pane.cwd, sub);
+        assert_eq!(pane.cursor, 0);
+    }
+
+    #[test]
+    fn turning_cursor_memory_off_drops_what_was_already_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("aaa.txt"), b"x").unwrap();
+        fs::write(sub.join("bbb.txt"), b"x").unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        focus(&mut pane, "sub");
+        pane.enter().unwrap();
+        focus(&mut pane, "bbb.txt");
+        pane.go_parent().unwrap();
+        assert!(!pane.cursor_memory.is_empty());
+
+        pane.set_cursor_memory(false);
+        assert!(pane.cursor_memory.is_empty());
+        pane.enter().unwrap();
+        assert_eq!(pane.cursor, 0);
+
+        // Re-enabling starts fresh rather than resurrecting bbb.txt.
+        pane.set_cursor_memory(true);
+        pane.go_parent().unwrap();
+        pane.enter().unwrap();
+        assert_eq!(pane.cursor, 0);
+    }
+
+    #[test]
+    fn a_jump_restores_the_remembered_position_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        let other = dir.path().join("other");
+        fs::create_dir(&sub).unwrap();
+        fs::create_dir(&other).unwrap();
+        for name in ["aaa.txt", "bbb.txt"] {
+            fs::write(sub.join(name), b"x").unwrap();
+        }
+
+        let mut pane = Pane::new(sub.clone()).unwrap();
+        focus(&mut pane, "bbb.txt");
+        // Bookmark/home/history jumps all funnel through `jump_to`.
+        pane.jump_to(other).unwrap();
+        pane.jump_to(sub).unwrap();
+        assert_eq!(cursor_name(&pane).as_deref(), Some("bbb.txt"));
+    }
+
+    #[test]
+    fn a_remembered_entry_that_is_gone_falls_back_to_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("aaa.txt"), b"x").unwrap();
+        fs::write(sub.join("bbb.txt"), b"x").unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        focus(&mut pane, "sub");
+        pane.enter().unwrap();
+        focus(&mut pane, "bbb.txt");
+        pane.go_parent().unwrap();
+        fs::remove_file(sub.join("bbb.txt")).unwrap();
+
+        pane.enter().unwrap();
+        assert_eq!(pane.cwd, sub);
+        assert_eq!(pane.cursor, 0);
     }
 
     #[cfg(unix)]

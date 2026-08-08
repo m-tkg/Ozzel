@@ -251,6 +251,7 @@ impl App {
                     "command_line_interactive" => self.config.command_line_interactive,
                     "natural_sort" => self.config.natural_sort,
                     "cursor_wrap" => self.config.cursor_wrap,
+                    "cursor_memory" => self.config.cursor_memory,
                     "show_permissions" => self.config.show_permissions,
                     "show_git_status" => self.config.show_git_status,
                     "auto_refresh" => self.config.auto_refresh,

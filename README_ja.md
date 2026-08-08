@@ -118,6 +118,8 @@ ozzel update --force  # バージョンが同じでも強制的に再インス�
 
 **ディレクトリごとのソート記憶:** 明示的なソート変更（`s` の切り替えや `t` のダイアログ）は、そのディレクトリについて記憶されます（最大 200 ディレクトリ。履歴ファイルと同じ場所に `sort_prefs.json` として永続化）。そのディレクトリを再訪すると（`Enter`、`Backspace`、ブックマーク、履歴メニュー、`Shift+←`/`Shift+→`、起動時のいずれの経路でも）記憶されたキーと方向が復元されます。記憶のないディレクトリでは、ペインがそれまで使っていたソートがそのまま維持されます（従来どおりの挙動）。ペインのソートがデフォルト（名前・昇順）から外れている場合、ペインヘッダーに `[s:size↓]` のようなタグが表示されます。
 
+**ディレクトリごとのカーソル位置記憶:** ディレクトリを離れるとき、そのディレクトリでカーソルが当たっていたエントリが記憶され、そこへ戻ってくると（`Enter`、`Backspace`、ブックマーク、履歴メニュー、`Shift+←`/`Shift+→` のいずれの経路でも）カーソルが同じエントリの位置に復元されます。たとえば `/Users/masaki` で `Downloads` にカーソルがある状態から `Backspace` で `/Users` へ移動し、再び `Enter` で `masaki` に入ると、カーソルは `Downloads` の位置に戻ります。記憶されるのは各ディレクトリについて最後の訪問時の位置だけで、`..` の行にカーソルを置いたまま離れた場合は記憶されません。記憶されたエントリがすでに存在しない場合は一覧の先頭に戻ります。アーカイブ内の各階層も同じように扱われます。上記のソート記憶とは違い、この記憶はディスクには保存されず、アプリを終了すると失われます。`cursor_memory = false`（または設定画面の Behavior カテゴリでの切り替え）にすると、この機能は無効になり、移動先では常に一覧の先頭にカーソルが置かれます。その場合でも `Backspace` で直前にいたディレクトリの位置には戻ります。
+
 **カーソルの折り返し:** `cursor_wrap = true`（デフォルトは `false`）にすると、1 行単位のカーソル移動が折り返します。最終行の次は先頭行に、その逆も同様です。ページ移動・`Home`/`End`・マウスホイールは、この設定に関わらず常に端で停止します。
 
 ### マークとファイル操作
@@ -352,7 +354,7 @@ jpg = "open {}"  # 画像を OS のデフォルト GUI アプリで開く（macO
 
 | カテゴリ | 内容 |
 | --- | --- |
-| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` |
+| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` / `cursor_memory` |
 | Colors | `[colors]` 配下の各項目（`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`） |
 | Startup/Integration | `home` / `editor` |
 | Extension Viewers | `[viewers]`（拡張子 → 起動コマンドの一覧。追加・編集・削除） |
@@ -596,6 +598,11 @@ natural_sort = true
 # デフォルトは false。PageUp/PageDown、Home/End、マウスホイールは
 # この設定に関わらず常に端で止まります。
 cursor_wrap = false
+
+# ディレクトリを離れるときにカーソル位置を記憶し、そのディレクトリへ
+# 戻ったときに同じエントリへカーソルを復元するか。デフォルトは true。
+# 記憶はセッション内のみで、ディスクには保存されません。
+cursor_memory = true
 
 # サイズ列の表示形式: "human"（1.5M。デフォルト）、"bytes"（1536）、
 # "bytes_grouped"（1,536）。v キーで実行中に切り替えられ、

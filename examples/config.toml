@@ -82,6 +82,16 @@ file_search_incremental = true
 # regardless of this setting.
 # cursor_wrap = true
 
+# --- Per-directory cursor memory ---------------------------------------------
+# Default true: leaving a directory remembers which entry the cursor was
+# on, and coming back to it (Enter, Backspace, bookmarks, the history
+# menu, Shift+Left/Shift+Right) puts the cursor back there. Only the most
+# recent visit is remembered, and nothing is written to disk — the memory
+# lasts for the session only. Set to false to start every arrival at the
+# top of the listing instead; Backspace still lands on the directory just
+# left even then.
+# cursor_memory = false
+
 # --- Size column format ------------------------------------------------------
 # How the size column renders file sizes:
 #   "human" (default): 1.5K / 2.3M style
