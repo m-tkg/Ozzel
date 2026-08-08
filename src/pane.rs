@@ -560,9 +560,10 @@ impl Pane {
 
     /// Changes `cwd` to an arbitrary directory — descending into a
     /// subdirectory via `enter()`, or jumping there from a history/
-    /// bookmark/home menu selection. Resets cursor/marks/filter on
-    /// success; reverts (and reloads the old `cwd` back) on failure, so a
-    /// bad jump target never leaves the pane stuck mid-transition.
+    /// bookmark/home menu selection. Resets cursor/marks on success (the
+    /// filter, like `dir_size_overrides`/`git`, is cleared up front either
+    /// way); reverts (and reloads the old `cwd` back) on failure, so a bad
+    /// jump target never leaves the pane stuck mid-transition.
     pub fn jump_to(&mut self, path: PathBuf) -> Result<()> {
         let previous_cwd = std::mem::replace(&mut self.cwd, path);
         // `jump_to` always means "go to this real directory" (bookmarks,
@@ -582,11 +583,17 @@ impl Pane {
         // status follows the same rule (a failed jump just re-fetches).
         self.dir_size_overrides.clear();
         self.git = None;
+        // The filter has to be cleared *before* the reload too, for a
+        // different reason: `reload` ends with `clamp_cursor`, which reads
+        // `visible_entries()` and so repopulates `visible_cache`. With a
+        // stale filter still set, that caches the new directory's listing
+        // filtered by the *old* directory's query — usually nothing at all
+        // — and clearing the filter afterwards wouldn't invalidate it.
+        self.filter = None;
         match self.reload() {
             Ok(()) => {
                 self.cursor = 0;
                 self.marks.clear();
-                self.filter = None;
                 Ok(())
             }
             Err(err) => {
@@ -1438,6 +1445,63 @@ mod tests {
         pane.set_filter(FilterSpec::parse("anything"));
         pane.go_parent().unwrap();
         assert!(pane.filter.is_none(), "go_parent must clear the filter");
+    }
+
+    #[test]
+    fn descending_with_an_active_filter_shows_the_full_new_listing() {
+        // Regression: clearing `filter` isn't enough on its own — the
+        // clear has to happen *before* the reload, whose `clamp_cursor`
+        // repopulates `visible_cache`. Done in the wrong order, the new
+        // directory's listing gets cached filtered by the old query and
+        // the pane renders as empty until something else invalidates it
+        // (which is why climbing back out and re-entering "fixed" it).
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join("a.txt"), b"x").unwrap();
+        fs::write(dir.path().join("sub").join("b.txt"), b"x").unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        // Neither child of "sub" matches this query.
+        pane.set_filter(FilterSpec::parse("sub"));
+        let sub_idx = pane
+            .visible_entries()
+            .iter()
+            .position(|item| matches!(item, VisibleItem::Entry(e) if e.name == "sub"))
+            .unwrap();
+        pane.cursor = sub_idx;
+
+        pane.enter().unwrap();
+
+        let names: Vec<&str> = pane
+            .visible_entries()
+            .iter()
+            .filter_map(|item| match item {
+                VisibleItem::Entry(e) => Some(e.name.as_str()),
+                VisibleItem::Parent => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn jump_to_with_an_active_filter_shows_the_full_target_listing() {
+        // Same regression as above, via the other `jump_to` callers:
+        // bookmarks, home, the history menu and `S-left`/`S-right`.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("other")).unwrap();
+        fs::write(dir.path().join("other").join("a.txt"), b"x").unwrap();
+
+        let mut pane = Pane::new(dir.path().to_path_buf()).unwrap();
+        pane.set_filter(FilterSpec::parse("nothing-matches-this"));
+        pane.jump_to(dir.path().join("other")).unwrap();
+
+        assert!(pane.filter.is_none(), "jump_to must clear the filter");
+        assert!(
+            pane.visible_entries()
+                .iter()
+                .any(|item| matches!(item, VisibleItem::Entry(e) if e.name == "a.txt")),
+            "the target directory's entries must be visible after the jump"
+        );
     }
 
     #[test]
