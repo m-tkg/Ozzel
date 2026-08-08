@@ -197,6 +197,30 @@ mod tests {
         panic!("no event for the created file arrived within 5s");
     }
 
+    /// The premise `App`'s git-directory watch rests on: a file written
+    /// one level inside a watched directory is reported as that
+    /// *directory*. `git add`/`commit`/`checkout` write `.git/index` and
+    /// `.git/HEAD`, and what has to come back is `.git` itself.
+    #[test]
+    fn a_file_written_inside_a_watched_directory_is_reported_as_that_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let inner = root.path().join(".git");
+        std::fs::create_dir(&inner).unwrap();
+        let mut watcher = DirWatcher::new().unwrap();
+        assert!(watcher.sync(std::slice::from_ref(&inner)).is_empty());
+
+        std::fs::write(inner.join("index"), b"pretend index").unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if watcher.changed_dirs().contains(&inner) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("no event for the file written inside the watched directory arrived within 5s");
+    }
+
     #[test]
     fn sync_reports_a_path_that_cannot_be_watched_and_does_not_retry_it() {
         let dir = tempfile::tempdir().unwrap();

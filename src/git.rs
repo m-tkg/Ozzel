@@ -45,6 +45,17 @@ impl GitMarker {
 /// `App::handle_task_event` when its background `git status` run finishes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitDirStatus {
+    /// The repository's git directory (`git rev-parse --absolute-git-dir`
+    /// — a plain `<root>/.git` for an ordinary clone, but somewhere under
+    /// `<main>/.git/worktrees/` or `<super>/.git/modules/` for a linked
+    /// worktree or a submodule).
+    ///
+    /// Carried here purely so `App::maybe_resync_watches` can watch it:
+    /// `git add`/`commit`/`checkout` run in another terminal touch only
+    /// `HEAD` and `index` inside this directory, never the pane's own cwd,
+    /// so watching cwd alone leaves the status markers stale. See
+    /// `App::drain_fs_events`.
+    pub git_dir: PathBuf,
     /// Current branch name (short hash when detached).
     pub branch: String,
     /// Absolute path (a direct child of the pane's cwd) -> marker.
