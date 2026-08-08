@@ -186,7 +186,17 @@ mod tests {
             panic!("the first event must be the status");
         };
         let status = status.expect("a real repository must report a status");
-        assert_eq!(status.git_dir, root.join(".git"));
+        // Compared canonicalized, because git and Rust don't spell a
+        // Windows path the same way: git answers
+        // `C:/Users/…/.git` while `fs::canonicalize` gives
+        // `\\?\C:\Users\…\.git`. Harmless for the watch itself —
+        // `DirWatcher` canonicalizes both sides of its own comparison, and
+        // reports changes back under the path it was handed — but it does
+        // mean this assertion can't be a raw path equality.
+        assert_eq!(
+            std::fs::canonicalize(&status.git_dir).unwrap(),
+            std::fs::canonicalize(root.join(".git")).unwrap()
+        );
         assert_eq!(status.branch, "trunk");
         assert_eq!(status.statuses[&root.join("a.txt")], GitMarker::Untracked);
     }
