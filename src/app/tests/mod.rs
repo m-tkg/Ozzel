@@ -5,6 +5,7 @@ mod dispatch;
 mod external;
 mod file_ops;
 mod file_search;
+mod git_diff_action;
 mod git_status;
 mod mouse;
 mod navigation;

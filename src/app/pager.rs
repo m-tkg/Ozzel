@@ -211,6 +211,100 @@ impl App {
         };
     }
 
+    /// `S-g` (git diff): shows the diff behind the cursor entry's git
+    /// status marker — `git diff HEAD -- <entry>` run in the pane's own
+    /// directory, rendered in the same viewer `=` uses
+    /// (`ViewerSyntax::Diff`). Works on directory rows too, whose marker
+    /// aggregates everything below them (see `git::parse_porcelain`), so
+    /// the diff then covers that whole subtree.
+    ///
+    /// Reads the marker straight off `pane.git` rather than asking `git`
+    /// first: an unmarked entry, an untracked one (nothing committed to
+    /// diff against), or a pane outside a work tree can all be answered
+    /// with a log line instead of spawning a process. That does mean this
+    /// is only as fresh as the last background probe — `Ctrl+R` re-probes
+    /// (see `App::maybe_refresh_git`), and `show_git_status = false`
+    /// disables the markers and therefore this action too.
+    ///
+    /// Runs `git` synchronously, unlike the status probe: a single-path
+    /// diff is fast and its output small, and the whole point is to land
+    /// in the viewer on the same keypress. Output past the viewer's
+    /// `SIZE_CAP` is truncated and flagged in the title, same as any
+    /// oversized file.
+    pub(super) fn begin_git_diff(&mut self) {
+        if self.reject_if_virtual("git_diff") {
+            return;
+        }
+        let pane = self.active_pane();
+        let Some(git) = pane.git.as_ref() else {
+            self.log_error(
+                "no git status for this directory (not a work tree, or show_git_status is off)",
+            );
+            return;
+        };
+        let Some(entry) = pane.selected_entry() else {
+            self.log_error("no entry selected to diff");
+            return;
+        };
+        let name = entry.name.clone();
+        let path = entry.path.clone();
+        let marker = git.statuses.get(&path).copied();
+        let cwd = pane.cwd.clone();
+
+        match marker {
+            None => {
+                self.log_info(format!("{name}: no git changes"));
+                return;
+            }
+            Some(crate::git::GitMarker::Untracked) => {
+                self.log_info(format!(
+                    "{name}: untracked — nothing committed to diff against"
+                ));
+                return;
+            }
+            Some(_) => {}
+        }
+
+        let raw = match crate::git_cmd::diff(&cwd, &path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                self.log_error(format!("{name}: {err}"));
+                return;
+            }
+        };
+        if raw.is_empty() {
+            // A marker with an empty diff isn't a contradiction: a purely
+            // renamed (content-identical) file, or a directory row whose
+            // only changes are untracked files, both land here.
+            self.log_info(format!("{name}: git diff is empty"));
+            return;
+        }
+
+        let truncated = raw.len() as u64 > viewer::SIZE_CAP;
+        let raw = if truncated {
+            raw[..viewer::SIZE_CAP as usize].to_vec()
+        } else {
+            raw
+        };
+        let title = format!(
+            "git diff: {}{}",
+            path.display(),
+            if truncated { " [truncated]" } else { "" }
+        );
+        let loaded = viewer::load_bytes(raw, truncated);
+        self.mode = Mode::Viewer {
+            path: PathBuf::from(title),
+            lines: loaded.lines,
+            bytes: loaded.bytes,
+            view_mode: ViewMode::Text,
+            scroll: 0,
+            h_scroll: 0,
+            truncated,
+            syntax: ViewerSyntax::Diff,
+            search: ViewerSearch::Idle,
+        };
+    }
+
     /// The Virtual Directory counterpart of `open_viewer`: extracts
     /// `inner_path` from `archive_path` fully into memory (capped at
     /// `viewer::SIZE_CAP`, same as any other viewer open) rather than

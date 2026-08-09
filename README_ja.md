@@ -143,6 +143,7 @@ ozzel update --force  # バージョンが同じでも強制的に再インス�
 | `T`（Shift+t） | touch: タイムスタンプを入力するプロンプトを表示し（カーソル位置のエントリの mtime が入力済み。形式は `YYYY-MM-DD HH:MM:SS`、`YYYY-MM-DD HH:MM`、`YYYY-MM-DD`。空入力 = 現在時刻）、マークした（またはカーソル位置の）エントリの更新／アクセス時刻をその値に設定する |
 | `I`（Shift+i） | カーソル位置のエントリのファイル情報ダイアログを表示：フルパス、種別、リンク先（シンボリックリンクの場合）、正確なバイトサイズ、パーミッションと 8 進モード、所有者／グループ、ハードリンク数、inode、更新／アクセス／変更の各時刻。すべて開いた時点でディスクから読み直される。マークがある場合はサマリ行（`N item(s), files total X bytes` — ファイルの浅いサイズのみ）が末尾に追加される。`Esc`/`Enter`/`q` で閉じる |
 | `=` | カーソル位置のファイルと、反対側のペインのディレクトリにある同名ファイルを diff し、色付きの unified diff（コンテキスト 3 行。`+` は緑、`-` は赤、`@@` はシアン、ヘッダーは太字）として組み込みビューアに表示する。ビューアの通常のキー（スクロール、`/` 検索、`q` で閉じる）はそのまま使える。同一のファイル、バイナリファイル、対応するファイルがない場合は、開かずにログに記録するだけ。読み込みはビューアの 10 MiB 制限が適用される（タイトルに `[truncated]` が表示される） |
+| `G`（Shift+g） | カーソル位置のエントリの `git diff`（[git ステータスマーカー](#git-ステータス)の元になっている変更）を、色付きの diff として組み込みビューアに表示する（配色とキーは `=` と同じ）。ペイン自身のディレクトリで `git diff HEAD -- <エントリ>` を実行するため、ステージ済みのうえでさらに編集したファイルは両方の差分が 1 つの diff にまとめて表示される。ディレクトリの行はマーカーが配下すべてを集約したものなので、diff もその配下全体を対象とする。マーカーのないエントリ（`no git changes`）、未追跡のエントリ（比較対象のコミットがない）、git ステータスがまったくないペインの場合は、開かずにログに記録するだけ。出力はビューアの 10 MiB 制限が適用される（タイトルに `[truncated]` が表示される） |
 | `W`（Shift+w） | ダイアログでモードを選択したうえで（`↑`/`↓`、または自分の `cursor_up`/`cursor_down` キーで移動）、アクティブペインの **ディレクトリ全体** を反対側のペインへ同期する。**Update copy** は新規／不足しているファイルのみをコピーする（サイズが異なる、またはコピー元が 1 秒以上新しい場合に再コピーする — この許容差は FAT 系の mtime 粒度を吸収するため。コピー先が削除されることはなく、コピー先のほうが新しいファイルはそのまま残される）。**Mirror** はさらに、コピー先にしか存在しないものをすべて削除する — mirror は `confirm_operations` の設定に関わらず常に明示的な削除確認を表示し、その削除は `delete_behavior`（デフォルトはゴミ箱）に従う。バイト単位の進捗を表示するキャンセル可能なバックグラウンドタスクとして実行される。シンボリックリンクはリンク先で比較され、リンクとして再作成される（辿られることはない）。同一ディレクトリ、および（どちらの向きであれ）入れ子になっているペインの組み合わせは拒否される |
 
 デフォルトでは `D`/`R` は小文字（`d`/`r`）にも同時にバインドされています。これは「複数のキー → 1 つのアクション」の具体例です（後述の `[bindings]` セクションで自分でも追加できます）。
@@ -175,6 +176,8 @@ git の work tree 内では、各ペインが現在のディレクトリの git 
 
 - **行ごとのマーカー列**（マーク列の左）: `U` コンフリクト、`M` 変更、`A` 追加、`D` 削除、`R` リネーム、`?` 未追跡。ディレクトリの行は配下のすべてを集約し、優先度の最も高い状態（`U` > `M` > `A` > `D` > `R` > `?`）を表示します。巨大なリポジトリでは、そのペイン自身のサブツリーのみをスキャンします。
 - **ペインヘッダー 2 行目の `⎇ ブランチ` セル**（HEAD が detached の場合は短いコミットハッシュ）。
+
+マーカーが付いた行で `G`（Shift+g）を押すと、そのマーカーの元になっている変更 — そのエントリに対する `git diff HEAD` — を組み込みビューアで確認できます（詳細は上のキー一覧を参照）。マーカー自体は `git` に再度問い合わせるのではなく直前のプローブの結果を参照するため、このアクションの鮮度は列の表示とまったく同じです。`Ctrl+R` で再プローブされ、`show_git_status = false` の場合はマーカーがないため `G` も機能しません。
 
 work tree の外では — あるいは `git` がまったくないマシンでは — 何も表示されず、何も変わりません。これらのプローブはタスクシステムから切り離して実行されます。実行中タスクとして現れることはなく、終了を妨げることもなく、`Ctrl+K` の影響も受けません。ペインが狭すぎる場合は、名前の列が圧迫される前にマーカー列が落とされます（パーミッション列と同じ方針）。設定で `show_git_status = false` にする（設定画面でも可）とプローブ自体を完全に無効化できます。
 
@@ -717,7 +720,7 @@ delete = ["d", "S-d"]
 
 ### アクション名（`[keys]` の右辺 ／ `[bindings]` の左辺に指定できる値）
 
-`cursor_up`、`cursor_down`、`focus_left`、`focus_right`、`page_up`、`page_down`、`top`、`bottom`、`switch_pane`、`open`、`parent`、`cycle_sort`、`sort_dialog`、`toggle_size_format`、`calc_dir_size`、`toggle_hidden`、`swap_panes`、`match_other_pane`、`refresh`、`mark`、`mark_all`、`rename`、`rename_marks`、`mkdir`、`delete`、`copy`、`move`、`duplicate`、`copy_path`、`copy_dir_path`、`filter`、`clear_filter`、`jump_search`、`file_search`、`zip_marked`、`unzip`、`cancel_tasks`、`symlink`、`chmod`、`touch`、`file_info`、`diff`、`sync_dirs`、`history_jump`、`history_back`、`history_forward`、`bookmark_jump`、`bookmark_add`、`go_home`、`command_line`、`open_editor`、`open_default`、`help`、`edit_config`、`show_log`、`function_list`、`settings`、`process_manager`、`quit`
+`cursor_up`、`cursor_down`、`focus_left`、`focus_right`、`page_up`、`page_down`、`top`、`bottom`、`switch_pane`、`open`、`parent`、`cycle_sort`、`sort_dialog`、`toggle_size_format`、`calc_dir_size`、`toggle_hidden`、`swap_panes`、`match_other_pane`、`refresh`、`mark`、`mark_all`、`rename`、`rename_marks`、`mkdir`、`delete`、`copy`、`move`、`duplicate`、`copy_path`、`copy_dir_path`、`filter`、`clear_filter`、`jump_search`、`file_search`、`zip_marked`、`unzip`、`cancel_tasks`、`symlink`、`chmod`、`touch`、`file_info`、`diff`、`git_diff`、`sync_dirs`、`history_jump`、`history_back`、`history_forward`、`bookmark_jump`、`bookmark_add`、`go_home`、`command_line`、`open_editor`、`open_default`、`help`、`edit_config`、`show_log`、`function_list`、`settings`、`process_manager`、`quit`
 
 この一覧に対応する現在有効なキーバインドは、アプリ内のヘルプ画面（`h`/`?`）からいつでも確認できます。
 
