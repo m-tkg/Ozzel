@@ -354,7 +354,7 @@ A full-screen settings UI structured like `raspi-config`, with three levels: cat
 
 | Category | Contents |
 | --- | --- |
-| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` / `cursor_memory` |
+| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` / `cursor_memory` / `clear_on_suspend` |
 | Colors | Each item under `[colors]` (`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`) |
 | Startup/Integration | `home` / `editor` |
 | Extension Viewers | `[viewers]` (list of extension → launch command; add/edit/delete) |
@@ -464,6 +464,8 @@ Opening a file/directory with the OS default app (the `open_default` action) is 
 If Ctrl+C is pressed inside the child process launched by `:`, only the child process is interrupted — `ozzel` itself keeps running (the child process is given its own process group and treated as the terminal's foreground group).
 
 **The shell for `:` is launched in non-interactive mode** (unix: `$SHELL -c <command>`; Windows: `%COMSPEC% /C`). A non-interactive shell does not load `.zshrc`/`.bashrc`, so aliases and shell functions defined for interactive shells are not available by default. Setting `command_line_interactive = true` (or the "Behavior" category in the settings screen) launches it with `-i` (`$SHELL -i -c ...`) instead, loading the rc file so aliases and functions can be used. The trade-off is the rc-loading cost and side effects on every `:` command (prompt-initialization output, interactive aliases like `rm -i` becoming active, and possibly history-file writes, depending on the rc file). Do not enable this if your rc file contains startup logic like `exec tmux`. On Windows there is no equivalent concept, so this setting is ignored. Launching the editor via `e`/`,`, and commands under `[viewers]`, are always run non-interactively regardless of this setting.
+
+**The terminal is blanked while the external command has it (`clear_on_suspend`, default `true`).** Handing the terminal over means leaving the alternate screen, which restores it exactly as it was before `ozzel` started — so a command that opens its *own* alternate screen (`less`, `vim`, most pagers) briefly flashes that pre-`ozzel` content before taking over. With this setting on, the restored screen is blanked and the cursor homed right after the switch, so that moment shows an empty terminal instead. Scrollback is never touched, and a command that prints to the normal screen (`ls`, `grep`) still gets a clean one to print onto. Set `clear_on_suspend = false` (or flip it in the settings screen's "Behavior" category) to keep the terminal exactly as it was.
 
 **`,` determines the editor for opening the config file slightly differently from `e`.** It is decided in the order `config.editor` → `$EDITOR` → (if neither is set) `vim`, and unlike `e`, "no editor configured" is never an error (it would be self-defeating if the key for editing the config file didn't work without a config). When the editor exits, the config file is reloaded, and if parsing succeeds, key bindings, colors, delete behavior, and so on are applied on the spot, with `config reloaded` logged (no app restart needed). If the reloaded TOML is invalid, unlike other configuration errors, the app is not terminated — the error is logged and **the previous settings and key bindings continue to be used** (an invalid config at startup is a hard error, but a reload while running must not crash the app).
 
@@ -614,6 +616,12 @@ size_format = "human"
 # aliases and functions available from :  (be aware of the rc-loading cost and side effects).
 # unix only. Ignored on Windows.
 command_line_interactive = false
+
+# Whether to blank the terminal while an external command (`:`, the `e` editor, a
+# [viewers] entry) has it. Default is true: leaving the alternate screen restores
+# the terminal as it was before ozzel started, which a pager like less would
+# otherwise flash on screen before taking over. Scrollback is never touched.
+clear_on_suspend = true
 
 # Whether to enable mouse capture. Default is true (click to focus/move the cursor,
 # wheel scrolling, drag to toggle-mark a range, double-click to open). Setting it to

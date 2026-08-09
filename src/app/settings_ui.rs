@@ -252,6 +252,7 @@ impl App {
                     "natural_sort" => self.config.natural_sort,
                     "cursor_wrap" => self.config.cursor_wrap,
                     "cursor_memory" => self.config.cursor_memory,
+                    "clear_on_suspend" => self.config.clear_on_suspend,
                     "show_permissions" => self.config.show_permissions,
                     "show_git_status" => self.config.show_git_status,
                     "auto_refresh" => self.config.auto_refresh,

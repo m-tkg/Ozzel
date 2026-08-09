@@ -114,6 +114,19 @@ file_search_incremental = true
 # tmux. Only takes effect on unix; ignored on Windows.
 command_line_interactive = false
 
+# --- Blank the terminal while an external command runs -----------------------
+# Default true: when ozzel hands the terminal to an external command
+# (`:`, the `e` editor, a [viewers] entry), it leaves the alternate
+# screen — which restores the terminal exactly as it was before ozzel
+# started. A command that opens its own alternate screen (less, vim,
+# most pagers) then flashes that old content for a moment before taking
+# over. With this on, the restored screen is blanked immediately, so
+# that moment shows an empty terminal instead. Scrollback is never
+# touched, and commands that print to the normal screen (ls, grep) still
+# get a clean screen to print onto. Set to false to keep the old
+# behavior and always see the terminal as it was.
+# clear_on_suspend = false
+
 # --- Mouse operations -------------------------------------------------------
 # Default true: enables pane/cursor movement by click, scrolling with
 # the wheel, range toggle-marking by drag (flips the mark state of the
