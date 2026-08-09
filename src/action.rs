@@ -90,6 +90,10 @@ pub enum Action {
     /// pane's directory and shows the unified diff in the viewer, colored
     /// (`ViewerSyntax::Diff`). See `App::begin_diff`.
     Diff,
+    /// Shows `git diff HEAD` for the cursor entry — the diff behind the
+    /// pane's git status marker — in the same colored viewer `Diff` uses.
+    /// See `App::begin_git_diff`.
+    GitDiff,
     /// Syncs the active pane's directory onto the other pane's, after a
     /// mode dialog (update copy vs mirror-with-deletes). See
     /// `App::begin_sync_dirs` / `tasks::sync`.
@@ -200,7 +204,7 @@ impl Action {
     /// derived "iterate all variants") so adding a variant is a compile
     /// error here *and* in `category`/`description`/`config_name` below
     /// (all exhaustive matches) until every one of them accounts for it.
-    pub const ALL: [Action; 59] = [
+    pub const ALL: [Action; 60] = [
         Action::CursorUp,
         Action::CursorDown,
         Action::PageUp,
@@ -239,6 +243,7 @@ impl Action {
         Action::Touch,
         Action::FileInfo,
         Action::Diff,
+        Action::GitDiff,
         Action::SyncDirs,
         Action::Filter,
         Action::ClearFilter,
@@ -271,7 +276,7 @@ impl Action {
             Mark | MarkAll => ActionCategory::Marks,
             Rename | RenameMarks | Mkdir | Delete | Copy | Move | Duplicate | CopyPath
             | CopyDirPath | CalcDirSize | ZipMarked | Unzip | CancelTasks | Symlink | Chmod
-            | Touch | FileInfo | Diff | SyncDirs => ActionCategory::FileOps,
+            | Touch | FileInfo | Diff | GitDiff | SyncDirs => ActionCategory::FileOps,
             Filter | ClearFilter | JumpSearch | FileSearch => ActionCategory::Filter,
             HistoryJump | HistoryBack | HistoryForward | BookmarkJump | BookmarkAdd | GoHome => {
                 ActionCategory::Jumps
@@ -329,6 +334,7 @@ impl Action {
             Touch => "Set the modified time of marked entries (or the cursor entry)",
             FileInfo => "Show detailed information about the cursor entry",
             Diff => "Diff the cursor file against the same-named file in the other pane",
+            GitDiff => "Show git diff for the cursor entry (the diff behind its status marker)",
             SyncDirs => "Sync this pane's directory onto the other pane (update copy or mirror)",
             Filter => "Start an incremental filter",
             ClearFilter => "Clear the active filter",
@@ -400,6 +406,7 @@ impl Action {
             Touch => "touch",
             FileInfo => "file_info",
             Diff => "diff",
+            GitDiff => "git_diff",
             SyncDirs => "sync_dirs",
             HistoryJump => "history_jump",
             HistoryBack => "history_back",

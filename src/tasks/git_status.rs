@@ -1,13 +1,13 @@
-//! The background `git status` worker: shells out to the `git` CLI (no
-//! libgit2 — the project's pure-Rust dependency policy rules out a C
-//! toolchain, and `git` on PATH is the pragmatic alternative), parses the
+//! The background `git status` worker: shells out to the `git` CLI (via
+//! `crate::git_cmd`; no libgit2 — the project's pure-Rust dependency
+//! policy rules out a C toolchain, and `git` on PATH is the pragmatic
+//! alternative), parses the
 //! porcelain output via `crate::git`, and reports one structured
 //! `TaskEvent::GitStatus` per run. A directory that isn't inside a git
 //! work tree (or a machine with no `git` at all) reports `status: None` —
 //! that's a normal outcome, not an error.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -16,21 +16,10 @@ use crate::git::{GitDirStatus, parse_porcelain};
 
 use super::{TaskEvent, TaskId, finish_cancelled};
 
-/// Runs `git` with `args` in `dir`, returning stdout only on a zero exit.
-///
-/// `--no-optional-locks` matters more than it looks: without it a plain
-/// `git status` rewrites `.git/index` to refresh its stat cache, and since
-/// `App` now watches the git directory (see `GitDirStatus::git_dir`) that
-/// write would come straight back as a change event, re-probing forever.
+/// This module's `&[&str]`-shaped view of `git_cmd::output` — which is
+/// where the flags every invocation carries, and why, are documented.
 fn git_output(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("git")
-        .arg("--no-optional-locks")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    output.status.success().then_some(output.stdout)
+    crate::git_cmd::output(dir, args.iter().copied())
 }
 
 fn stdout_line(bytes: Vec<u8>) -> String {

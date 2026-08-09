@@ -1368,6 +1368,10 @@ impl App {
                 self.begin_diff();
                 Ok(())
             }
+            Action::GitDiff => {
+                self.begin_git_diff();
+                Ok(())
+            }
             Action::SyncDirs => {
                 self.begin_sync_dirs();
                 Ok(())

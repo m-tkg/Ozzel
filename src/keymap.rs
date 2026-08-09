@@ -205,6 +205,9 @@ impl Keymap {
     /// in the background, and `m` renames the marked entries one prompt
     /// at a time. `S-p` (capital `P`) opens the process manager
     /// (`crate::process`) — lower-case `p` is already `ZipMarked`.
+    /// `S-g` (capital `G`) shows `git diff` for the cursor entry, next to
+    /// `=`'s pane-against-pane diff — lower-case `g` is already
+    /// `FileSearch`.
     pub fn defaults() -> Self {
         use Action::*;
         let pairs: &[(&str, Action)] = &[
@@ -261,6 +264,7 @@ impl Keymap {
             ("T", Touch),
             ("I", FileInfo),
             ("=", Diff),
+            ("G", GitDiff),
             ("W", SyncDirs),
             ("Y", CopyDirPath),
             ("h", Help),
