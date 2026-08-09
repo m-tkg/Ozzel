@@ -354,7 +354,7 @@ jpg = "open {}"  # 画像を OS のデフォルト GUI アプリで開く（macO
 
 | カテゴリ | 内容 |
 | --- | --- |
-| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` / `cursor_memory` |
+| Behavior | `confirm_operations` / `confirm_quit` / `quit_cd` / `mouse` / `delete_behavior` / `show_permissions` / `show_git_status` / `auto_refresh` / `process_auto_refresh` / `dim_inactive` / `file_search_incremental` / `command_line_interactive` / `cursor_memory` / `clear_on_suspend` |
 | Colors | `[colors]` 配下の各項目（`cursor` / `cursor_inactive` / `directory` / `hidden` / `executable`） |
 | Startup/Integration | `home` / `editor` |
 | Extension Viewers | `[viewers]`（拡張子 → 起動コマンドの一覧。追加・編集・削除） |
@@ -464,6 +464,8 @@ OS のデフォルトアプリでファイル／ディレクトリを開く（`o
 `:` で起動した子プロセス内で Ctrl+C を押した場合、中断されるのは子プロセスだけで、`ozzel` 自体は動作を続けます（子プロセスには独自のプロセスグループが与えられ、端末のフォアグラウンドグループとして扱われます）。
 
 **`:` のシェルは非対話モードで起動されます**（unix: `$SHELL -c <command>`、Windows: `%COMSPEC% /C`）。非対話シェルは `.zshrc`/`.bashrc` を読み込まないため、対話シェル向けに定義したエイリアスやシェル関数はデフォルトでは使えません。`command_line_interactive = true` に設定する（または設定画面の「Behavior」カテゴリで変更する）と、代わりに `-i` 付き（`$SHELL -i -c ...`）で起動し、rc ファイルを読み込むのでエイリアスや関数が使えるようになります。トレードオフは、`:` コマンドのたびに発生する rc の読み込みコストと副作用です（プロンプト初期化の出力、`rm -i` のような対話用エイリアスが有効になること、rc ファイル次第では履歴ファイルへの書き込みなど）。rc ファイルに `exec tmux` のような起動時ロジックがある場合は有効にしないでください。Windows には相当する概念がないため、この設定は無視されます。`e`/`,` によるエディタの起動と `[viewers]` のコマンドは、この設定に関わらず常に非対話で実行されます。
+
+**外部コマンドに端末を渡している間、画面は消去されます**（`clear_on_suspend`、デフォルト `true`）。端末を渡すには代替スクリーンを抜ける必要があり、そのとき端末は `ozzel` を起動する前の状態に復元されます。そのため、`less` や `vim` のように**自分自身の代替スクリーン**を開くコマンドでは、画面を占有する直前に起動前の内容が一瞬見えてしまいます。この設定が有効な場合、切り替えの直後に復元された画面を消去してカーソルを左上に移動するため、その一瞬は空の端末が表示されます。スクロールバックには影響せず、`ls` や `grep` のように通常画面へ出力するコマンドも、きれいな画面に出力できます。`clear_on_suspend = false` にする（または設定画面の「Behavior」カテゴリで変更する）と、従来どおり端末の内容がそのまま見えます。
 
 **`,` は設定ファイルを開くエディタの決定方法が `e` とは少し異なります。** `config.editor` → `$EDITOR` → （どちらも未設定なら）`vim` の順に決定され、`e` と違って「エディタが設定されていない」がエラーになることはありません（設定ファイルを編集するためのキーが、設定がないと動かないのでは本末転倒だからです）。エディタが終了すると設定ファイルが再読み込みされ、パースに成功すればキーバインド・色・削除の挙動などがその場で適用され、`config reloaded` がログに記録されます（アプリの再起動は不要です）。再読み込みした TOML が不正な場合、他の設定エラーとは異なりアプリは終了せず、エラーがログに記録されて **それまでの設定とキーバインドが引き続き使われます**（起動時の不正な設定はハードエラーですが、実行中の再読み込みでアプリをクラッシュさせるわけにはいかないためです）。
 
@@ -614,6 +616,12 @@ size_format = "human"
 # エイリアスや関数が : から使えるようになります（rc の読み込みコストと副作用に注意）。
 # unix のみ。Windows では無視されます。
 command_line_interactive = false
+
+# 外部コマンド（`:`、`e` のエディタ、[viewers] のエントリ）に端末を渡している
+# 間、画面を消去するか。デフォルトは true。代替スクリーンを抜けると ozzel 起動前
+# の端末内容が復元されるため、less のようなページャが画面を占有する直前に一瞬それ
+# が見えてしまうのを防ぎます。スクロールバックには影響しません。
+clear_on_suspend = true
 
 # マウスキャプチャを有効にするか。デフォルトは true（クリックでフォーカス／カーソル移動、
 # ホイールスクロール、ドラッグで範囲のマーク切り替え、ダブルクリックで開く）。

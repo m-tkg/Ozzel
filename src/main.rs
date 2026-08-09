@@ -204,7 +204,17 @@ fn run(
         // anyway, so this is really just "don't assume it's always on".
         if let Some(req) = outbox.external {
             let mouse_was_active = MOUSE_CAPTURE_ACTIVE.load(Ordering::SeqCst);
-            match external::run_suspended(terminal, &req, keyboard_enhancement, mouse_was_active) {
+            // `clear_on_suspend` is read fresh here for the same reason
+            // as the capture flag above: `,`/the settings screen can have
+            // changed it since startup.
+            let clear_on_suspend = app.config.clear_on_suspend;
+            match external::run_suspended(
+                terminal,
+                &req,
+                keyboard_enhancement,
+                mouse_was_active,
+                clear_on_suspend,
+            ) {
                 Ok(Some(spawn_error)) => app.log_error(spawn_error),
                 Ok(None) => {}
                 Err(err) => return Err(err),

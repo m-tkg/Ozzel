@@ -111,7 +111,7 @@ pub enum ItemKind {
     OptionalText,
 }
 
-pub const BEHAVIOR_ITEMS: [Item; 16] = [
+pub const BEHAVIOR_ITEMS: [Item; 17] = [
     Item {
         key: "confirm_operations",
         label: "confirm_operations (confirm before copy/move)",
@@ -193,6 +193,11 @@ pub const BEHAVIOR_ITEMS: [Item; 16] = [
     Item {
         key: "cursor_memory",
         label: "cursor_memory (restore the cursor position when revisiting a directory)",
+        kind: ItemKind::Bool,
+    },
+    Item {
+        key: "clear_on_suspend",
+        label: "clear_on_suspend (blank the terminal while an external command runs)",
         kind: ItemKind::Bool,
     },
 ];
@@ -328,6 +333,7 @@ pub fn item_value_display(category: Category, item: &Item, config: &Config) -> S
                 "natural_sort" => config.natural_sort,
                 "cursor_wrap" => config.cursor_wrap,
                 "cursor_memory" => config.cursor_memory,
+                "clear_on_suspend" => config.clear_on_suspend,
                 "show_permissions" => config.show_permissions,
                 "show_git_status" => config.show_git_status,
                 "auto_refresh" => config.auto_refresh,
@@ -600,6 +606,26 @@ mod tests {
     }
 
     // --- display helpers ---------------------------------------------------
+
+    /// Every item in the three static tables has to have a matching arm in
+    /// `item_value_display`, which is an `unreachable!` on a miss — so a
+    /// setting added to a table but not to the lookup would panic the
+    /// settings screen the first time it scrolled into view. Rendering
+    /// every one of them here catches that at test time instead.
+    #[test]
+    fn every_static_item_renders_a_value() {
+        let config = Config::default();
+        for (category, items) in [
+            (Category::Behavior, &BEHAVIOR_ITEMS[..]),
+            (Category::Colors, &COLOR_ITEMS[..]),
+            (Category::Startup, &STARTUP_ITEMS[..]),
+        ] {
+            for item in items {
+                let value = item_value_display(category, item, &config);
+                assert!(!value.is_empty(), "{} rendered nothing", item.key);
+            }
+        }
+    }
 
     #[test]
     fn display_bool_reads_on_off() {

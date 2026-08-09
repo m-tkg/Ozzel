@@ -218,6 +218,19 @@ fn default_cursor_memory() -> bool {
     true
 }
 
+/// Handing the terminal to an external command (`:`, `e`, a `[viewers]`
+/// entry) leaves the alternate screen, which restores the main screen
+/// exactly as the shell left it before ozzel started — so a child that
+/// opens its *own* alternate screen (`less`, `vim`) flashes that
+/// pre-ozzel content for the few milliseconds before it takes over. By
+/// default the restored screen is blanked right after the switch, turning
+/// that flash into an empty terminal. A top-level
+/// `clear_on_suspend = false` keeps the old behavior (never blanks
+/// anything); scrollback is untouched either way.
+fn default_clear_on_suspend() -> bool {
+    true
+}
+
 fn deserialize_color<'de, D>(deserializer: D) -> std::result::Result<Color, D::Error>
 where
     D: Deserializer<'de>,
@@ -341,6 +354,12 @@ pub struct Config {
     /// (panes never read config), like `natural_sort`.
     #[serde(default = "default_cursor_memory")]
     pub cursor_memory: bool,
+    /// Whether the main screen is blanked while an external command has
+    /// the terminal — see `default_clear_on_suspend`. Read by `main.rs`
+    /// at the point it calls `external::run_suspended`, so a live config
+    /// reload takes effect on the very next suspend.
+    #[serde(default = "default_clear_on_suspend")]
+    pub clear_on_suspend: bool,
     /// How the size column renders sizes — cycled by `v`
     /// (toggle_size_format), which persists the choice here.
     #[serde(default)]
@@ -408,6 +427,7 @@ impl Default for Config {
             natural_sort: default_natural_sort(),
             cursor_wrap: default_cursor_wrap(),
             cursor_memory: default_cursor_memory(),
+            clear_on_suspend: default_clear_on_suspend(),
             size_format: SizeFormat::default(),
             show_permissions: default_show_permissions(),
             show_git_status: default_show_git_status(),

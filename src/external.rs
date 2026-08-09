@@ -10,12 +10,14 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::cursor::Show;
+use ratatui::crossterm::cursor::{MoveTo, Show};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, PopKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
+use ratatui::crossterm::terminal::{
+    Clear, ClearType, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 
 use crate::terminal::write_startup_sequence;
 
@@ -112,9 +114,38 @@ fn unix_shell_command(shell: &str, cmdline: &str, interactive: bool) -> (String,
     (shell.to_string(), args)
 }
 
+/// The bytes that hand the *screen* back to a child process, written
+/// once raw mode is already off (that part isn't a byte sequence, so it
+/// can't live here): leave the alternate screen and show the cursor,
+/// with an optional blanking of what leaving just restored.
+///
+/// Leaving the alternate screen puts the main screen back exactly as the
+/// shell left it before ozzel started. A child that draws on the main
+/// screen (`ls`, `grep`) wants precisely that. A child that opens its
+/// *own* alternate screen (`less`, `vim`, most pagers) does not: for the
+/// few milliseconds between ozzel leaving and the child entering, the
+/// pre-ozzel terminal contents flash up on screen. With `clear` — the
+/// `clear_on_suspend` setting, on by default — the restored screen is
+/// blanked and the cursor homed immediately after, so that gap shows an
+/// empty terminal instead of somebody's earlier session. Scrollback is
+/// untouched either way (`Clear::All`, not `Clear::Purge`), and a child
+/// that prints to the main screen still gets a clean one to print onto.
+///
+/// Split out as its own `Write`-generic function purely so the ordering
+/// can be asserted against captured bytes in tests, the same way
+/// `terminal::write_startup_sequence`/`write_teardown_sequence` are.
+pub(crate) fn write_suspend_sequence<W: Write>(w: &mut W, clear: bool) -> io::Result<()> {
+    execute!(w, LeaveAlternateScreen)?;
+    if clear {
+        execute!(w, Clear(ClearType::All), MoveTo(0, 0))?;
+    }
+    execute!(w, Show)
+}
+
 /// Runs `req.cmdline` with the TUI suspended:
 ///
-/// 1. leave raw mode + the alternate screen, show the cursor
+/// 1. leave raw mode + the alternate screen (blanking what that restores
+///    unless `clear_on_suspend` is off), show the cursor
 /// 2. spawn `%COMSPEC% /C <cmdline>` (Windows) or `$SHELL -c <cmdline>`
 ///    (unix) with stdio inherited, in `req.cwd`, and block on it
 /// 3. if `req.pause_after`, print the exit status and wait for one
@@ -150,11 +181,15 @@ fn unix_shell_command(shell: &str, cmdline: &str, interactive: bool) -> (String,
 /// stack, so its ordering relative to the alternate screen doesn't matter
 /// for correctness the way the keyboard flags' does; it's kept alongside
 /// them here purely for symmetry).
+///
+/// `clear_on_suspend` is passed straight through to
+/// `write_suspend_sequence` — see that function for what it does and why.
 pub fn run_suspended(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     req: &ExternalRequest,
     keyboard_enhancement: bool,
     mouse: bool,
+    clear_on_suspend: bool,
 ) -> Result<Option<String>> {
     // Popped *before* `LeaveAlternateScreen`, while the alternate screen
     // is still current — see this function's doc comment.
@@ -166,7 +201,7 @@ pub fn run_suspended(
         execute!(io::stdout(), DisableMouseCapture).context("failed to disable mouse capture")?;
     }
     disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(io::stdout(), LeaveAlternateScreen, Show)
+    write_suspend_sequence(&mut io::stdout(), clear_on_suspend)
         .context("failed to leave alternate screen")?;
 
     let (program, args) = shell_command(&req.cmdline, req.interactive);
@@ -201,8 +236,8 @@ pub fn run_suspended(
     // opinion on mouse capture (not a per-screen-buffer stack, so its
     // ordering here doesn't affect correctness — see that function's doc
     // comment), so composing the two here produces identical output to
-    // the three calls this replaced. The *leaving* half (just above this
-    // closure) is deliberately **not** unified with
+    // the three calls this replaced. The *leaving* half
+    // (`write_suspend_sequence`) is deliberately **not** unified with
     // `terminal::write_teardown_sequence`: that helper's unconditional
     // defense-in-depth second pop and its lack of a `Show` write would
     // both change the exact bytes written here, and this function's
@@ -462,5 +497,42 @@ mod tests {
     fn osc52_copy_sequence_wraps_base64_in_the_osc52_escape() {
         let seq = osc52_copy_sequence("foo");
         assert_eq!(seq, "\x1b]52;c;Zm9v\x07");
+    }
+
+    /// crossterm's own escape bytes, confirmed against real `execute!`
+    /// output rather than guessed — same approach as `terminal`'s tests.
+    const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
+    const CLEAR_ALL: &str = "\x1b[2J";
+    const CURSOR_HOME: &str = "\x1b[1;1H";
+
+    fn captured(f: impl FnOnce(&mut Vec<u8>) -> io::Result<()>) -> String {
+        let mut buf = Vec::new();
+        f(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn suspend_sequence_blanks_the_main_screen_after_leaving_the_alternate_one() {
+        let out = captured(|w| write_suspend_sequence(w, true));
+        let leave_pos = out.find(LEAVE_ALT_SCREEN).expect("LeaveAlternateScreen");
+        let clear_pos = out.find(CLEAR_ALL).expect("Clear::All");
+        assert!(
+            leave_pos < clear_pos,
+            "the clear must land on the main screen the leave just restored — \
+             clearing first would only wipe the alternate screen ozzel is \
+             about to abandon: {out:?}"
+        );
+        assert!(out.contains(CURSOR_HOME), "cursor must be homed: {out:?}");
+    }
+
+    #[test]
+    fn suspend_sequence_without_clear_on_suspend_only_leaves_the_alternate_screen() {
+        let out = captured(|w| write_suspend_sequence(w, false));
+        assert!(out.contains(LEAVE_ALT_SCREEN));
+        assert!(
+            !out.contains(CLEAR_ALL),
+            "opting out must leave the restored main screen exactly as it \
+             was: {out:?}"
+        );
     }
 }

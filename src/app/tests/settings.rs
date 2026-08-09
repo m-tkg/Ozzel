@@ -459,3 +459,26 @@ fn settings_toggle_persists_cursor_memory_and_pushes_it_onto_both_panes() {
     // feature running.
     assert!(app.panes.iter().all(|p| !p.cursor_memory_enabled));
 }
+
+#[test]
+fn settings_toggle_persists_clear_on_suspend() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, config_path) = settings_test_app(dir.path());
+    assert!(app.config.clear_on_suspend, "defaults to on");
+
+    let cursor = settings::BEHAVIOR_ITEMS
+        .iter()
+        .position(|item| item.key == "clear_on_suspend")
+        .unwrap();
+    app.mode = Mode::Settings {
+        screen: SettingsScreen::Items {
+            category: Category::Behavior,
+            cursor,
+        },
+    };
+    app.handle_event(AppEvent::Input(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(!app.config.clear_on_suspend, "toggled and reloaded");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(text.contains("clear_on_suspend = false"), "{text}");
+}
