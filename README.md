@@ -6,6 +6,8 @@ English | [日本語](README_ja.md)
 
 ![The two-pane view: git status markers and a branch tag on the left pane, marked files in yellow, the cursor row highlighted, and the log pane below](docs/images/main-view.png)
 
+![A recorded session: moving the cursor, entering `src/` with Enter, marking three files with Space, copying them to the other pane with C, confirming the dialog, and the log pane reporting the result](docs/images/demo-tour.gif)
+
 ## Overview
 
 - Two-pane directory browser (`Tab` to switch panes, `Enter` to open, `Backspace` to go to the parent directory)
@@ -200,6 +202,10 @@ Set `auto_refresh = false` in the config (also on the settings screen) to regist
 
 In filter mode, whatever string you type is used directly as a case-insensitive substring match. Starting with `re:` treats everything after it as a case-sensitive regular expression (e.g., `re:^IMG_[0-9]+\.jpg$`). An invalid regex shows an error message and, without crashing, simply matches nothing.
 
+The three ways of getting around a listing, one after another: `/` filters it down to the matches, `Esc` clears the filter, `\` (the prefix jump described next) moves only the cursor while the list stays whole, and `F` (the command palette) runs an action — here `toggle_hidden` — by name.
+
+![Typing `/re` to filter the listing down to two entries, clearing it with Esc, jumping the cursor to `scripts` with `\sc`, then opening the F command palette, narrowing it to `toggle_hidden`, and running it so the hidden files appear](docs/images/demo-search.gif)
+
 ### Prefix Jump (Forward-Match Incremental Search)
 
 | Key | Action |
@@ -241,6 +247,8 @@ Compression (`p`) is currently zip-only. Extraction with `u` covers every format
 ### Virtual Directory (Browsing Archives Like Directories)
 
 Pressing `Enter`/`o` (`open`) on an archive file with a supported extension lets you browse its contents in place, like a directory, without extracting it. No new keys are added — existing keys work inside the archive too (though their meaning shifts somewhat).
+
+![Pressing Enter on `release-1.4.0.zip` to step inside it, walking down to `release/share/doc` (the pane header showing the archive-internal path), marking both files with Space, and copying just those two out to the other pane, which extracts only them](docs/images/demo-virtual-directory.gif)
 
 Supported formats:
 
@@ -354,6 +362,8 @@ Handy for running an action by name when you don't remember its key binding, or 
 | `S` (Shift+s) | Open the settings screen |
 
 A full-screen settings UI structured like `raspi-config`, with three levels: category → item → edit screen. `Esc` goes back one level at a time; pressing `Esc` at the category list closes the settings screen itself and returns to the filer.
+
+![Opening the settings screen with S, descending category → Colors → directory, picking `magenta` from the color list, and backing out with Esc to find every directory row already drawn in the new color, with `config reloaded` in the log](docs/images/demo-settings.gif)
 
 | Category | Contents |
 | --- | --- |
